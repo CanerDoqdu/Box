@@ -21,12 +21,11 @@ function deriveChecks(exitCode, stdout, stderr) {
     };
   }
 
-  const buildFailed = output.includes("build failed");
-  const testsFailed = output.includes("tests failed") || output.includes("test failed");
   return {
-    buildOk: !buildFailed,
-    testsOk: !testsFailed,
-    lintOk: !output.includes("lint failed")
+    // Non-zero worker exits are treated as failed checks to keep gates deterministic.
+    buildOk: false,
+    testsOk: false,
+    lintOk: false
   };
 }
 
@@ -88,6 +87,7 @@ export async function runWorkerTask(config, task, overrides = {}) {
     "COPILOT_OPUS_ESCALATION_KEYWORDS",
     "-e",
     "COPILOT_PREFERRED_MODELS_BY_TASK_KIND_JSON",
+    "-e",
     "BOX_AUTO_CREATE_PR",
     config.workerImage,
     "node",

@@ -1,8 +1,8 @@
-version: "3.9"
-
 services:
   box:
-    image: node:20-bookworm-slim
+    build:
+      context: .
+      dockerfile: docker/orchestrator/Dockerfile
     working_dir: /workspace
     env_file:
       - .env

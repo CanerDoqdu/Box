@@ -16,7 +16,7 @@
     "autoCreatePr": true
   },
   "planner": {
-    "useClaudeForPlanning": false,
+    "useClaudeForPlanning": true,
     "maxTasks": 5
   },
   "gates": {

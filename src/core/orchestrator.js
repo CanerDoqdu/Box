@@ -112,7 +112,7 @@ async function finalizeTaskResult({ config, task, workerResult, reviewer, claude
       review.approved ? null : `review: ${review.reason}`
     ].filter(Boolean).join(" | ");
 
-    await markTask(config, task.id, "failed", {
+    await markTask(config, task, "failed", {
       failureReason: [
         workerResult.ok ? null : "worker failed",
         gates.ok ? null : gates.failures.join(", "),
@@ -127,7 +127,7 @@ async function finalizeTaskResult({ config, task, workerResult, reviewer, claude
     return;
   }
 
-  await markTask(config, task.id, "passed", { checkpointPath, reviewReason: review.reason });
+  await markTask(config, task, "passed", { checkpointPath, reviewReason: review.reason });
   await updateTaskInTestsState(config, task, "passed", "Task gates passed and review approved");
   await chargeBudget(config, { workerRuns: 1 });
   await appendProgress(config, `Task ${task.id} passed`);

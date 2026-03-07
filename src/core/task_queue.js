@@ -1,5 +1,9 @@
 import { readJson, writeJson } from "./fs_utils.js";
 
+function taskKey(task) {
+  return `${task.id}::${task.kind || "general"}::${task.title}`;
+}
+
 export async function loadQueue(config) {
   return readJson(config.paths.taskFile, {
     createdAt: new Date().toISOString(),
@@ -13,8 +17,10 @@ export async function saveQueue(config, queue) {
 
 export async function enqueueMissingTasks(config, tasks) {
   const queue = await loadQueue(config);
-  const existingIds = new Set(queue.tasks.map((t) => t.id));
-  const incoming = tasks.filter((t) => !existingIds.has(t.id)).map((t) => ({ ...t, status: "queued" }));
+  const existingKeys = new Set(queue.tasks.map((t) => taskKey(t)));
+  const incoming = tasks
+    .filter((t) => !existingKeys.has(taskKey(t)))
+    .map((t) => ({ ...t, status: "queued" }));
   queue.tasks.push(...incoming);
   await saveQueue(config, queue);
   return queue;
@@ -32,9 +38,11 @@ export async function popNextQueuedTask(config) {
   return next;
 }
 
-export async function markTask(config, taskId, status, details = {}) {
+export async function markTask(config, taskRef, status, details = {}) {
   const queue = await loadQueue(config);
-  const task = queue.tasks.find((t) => t.id === taskId);
+  const task = typeof taskRef === "object"
+    ? queue.tasks.find((t) => taskKey(t) === taskKey(taskRef))
+    : queue.tasks.find((t) => t.id === taskRef);
   if (!task) {
     return;
   }
