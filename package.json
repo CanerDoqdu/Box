@@ -5,8 +5,15 @@
   "type": "module",
   "description": "Repo-agnostic autonomous engineering orchestrator starter",
   "scripts": {
+    "lint": "eslint src/",
+    "box:up": "pwsh -NoProfile -File scripts/box-up.ps1",
+    "box:down": "pwsh -NoProfile -File scripts/box-down.ps1",
     "box:start": "node src/cli.js start",
+    "box:stop": "node src/cli.js stop",
+    "box:rebase": "node src/cli.js rebase",
+    "box:park": "node scripts/box_park.mjs",
     "box:once": "node src/cli.js once",
+    "box:dashboard": "node src/dashboard/live_dashboard.js",
     "worker:run": "node src/workers/run_task.js",
     "doctor": "node src/cli.js doctor"
   },
@@ -15,5 +22,10 @@
   },
   "dependencies": {
     "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.0.3",
+    "globals": "^17.4.0"
   }
 }

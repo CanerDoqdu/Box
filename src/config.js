@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-function must(value, key) {
+function must(value, _key) {
   if (!value || !value.trim()) {
     return null;
   }
@@ -20,6 +20,10 @@ export async function loadConfig() {
   const env = {
     claudeApiKey: must(process.env.CLAUDE_API_KEY, "CLAUDE_API_KEY"),
     githubToken: must(process.env.GITHUB_TOKEN, "GITHUB_TOKEN"),
+    // Copilot CLI needs a fine-grained PAT (github_pat_) with Copilot permissions.
+    // Classic PATs (ghp_) are NOT supported by Copilot CLI.
+    // GITHUB_FINEGRADED is the fine-grained PAT with Copilot + Plan read access.
+    copilotGithubToken: must(process.env.COPILOT_GITHUB_TOKEN || process.env.GITHUB_FINEGRADED, "COPILOT_GITHUB_TOKEN"),
     targetRepo: must(process.env.TARGET_REPO, "TARGET_REPO"),
     targetBaseBranch: process.env.TARGET_BASE_BRANCH?.trim() || "main",
     copilotCliCommand: process.env.COPILOT_CLI_COMMAND?.trim() || "copilot",
@@ -32,7 +36,49 @@ export async function loadConfig() {
     copilotMaxMultiplier: process.env.COPILOT_MAX_MULTIPLIER?.trim() || null,
     copilotOpusMinBudgetUsd: process.env.COPILOT_OPUS_MIN_BUDGET_USD?.trim() || null,
     copilotOpusMonthlyMaxCalls: process.env.COPILOT_OPUS_MONTHLY_MAX_CALLS?.trim() || null,
-    autoCreatePr: process.env.BOX_AUTO_CREATE_PR?.trim() || null
+    autoCreatePr: process.env.BOX_AUTO_CREATE_PR?.trim() || null,
+    autoMergeOnGreen: process.env.BOX_AUTO_MERGE_ON_GREEN?.trim() || null,
+    autoMergeWaitSeconds: process.env.BOX_AUTO_MERGE_WAIT_SECONDS?.trim() || null,
+    autoMergePollSeconds: process.env.BOX_AUTO_MERGE_POLL_SECONDS?.trim() || null,
+    autoMergeMethod: process.env.BOX_AUTO_MERGE_METHOD?.trim() || null,
+    requiredCheckRuns: process.env.BOX_REQUIRED_CHECK_RUNS?.trim() || null,
+    requiredStatusContexts: process.env.BOX_REQUIRED_STATUS_CONTEXTS?.trim() || null,
+    copilotAutoCompact: process.env.BOX_COPILOT_AUTO_COMPACT?.trim() || null,
+    copilotRehydrateOnFail: process.env.BOX_COPILOT_REHYDRATE_ON_FAIL?.trim() || null,
+    copilotMaxRetries: process.env.BOX_COPILOT_MAX_RETRIES?.trim() || null,
+    claudeEscalationOnly: process.env.BOX_CLAUDE_ESCALATION_ONLY?.trim() || null,
+    claudeSupervisorOnly: process.env.BOX_CLAUDE_SUPERVISOR_ONLY?.trim() || null,
+    claudeEnabled: process.env.BOX_CLAUDE_ENABLED?.trim() || null,
+    reviewerProvider: process.env.BOX_REVIEWER_PROVIDER?.trim() || null,
+    autonomousMaxAttemptsPerTask: process.env.BOX_AUTONOMOUS_MAX_ATTEMPTS_PER_TASK?.trim() || null,
+    autonomousTaskSplitOnFailure: process.env.BOX_AUTONOMOUS_TASK_SPLIT_ON_FAILURE?.trim() || null,
+    maxQueuedTasks: process.env.BOX_MAX_QUEUED_TASKS?.trim() || null,
+    requireSecurityScan: process.env.BOX_REQUIRE_SECURITY_SCAN?.trim() || null,
+    issueHandoffEnabled: process.env.BOX_ISSUE_HANDOFF_ENABLED?.trim() || null,
+    issueAutoCloseOnRecovery: process.env.BOX_ISSUE_AUTO_CLOSE_ON_RECOVERY?.trim() || null,
+    autonomySupervisorEnabled: process.env.BOX_AUTONOMY_SUPERVISOR_ENABLED?.trim() || null,
+    deepProjectAnalysisEnabled: process.env.BOX_DEEP_PROJECT_ANALYSIS_ENABLED?.trim() || null,
+    runningTaskTimeoutMinutes: process.env.BOX_RUNNING_TASK_TIMEOUT_MINUTES?.trim() || null,
+    blockedTaskRequeueMinutes: process.env.BOX_BLOCKED_TASK_REQUEUE_MINUTES?.trim() || null,
+    semanticFailureWindowMinutes: process.env.BOX_SEMANTIC_FAILURE_WINDOW_MINUTES?.trim() || null,
+    semanticFailureMaxCount: process.env.BOX_SEMANTIC_FAILURE_MAX_COUNT?.trim() || null,
+    strategicLoopMinutes: process.env.BOX_STRATEGIC_LOOP_MINUTES?.trim() || null,
+    maxTacticalCyclesBeforeForceStrategic: process.env.BOX_MAX_TACTICAL_CYCLES_BEFORE_FORCE_STRATEGIC?.trim() || null,
+    blockedTasksForceStrategicThreshold: process.env.BOX_BLOCKED_TASKS_FORCE_STRATEGIC_THRESHOLD?.trim() || null,
+    unresolvedTasksForceStrategicThreshold: process.env.BOX_UNRESOLVED_TASKS_FORCE_STRATEGIC_THRESHOLD?.trim() || null,
+    leadershipBlockedTasksDegradeThreshold: process.env.BOX_LEADERSHIP_BLOCKED_TASKS_DEGRADE_THRESHOLD?.trim() || null,
+    sprintFreezeRatio: process.env.BOX_SPRINT_FREEZE_RATIO?.trim() || null,
+    requireTaskContract: process.env.BOX_REQUIRE_TASK_CONTRACT?.trim() || null,
+    systemGuardianEnabled: process.env.BOX_SYSTEM_GUARDIAN_ENABLED?.trim() || null,
+    systemGuardianCooldownMinutes: process.env.BOX_SYSTEM_GUARDIAN_COOLDOWN_MINUTES?.trim() || null,
+    systemGuardianTrashTaskRatioThreshold: process.env.BOX_SYSTEM_GUARDIAN_TRASH_RATIO_THRESHOLD?.trim() || null,
+    systemGuardianRepeatedFailureThreshold: process.env.BOX_SYSTEM_GUARDIAN_REPEATED_FAILURE_THRESHOLD?.trim() || null,
+    systemGuardianOrphanedCheckpointThreshold: process.env.BOX_SYSTEM_GUARDIAN_ORPHANED_CHECKPOINT_THRESHOLD?.trim() || null,
+    systemGuardianStaleWorkerMinutes: process.env.BOX_SYSTEM_GUARDIAN_STALE_WORKER_MINUTES?.trim() || null,
+    securityFamilyFailureMaxCount: process.env.BOX_SECURITY_FAMILY_FAILURE_MAX_COUNT?.trim() || null,
+    securityFamilyFailureWindowMinutes: process.env.BOX_SECURITY_FAMILY_FAILURE_WINDOW_MINUTES?.trim() || null,
+    securityFamilyCooldownMinutes: process.env.BOX_SECURITY_FAMILY_COOLDOWN_MINUTES?.trim() || null,
+    environmentBlockerCooldownMinutes: process.env.BOX_ENVIRONMENT_BLOCKER_COOLDOWN_MINUTES?.trim() || null
   };
 
   const claude = {
@@ -60,27 +106,258 @@ export async function loadConfig() {
     ...(fileConfig.git ?? {}),
     autoCreatePr: env.autoCreatePr
       ? ["1", "true", "yes", "on"].includes(env.autoCreatePr.toLowerCase())
-      : Boolean(fileConfig?.git?.autoCreatePr ?? true)
+      : Boolean(fileConfig?.git?.autoCreatePr ?? true),
+    autoMergeOnGreen: env.autoMergeOnGreen
+      ? ["1", "true", "yes", "on"].includes(env.autoMergeOnGreen.toLowerCase())
+      : Boolean(fileConfig?.git?.autoMergeOnGreen ?? false),
+    autoMergeWaitSeconds: env.autoMergeWaitSeconds
+      ? Number(env.autoMergeWaitSeconds)
+      : Number(fileConfig?.git?.autoMergeWaitSeconds ?? 300),
+    autoMergePollSeconds: env.autoMergePollSeconds
+      ? Number(env.autoMergePollSeconds)
+      : Number(fileConfig?.git?.autoMergePollSeconds ?? 15),
+    autoMergeMethod: env.autoMergeMethod || fileConfig?.git?.autoMergeMethod || "squash",
+    requiredCheckRuns: env.requiredCheckRuns
+      ? env.requiredCheckRuns.split(",").map((item) => item.trim()).filter(Boolean)
+      : (fileConfig?.git?.requiredCheckRuns ?? []),
+    requiredStatusContexts: env.requiredStatusContexts
+      ? env.requiredStatusContexts.split(",").map((item) => item.trim()).filter(Boolean)
+      : (fileConfig?.git?.requiredStatusContexts ?? [])
   };
+
+  const runtime = {
+    copilotAutoCompact: env.copilotAutoCompact
+      ? ["1", "true", "yes", "on"].includes(env.copilotAutoCompact.toLowerCase())
+      : Boolean(fileConfig?.runtime?.copilotAutoCompact ?? true),
+    copilotRehydrateOnFail: env.copilotRehydrateOnFail
+      ? ["1", "true", "yes", "on"].includes(env.copilotRehydrateOnFail.toLowerCase())
+      : Boolean(fileConfig?.runtime?.copilotRehydrateOnFail ?? true),
+    copilotMaxRetries: env.copilotMaxRetries
+      ? Number(env.copilotMaxRetries)
+      : Number(fileConfig?.runtime?.copilotMaxRetries ?? 2),
+    claudeEscalationOnly: env.claudeEscalationOnly
+      ? ["1", "true", "yes", "on"].includes(env.claudeEscalationOnly.toLowerCase())
+      : Boolean(fileConfig?.runtime?.claudeEscalationOnly ?? false),
+    claudeSupervisorOnly: env.claudeSupervisorOnly
+      ? ["1", "true", "yes", "on"].includes(env.claudeSupervisorOnly.toLowerCase())
+      : Boolean(fileConfig?.runtime?.claudeSupervisorOnly ?? false),
+    claudeEnabled: env.claudeEnabled
+      ? ["1", "true", "yes", "on"].includes(env.claudeEnabled.toLowerCase())
+      : Boolean(fileConfig?.runtime?.claudeEnabled ?? true),
+    reviewerProvider: String(env.reviewerProvider || fileConfig?.runtime?.reviewerProvider || (fileConfig?.runtime?.claudeEnabled === false ? "copilot" : "claude")).trim().toLowerCase(),
+    autonomousMaxAttemptsPerTask: env.autonomousMaxAttemptsPerTask
+      ? Number(env.autonomousMaxAttemptsPerTask)
+      : Number(fileConfig?.runtime?.autonomousMaxAttemptsPerTask ?? 3),
+    autonomousTaskSplitOnFailure: env.autonomousTaskSplitOnFailure
+      ? ["1", "true", "yes", "on"].includes(env.autonomousTaskSplitOnFailure.toLowerCase())
+      : Boolean(fileConfig?.runtime?.autonomousTaskSplitOnFailure ?? true),
+    maxQueuedTasks: env.maxQueuedTasks
+      ? Number(env.maxQueuedTasks)
+      : Number(fileConfig?.runtime?.maxQueuedTasks ?? 30),
+    issueHandoffEnabled: env.issueHandoffEnabled
+      ? ["1", "true", "yes", "on"].includes(env.issueHandoffEnabled.toLowerCase())
+      : Boolean(fileConfig?.runtime?.issueHandoffEnabled ?? true),
+    issueAutoCloseOnRecovery: env.issueAutoCloseOnRecovery
+      ? ["1", "true", "yes", "on"].includes(env.issueAutoCloseOnRecovery.toLowerCase())
+      : Boolean(fileConfig?.runtime?.issueAutoCloseOnRecovery ?? true),
+    autonomySupervisorEnabled: env.autonomySupervisorEnabled
+      ? ["1", "true", "yes", "on"].includes(env.autonomySupervisorEnabled.toLowerCase())
+      : Boolean(fileConfig?.runtime?.autonomySupervisorEnabled ?? true),
+    deepProjectAnalysisEnabled: env.deepProjectAnalysisEnabled
+      ? ["1", "true", "yes", "on"].includes(env.deepProjectAnalysisEnabled.toLowerCase())
+      : Boolean(fileConfig?.runtime?.deepProjectAnalysisEnabled ?? true),
+    runningTaskTimeoutMinutes: env.runningTaskTimeoutMinutes
+      ? Number(env.runningTaskTimeoutMinutes)
+      : Number(fileConfig?.runtime?.runningTaskTimeoutMinutes ?? 30),
+    blockedTaskRequeueMinutes: env.blockedTaskRequeueMinutes
+      ? Number(env.blockedTaskRequeueMinutes)
+      : Number(fileConfig?.runtime?.blockedTaskRequeueMinutes ?? 120),
+    semanticFailureWindowMinutes: env.semanticFailureWindowMinutes
+      ? Number(env.semanticFailureWindowMinutes)
+      : Number(fileConfig?.runtime?.semanticFailureWindowMinutes ?? 180),
+    semanticFailureMaxCount: env.semanticFailureMaxCount
+      ? Number(env.semanticFailureMaxCount)
+      : Number(fileConfig?.runtime?.semanticFailureMaxCount ?? 3),
+    strategicLoopMinutes: env.strategicLoopMinutes
+      ? Number(env.strategicLoopMinutes)
+      : Number(fileConfig?.runtime?.strategicLoopMinutes ?? 45),
+    maxTacticalCyclesBeforeForceStrategic: env.maxTacticalCyclesBeforeForceStrategic
+      ? Number(env.maxTacticalCyclesBeforeForceStrategic)
+      : Number(fileConfig?.runtime?.maxTacticalCyclesBeforeForceStrategic ?? 3),
+    blockedTasksForceStrategicThreshold: env.blockedTasksForceStrategicThreshold
+      ? Number(env.blockedTasksForceStrategicThreshold)
+      : Number(fileConfig?.runtime?.blockedTasksForceStrategicThreshold ?? 8),
+    unresolvedTasksForceStrategicThreshold: env.unresolvedTasksForceStrategicThreshold
+      ? Number(env.unresolvedTasksForceStrategicThreshold)
+      : Number(fileConfig?.runtime?.unresolvedTasksForceStrategicThreshold ?? 12),
+    leadershipBlockedTasksDegradeThreshold: env.leadershipBlockedTasksDegradeThreshold
+      ? Number(env.leadershipBlockedTasksDegradeThreshold)
+      : Number(fileConfig?.runtime?.leadershipBlockedTasksDegradeThreshold ?? 8),
+    sprintFreezeRatio: env.sprintFreezeRatio
+      ? Number(env.sprintFreezeRatio)
+      : Number(fileConfig?.runtime?.sprintFreezeRatio ?? 0.8),
+    requireTaskContract: env.requireTaskContract
+      ? ["1", "true", "yes", "on"].includes(env.requireTaskContract.toLowerCase())
+      : Boolean(fileConfig?.runtime?.requireTaskContract ?? true),
+    securityFamilyFailureMaxCount: env.securityFamilyFailureMaxCount
+      ? Number(env.securityFamilyFailureMaxCount)
+      : Number(fileConfig?.runtime?.securityFamilyFailureMaxCount ?? 3),
+    securityFamilyFailureWindowMinutes: env.securityFamilyFailureWindowMinutes
+      ? Number(env.securityFamilyFailureWindowMinutes)
+      : Number(fileConfig?.runtime?.securityFamilyFailureWindowMinutes ?? 240),
+    securityFamilyCooldownMinutes: env.securityFamilyCooldownMinutes
+      ? Number(env.securityFamilyCooldownMinutes)
+      : Number(fileConfig?.runtime?.securityFamilyCooldownMinutes ?? 240),
+    environmentBlockerCooldownMinutes: env.environmentBlockerCooldownMinutes
+      ? Number(env.environmentBlockerCooldownMinutes)
+      : Number(fileConfig?.runtime?.environmentBlockerCooldownMinutes ?? 180),
+    workerMaxFilesChanged: Number(fileConfig?.runtime?.workerMaxFilesChanged ?? 20),
+    workerForbiddenPathPrefixes: Array.isArray(fileConfig?.runtime?.workerForbiddenPathPrefixes)
+      ? fileConfig.runtime.workerForbiddenPathPrefixes.map((item) => String(item))
+      : []
+  };
+
+  const gates = {
+    ...(fileConfig.gates ?? {}),
+    requireSecurityScan: env.requireSecurityScan
+      ? ["1", "true", "yes", "on"].includes(env.requireSecurityScan.toLowerCase())
+      : Boolean(fileConfig?.gates?.requireSecurityScan ?? true)
+  };
+
+  const derivedRoleModelMap = (() => {
+    const map = {};
+    const workers = fileConfig?.roleRegistry?.workers || {};
+    for (const worker of Object.values(workers)) {
+      const roleName = String(worker?.name || "").trim();
+      const model = String(worker?.model || "").trim();
+      if (roleName && model) {
+        map[roleName] = model;
+      }
+    }
+
+    const leadName = String(fileConfig?.roleRegistry?.leadWorker?.name || "").trim();
+    const leadModel = String(fileConfig?.roleRegistry?.leadWorker?.model || "").trim();
+    if (leadName && leadModel) {
+      map[leadName] = leadModel;
+    }
+
+    return map;
+  })();
+
+  const copilotWithRolePolicy = (() => {
+    const enforceNoClaudeModels = runtime.claudeSupervisorOnly;
+    if (!enforceNoClaudeModels) {
+      return {
+        ...copilot,
+        preferredModelsByRole: {
+            ...derivedRoleModelMap,
+            ...(copilot.preferredModelsByRole || {})
+        }
+      };
+    }
+
+    const nonClaudeAllowed = (copilot.allowedModels || []).filter((model) => !String(model).toLowerCase().includes("claude"));
+    const fallbackDefault = String(copilot.defaultModel || "GPT-5.3-Codex");
+    const defaultIsClaude = fallbackDefault.toLowerCase().includes("claude");
+    const safeDefaultModel = defaultIsClaude ? "GPT-5.3-Codex" : fallbackDefault;
+    const allowedModels = nonClaudeAllowed.length > 0
+      ? nonClaudeAllowed
+      : [safeDefaultModel];
+
+    return {
+      ...copilot,
+      defaultModel: safeDefaultModel,
+      allowedModels,
+      // Supervisor-only mode disables coder-side Opus escalation to keep roles strict and cost predictable.
+      allowOpusEscalation: false,
+      opusModel: safeDefaultModel,
+      preferredModelsByTaskKind: {
+        ...(copilot.preferredModelsByTaskKind || {}),
+        quality: "GPT-5.3-Codex",
+        stability: "GPT-5.3-Codex",
+        production: "GPT-5.3-Codex",
+        refactor: "GPT-5.3-Codex"
+      },
+      preferredModelsByRole: {
+        ...derivedRoleModelMap,
+        ...(copilot.preferredModelsByRole || {})
+      }
+    };
+  })();
+
+  const planner = {
+    ...(fileConfig.planner ?? {}),
+    useClaudeForPlanning: runtime.claudeEnabled
+      ? Boolean(fileConfig?.planner?.useClaudeForPlanning ?? true)
+      : false,
+    useReviewerForPlanning: runtime.reviewerProvider === "copilot"
+      ? Boolean(fileConfig?.planner?.useReviewerForPlanning ?? true)
+      : Boolean(fileConfig?.planner?.useClaudeForPlanning ?? true),
+    maxTasks: Number(fileConfig?.planner?.maxTasks ?? 5)
+  };
+
+  const selfImprovement = {
+    ...(fileConfig.selfImprovement ?? {}),
+    enabled: Boolean(fileConfig?.selfImprovement?.enabled ?? true),
+    maxReports: Number(fileConfig?.selfImprovement?.maxReports ?? 200),
+    maxImprovementTasksPerCycle: Number(fileConfig?.selfImprovement?.maxImprovementTasksPerCycle ?? 3),
+    enforceCoreModuleGuard: Boolean(fileConfig?.selfImprovement?.enforceCoreModuleGuard ?? true),
+    coreProtectedModules: Array.isArray(fileConfig?.selfImprovement?.coreProtectedModules)
+      ? fileConfig.selfImprovement.coreProtectedModules.map((item) => String(item))
+      : [
+          "src/core/orchestrator.js",
+          "src/core/task_queue.js",
+          "src/core/policy_engine.js"
+        ],
+    knowledgeMemoryEnabled: Boolean(fileConfig?.selfImprovement?.knowledgeMemoryEnabled ?? true),
+    experimentEngineEnabled: Boolean(fileConfig?.selfImprovement?.experimentEngineEnabled ?? true)
+  };
+
+  const systemGuardian = {
+    ...(fileConfig.systemGuardian ?? {}),
+    enabled: env.systemGuardianEnabled
+      ? ["1", "true", "yes", "on"].includes(env.systemGuardianEnabled.toLowerCase())
+      : Boolean(fileConfig?.systemGuardian?.enabled ?? true),
+    cooldownMinutes: env.systemGuardianCooldownMinutes
+      ? Number(env.systemGuardianCooldownMinutes)
+      : Number(fileConfig?.systemGuardian?.cooldownMinutes ?? 30),
+    trashTaskRatioThreshold: env.systemGuardianTrashTaskRatioThreshold
+      ? Number(env.systemGuardianTrashTaskRatioThreshold)
+      : Number(fileConfig?.systemGuardian?.trashTaskRatioThreshold ?? 0.35),
+    repeatedFailureThreshold: env.systemGuardianRepeatedFailureThreshold
+      ? Number(env.systemGuardianRepeatedFailureThreshold)
+      : Number(fileConfig?.systemGuardian?.repeatedFailureThreshold ?? 4),
+    orphanedCheckpointThreshold: env.systemGuardianOrphanedCheckpointThreshold
+      ? Number(env.systemGuardianOrphanedCheckpointThreshold)
+      : Number(fileConfig?.systemGuardian?.orphanedCheckpointThreshold ?? 4),
+    staleWorkerMinutes: env.systemGuardianStaleWorkerMinutes
+      ? Number(env.systemGuardianStaleWorkerMinutes)
+      : Number(fileConfig?.systemGuardian?.staleWorkerMinutes ?? 20)
+  };
+
+  // Propagate resolved token into process.env so CopilotReviewer child processes inherit it
+  if (env.copilotGithubToken && !process.env.COPILOT_GITHUB_TOKEN) {
+    process.env.COPILOT_GITHUB_TOKEN = env.copilotGithubToken;
+  }
 
   return {
     rootDir,
     ...fileConfig,
     claude,
-    copilot,
+    copilot: copilotWithRolePolicy,
+    planner,
+    selfImprovement,
+    systemGuardian,
+    gates,
     git,
+    runtime,
     env,
     paths: {
-      taskFile: path.join(rootDir, fileConfig.taskFile),
-      summaryFile: path.join(rootDir, fileConfig.summaryFile),
-      budgetFile: path.join(rootDir, fileConfig.budgetFile),
-      progressFile: path.join(rootDir, fileConfig.progressFile),
-      testsStateFile: path.join(rootDir, fileConfig.testsStateFile),
-      copilotUsageFile: path.join(rootDir, fileConfig.copilotUsageFile),
-      copilotUsageMonthlyFile: path.join(rootDir, fileConfig.copilotUsageMonthlyFile),
-      policyFile: path.join(rootDir, fileConfig.policyFile),
-      workspaceDir: path.join(rootDir, fileConfig.workspaceDir),
-      stateDir: path.join(rootDir, "state")
+      progressFile: path.join(rootDir, fileConfig.progressFile || "state/progress.txt"),
+      policyFile: path.join(rootDir, fileConfig.policyFile || "policy.json"),
+      workspaceDir: path.join(rootDir, fileConfig.workspaceDir || ".box-work"),
+      stateDir: path.join(rootDir, "state"),
+      roadmapFile: path.join(rootDir, "state", "roadmap.json")
     }
   };
 }
