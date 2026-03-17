@@ -14,10 +14,19 @@
 import { existsSync, appendFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { isModelBanned } from "./model_policy.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const AGENTS_DIR = path.join(__dirname, "..", "..", ".github", "agents");
+
+function logBannedModelAttempt(model, reason) {
+  try {
+    const stateDir = path.join(__dirname, "..", "..", "state");
+    const line = `[${new Date().toISOString()}] BANNED_MODEL_BLOCKED: model="${model}" reason="${reason}"\n`;
+    appendFileSync(path.join(stateDir, "progress.txt"), line, "utf8");
+  } catch { /* non-critical */ }
+}
 
 // ── Convert agent name to .agent.md file slug ────────────────────────────────
 // "King David" → "king-david", "Trump" → "trump"
@@ -41,7 +50,7 @@ export function toCopilotModelSlug(name) {
     "claude sonnet 4": "claude-sonnet-4",
     "claude haiku 4.5": "claude-haiku-4.5",
     "claude opus 4.6": "claude-opus-4.6",
-    "claude opus 4.6 fast": "claude-opus-4.6-fast",
+    // claude-opus-4.6-fast is BANNED — 30x rate, never use
     "claude opus 4.5": "claude-opus-4.5",
     "gemini 3 pro preview": "gemini-3-pro-preview",
     "gpt-5.4": "gpt-5.4",
@@ -90,8 +99,16 @@ export function buildAgentArgs({ agentSlug, prompt, model, allowAll = true }) {
     args.push("--agent", agentSlug);
   } else if (model) {
     // No agent file — fall back to explicit model
-    const slug = toCopilotModelSlug(model);
-    if (slug) args.push("--model", slug);
+    const banCheck = isModelBanned(model);
+    if (banCheck.banned) {
+      // HARD BLOCK: never pass a banned model to Copilot CLI
+      const safe = toCopilotModelSlug("Claude Sonnet 4.6");
+      if (safe) args.push("--model", safe);
+      logBannedModelAttempt(model, banCheck.reason);
+    } else {
+      const slug = toCopilotModelSlug(model);
+      if (slug) args.push("--model", slug);
+    }
   }
 
   args.push("-p", String(prompt));

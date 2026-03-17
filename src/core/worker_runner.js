@@ -15,11 +15,38 @@
  */
 
 import path from "node:path";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { spawnAsync } from "./fs_utils.js";
 import { getRoleRegistry } from "./role_registry.js";
 import { appendProgress } from "./state_tracker.js";
 import { buildAgentArgs, nameToSlug } from "./agent_loader.js";
+import { buildVerificationChecklist } from "./verification_profiles.js";
+import { parseVerificationReport, parseResponsiveMatrix } from "./verification_gate.js";
+import { enforceModelPolicy } from "./model_policy.js";
+
+// ── Premium usage tracking ──────────────────────────────────────────────────
+
+function logPremiumUsage(config, roleName, model, taskKind, durationMs) {
+  const logPath = path.join(config.paths?.stateDir || "state", "premium_usage_log.json");
+  let entries = [];
+  try {
+    if (existsSync(logPath)) {
+      entries = JSON.parse(readFileSync(logPath, "utf8"));
+      if (!Array.isArray(entries)) entries = [];
+    }
+  } catch { entries = []; }
+  entries.push({
+    worker: roleName,
+    model,
+    taskKind: taskKind || "general",
+    startedAt: new Date(Date.now() - durationMs).toISOString(),
+    completedAt: new Date().toISOString(),
+    durationMs
+  });
+  // Keep last 500 entries to prevent unbounded growth
+  if (entries.length > 500) entries = entries.slice(-500);
+  try { writeFileSync(logPath, JSON.stringify(entries, null, 2), "utf8"); } catch { /* non-critical */ }
+}
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -42,25 +69,39 @@ function findWorkerByName(config, roleName) {
 // ── Task-aware model resolution ───────────────────────────────────────────────
 // Priority: taskKind → role preference → worker's registered model → default
 
-function resolveModel(config, roleName, taskKind) {
+function resolveModel(config, roleName, taskKind, taskHints = {}) {
+  let candidate;
   // 1. Task-kind override (e.g. "scan" always uses GPT-5.3-Codex)
   if (taskKind) {
     const byKind = config?.copilot?.preferredModelsByTaskKind?.[taskKind];
-    if (Array.isArray(byKind) && byKind.length > 0) return byKind[0];
+    if (Array.isArray(byKind) && byKind.length > 0) candidate = byKind[0];
   }
   // 2. Role-specific preference
-  const byRole = config?.copilot?.preferredModelsByRole?.[roleName];
-  if (Array.isArray(byRole) && byRole.length > 0) return byRole[0];
+  if (!candidate) {
+    const byRole = config?.copilot?.preferredModelsByRole?.[roleName];
+    if (Array.isArray(byRole) && byRole.length > 0) candidate = byRole[0];
+  }
   // 3. Worker's registered static model
-  const workerConfig = findWorkerByName(config, roleName);
-  if (workerConfig?.model) return workerConfig.model;
+  if (!candidate) {
+    const workerConfig = findWorkerByName(config, roleName);
+    if (workerConfig?.model) candidate = workerConfig.model;
+  }
   // 4. System default
-  return config?.copilot?.defaultModel || "Claude Sonnet 4.6";
+  if (!candidate) candidate = config?.copilot?.defaultModel || "Claude Sonnet 4.6";
+
+  // 5. Enforce model policy — ban fast/30x, gate Opus to large tasks
+  const fallback = config?.copilot?.defaultModel || "Claude Sonnet 4.6";
+  const policy = enforceModelPolicy(candidate, taskHints, fallback);
+  if (policy.downgraded) {
+    const logMsg = `[MODEL_POLICY] ${roleName}: ${policy.reason}`;
+    try { appendProgress(config, logMsg); } catch { /* non-critical */ }
+  }
+  return policy.model;
 }
 
 // ── Build conversation-only context (persona is in .agent.md) ───────────────
 
-function buildConversationContext(history, instruction, sessionState = {}, config = {}) {
+function buildConversationContext(history, instruction, sessionState = {}, config = {}, workerKind = null) {
   const parts = [];
 
   // Persistent worker state — always injected first so workers always know where they stand
@@ -121,7 +162,7 @@ function buildConversationContext(history, instruction, sessionState = {}, confi
     parts.push("  4. If after this attempt it still fails, output BOX_STATUS=blocked with:");
     parts.push("     - All approaches you tried");
     parts.push("     - The exact error each time");
-    parts.push("     - Your best guess at why none of them worked");
+    parts.push("     - Evidence-based root cause analysis for why none of them worked");
     parts.push("");
   }
 
@@ -139,6 +180,45 @@ function buildConversationContext(history, instruction, sessionState = {}, confi
   }
 
   parts.push("## NEW INSTRUCTION FROM MOSES");
+  parts.push("Treat Moses's instruction as an execution brief: objective, constraints, and success criteria.");
+  parts.push("You own the method. If a better implementation order or safer approach exists, use it and explain why in your summary.");
+  parts.push("Do not follow literal step ordering if repository reality suggests a stronger senior-level approach.");
+  parts.push("\n## EXECUTION INTEGRITY PROTOCOL");
+  parts.push("1) Verify access before acting. Validate: target repo path, required files, required tools, and required remote/API access.");
+  parts.push("2) Never guess. Do not use assumed/projected facts when evidence is missing. If you need data, fetch it.");
+  parts.push("3) If anything is inaccessible, do not improvise. Report the exact blocker with evidence.");
+  parts.push("4) If you choose an alternative path, include impact analysis: correctness risk, scope impact, rollback, and whether it is a permanent fix or temporary workaround.");
+  parts.push("5) Prefer permanent deterministic fixes over temporary bypasses.");
+  parts.push("6) PR ownership is yours end-to-end: create/update your PR for your task, monitor GitHub checks, fix failures you see, and when checks are green merge it yourself without waiting for Moses approval.");
+  parts.push("7) If checks remain pending, keep watching until green or report the exact failing/pending checks.");
+  parts.push("\n## WORK QUALITY MANDATE");
+  parts.push("Each premium request costs real money. You MUST deliver substantial, production-quality work in this single request.");
+  parts.push("- Write hundreds to thousands of lines of code per task, not 10-line patches.");
+  parts.push("- Complete your ENTIRE assigned task in one shot — do not leave partial work for a follow-up request.");
+  parts.push("- If your task involves multiple files, fix ALL of them before reporting done.");
+  parts.push("- Senior production standard: proper error handling, edge cases, tests where relevant, clean architecture.");
+
+  // Role-based verification — inject requirements specific to this worker's kind
+  if (workerKind) {
+    parts.push("");
+    parts.push(buildVerificationChecklist(workerKind));
+  } else {
+    // Fallback for unknown roles — basic verification
+    parts.push("\n## SELF-VERIFICATION PROTOCOL");
+    parts.push("Before reporting done, verify your work: run build, run tests, check edge cases.");
+    parts.push("Include VERIFICATION_REPORT: BUILD=<pass|fail|n/a>; TESTS=<pass|fail|n/a>; RESPONSIVE=<pass|fail|n/a>; API=<pass|fail|n/a>; EDGE_CASES=<pass|fail|n/a>; SECURITY=<pass|fail|n/a>");
+  }
+
+  parts.push("\n## OUTPUT FORMAT");
+  parts.push("Think deeply and work naturally. Write your full reasoning, analysis, and implementation details.");
+  parts.push("At the END of your response, include these optional machine-readable markers (if applicable):");
+  parts.push("BOX_STATUS=<done|partial|blocked|error>");
+  parts.push("BOX_PR_URL=<url>   (if you created/updated a PR)");
+  parts.push("BOX_BRANCH=<name>  (if you created/switched a branch)");
+  parts.push("BOX_FILES_TOUCHED=<comma-separated list>  (files you edited/created)");
+  parts.push("BOX_ACCESS=repo:<ok|blocked>;files:<ok|blocked>;tools:<ok|blocked>;api:<ok|blocked>  (if you encountered access issues)");
+  parts.push("If BOX_STATUS is omitted, it defaults to done.");
+  parts.push("PR POLICY: If your task changes code, open or update your PR and carry it to merge when checks are green.");
   parts.push(String(instruction.task || ""));
   if (instruction.context) {
     parts.push("");
@@ -177,36 +257,61 @@ function parseWorkerResponse(stdout, stderr) {
     ? filesMatch[1].split(",").map(f => f.trim()).filter(Boolean)
     : [];
 
-  // Summary is the main response text (trim tool output noise)
+  const accessHeaderMatch = combined.match(/BOX_ACCESS=([^\n\r]+)/i);
+  const accessHeader = accessHeaderMatch ? accessHeaderMatch[1].trim() : null;
+  const hasBlockedAccess = accessHeader ? /\bblocked\b/i.test(accessHeader) : false;
+
+  // Guardrail: if access protocol reports blocked but status is not blocked,
+  // force status to blocked so Moses can safely route a deterministic follow-up.
+  let normalizedStatus = ["done", "partial", "blocked", "error"].includes(status) ? status : "done";
+  if (hasBlockedAccess && normalizedStatus !== "blocked") {
+    normalizedStatus = "blocked";
+  }
+
+  // Summary: preserve full natural-language output (no truncation)
   const lines = output.split(/\r?\n/).filter(l => l.trim());
   const meaningfulLines = lines.filter(l =>
     !l.startsWith("●") &&
     !l.startsWith("✓") &&
     !l.startsWith("⏺") &&
     !l.includes("tool_call") &&
-    l.trim().length > 10
+    l.trim().length > 5
   );
-  const summary = meaningfulLines.slice(-10).join(" ").slice(0, 1000) || output.slice(0, 500);
+  const summary = meaningfulLines.join("\n") || output;
+
+  // Extract verification evidence from worker output
+  const verificationReport = parseVerificationReport(output);
+  const responsiveMatrix = parseResponsiveMatrix(output);
 
   return {
-    status: ["done", "partial", "blocked", "error"].includes(status) ? status : "done",
+    status: normalizedStatus,
     prUrl,
     currentBranch,
     filesTouched,
     summary,
-    fullOutput: output.slice(0, 5000)
+    fullOutput: output,
+    verificationReport,
+    responsiveMatrix
   };
 }
 
 // ── Main Worker Conversation ─────────────────────────────────────────────────
 
 export async function runWorkerConversation(config, roleName, instruction, history = [], sessionState = {}) {
-  const model = resolveModel(config, roleName, instruction.taskKind);
+  const model = resolveModel(config, roleName, instruction.taskKind, {
+    estimatedLines: Number(instruction.estimatedLines || 0),
+    estimatedDurationMinutes: Number(instruction.estimatedDurationMinutes || 0),
+    complexity: String(instruction.complexity || instruction.estimatedComplexity || "")
+  });
   const command = config.env?.copilotCliCommand || "copilot";
   const agentSlug = nameToSlug(roleName); // "king-david", "esther", etc.
 
+  // Resolve worker kind for role-based verification
+  const workerConfig = findWorkerByName(config, roleName);
+  const workerKind = workerConfig?.kind || null;
+
   // Build conversation-only context (persona is in the .agent.md file)
-  const conversationContext = buildConversationContext(history, instruction, sessionState, config);
+  const conversationContext = buildConversationContext(history, instruction, sessionState, config, workerKind);
 
   await appendProgress(config, `[WORKER:${roleName}] [${instruction.taskKind || "general"}→${model}] ${truncate(instruction.task, 70)}`);
 
@@ -218,6 +323,11 @@ export async function runWorkerConversation(config, roleName, instruction, histo
   // buildAgentArgs: uses --agent <slug> if .agent.md exists, else --model <fallback>
   const args = buildAgentArgs({ agentSlug, prompt: conversationContext, model });
 
+  // Compute timeout: config.runtime.workerTimeoutMinutes → ms, fallback to spawnAsync default (45min)
+  const workerTimeoutMinutes = Number(config?.runtime?.workerTimeoutMinutes || 0);
+  const workerTimeoutMs = workerTimeoutMinutes > 0 ? workerTimeoutMinutes * 60 * 1000 : undefined;
+
+  const startMs = Date.now();
   const result = await spawnAsync(command, args, {
     env: {
       ...process.env,
@@ -225,14 +335,16 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       GITHUB_TOKEN: config.env?.githubToken || process.env.GITHUB_TOKEN || "",
       TARGET_REPO: config.env?.targetRepo || "",
       TARGET_BASE_BRANCH: config.env?.targetBaseBranch || "main"
-    }
+    },
+    timeoutMs: workerTimeoutMs
   });
 
   const stdout = String(result?.stdout || "");
   const stderr = String(result?.stderr || "");
 
   if (result.status !== 0) {
-    await appendProgress(config, `[WORKER:${roleName}] Error exit=${result.status}`);
+    const label = result.timedOut ? `Timeout` : `Error exit=${result.status}`;
+    await appendProgress(config, `[WORKER:${roleName}] ${label}`);
     const errorMsg = truncate(stderr || stdout || "unknown error", 300);
     updatedHistory.push({
       from: roleName,
@@ -259,6 +371,9 @@ export async function runWorkerConversation(config, roleName, instruction, histo
 
   const parsed = parseWorkerResponse(stdout, stderr);
 
+  // Track premium request usage per worker
+  logPremiumUsage(config, roleName, model, instruction.taskKind, Date.now() - startMs);
+
   await appendProgress(config,
     `[WORKER:${roleName}] Completed status=${parsed.status}${parsed.prUrl ? ` PR=${parsed.prUrl}` : ""}`
   );
@@ -279,6 +394,10 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     prUrl: parsed.prUrl,
     currentBranch: parsed.currentBranch,
     filesTouched: parsed.filesTouched,
-    updatedHistory
+    updatedHistory,
+    workerKind,
+    verificationReport: parsed.verificationReport,
+    responsiveMatrix: parsed.responsiveMatrix,
+    fullOutput: parsed.fullOutput
   };
 }

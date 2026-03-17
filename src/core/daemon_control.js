@@ -3,12 +3,35 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { readJson, writeJson } from "./fs_utils.js";
 
+// ── State files that must be cleared on shutdown (full reset) ────────────────
+const SHUTDOWN_CLEAR_FILES = [
+  "jesus_directive.json",
+  "trump_analysis.json",
+  "trump_dossier.md",
+  "moses_coordination.json",
+  "worker_sessions.json",
+  "jesus_escalation.json",
+  "daemon.pid.json",
+  "daemon.stop.json",
+  "daemon.reload.json",
+  "leadership_live.txt",
+  "leadership_thinking.txt"
+];
+
+// Worker state files pattern
+const WORKER_STATE_PATTERN = /^worker_[a-z_]+\.json$/;
+const DEBUG_WORKER_PATTERN = /^debug_worker_[A-Za-z_]+\.txt$/;
+
 function daemonPidFile(config) {
   return path.join(config.paths.stateDir, "daemon.pid.json");
 }
 
 function daemonStopFile(config) {
   return path.join(config.paths.stateDir, "daemon.stop.json");
+}
+
+function daemonReloadFile(config) {
+  return path.join(config.paths.stateDir, "daemon.reload.json");
 }
 
 export async function readDaemonPid(config) {
@@ -60,6 +83,21 @@ export async function clearStopRequest(config) {
   await fs.rm(daemonStopFile(config), { force: true });
 }
 
+export async function readReloadRequest(config) {
+  return readJson(daemonReloadFile(config), null);
+}
+
+export async function requestDaemonReload(config, reason = "cli-reload") {
+  await writeJson(daemonReloadFile(config), {
+    requestedAt: new Date().toISOString(),
+    reason
+  });
+}
+
+export async function clearReloadRequest(config) {
+  await fs.rm(daemonReloadFile(config), { force: true });
+}
+
 export function isProcessAlive(pid) {
   const n = Number(pid);
   if (!Number.isFinite(n) || n <= 0) {
@@ -99,4 +137,35 @@ export function isDaemonProcess(pid) {
   } catch {
     return false;
   }
+}
+
+/**
+ * Full shutdown — clear all AI state so next start runs a fresh Jesus cycle.
+ * This is the "kapat" command: kills daemon, clears leadership/worker state.
+ * Progress log and premium usage are preserved for audit.
+ */
+export async function clearAllAIState(config) {
+  const stateDir = config.paths?.stateDir || "state";
+  const cleared = [];
+
+  // Remove fixed state files
+  for (const file of SHUTDOWN_CLEAR_FILES) {
+    try {
+      await fs.rm(path.join(stateDir, file), { force: true });
+      cleared.push(file);
+    } catch { /* already gone */ }
+  }
+
+  // Remove per-worker state and debug files
+  try {
+    const entries = await fs.readdir(stateDir);
+    for (const entry of entries) {
+      if (WORKER_STATE_PATTERN.test(entry) || DEBUG_WORKER_PATTERN.test(entry)) {
+        await fs.rm(path.join(stateDir, entry), { force: true });
+        cleared.push(entry);
+      }
+    }
+  } catch { /* state dir may not exist */ }
+
+  return cleared;
 }

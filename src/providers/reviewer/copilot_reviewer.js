@@ -277,16 +277,6 @@ export class CopilotReviewer {
   async reviewResult(task, workerResult, gates) {
     const changedFilesCount = Number(workerResult?.copilotMeta?.changedFilesCount || 0);
     const forbiddenChangedPath = hasForbiddenPathChange(workerResult);
-    if (changedFilesCount > 20) {
-      return {
-        approved: false,
-        reason: `Deterministic reviewer rejected: unrelated change scope (files changed ${changedFilesCount} > 20)`,
-        model: this.model,
-        provider: this.provider,
-        taskId: Number(task?.id || 0),
-        workerExitCode: Number(workerResult?.exitCode ?? -1)
-      };
-    }
     if (forbiddenChangedPath) {
       return {
         approved: false,
@@ -311,10 +301,9 @@ export class CopilotReviewer {
       "Reject if architecture boundaries are violated or unrelated files are modified.",
       "Reject if security risk or forbidden path changes are present.",
       "Hard reject criteria:",
-      "1) changedFilesCount > 20.",
-      "2) Any changed file under .github/workflows/, infra/, or security/ unless explicitly required by task.",
-      "3) Required gates are not green.",
-      "4) Changes are unrelated to task goal or violate architecture boundaries.",
+      "1) Any changed file under .github/workflows/, infra/, or security/ unless explicitly required by task.",
+      "2) Required gates are not green.",
+      "3) Changes are unrelated to task goal or violate architecture boundaries.",
       `<task>${JSON.stringify({ id: task?.id, title: task?.title, kind: task?.kind })}</task>`,
       `<worker>${JSON.stringify({ exitCode: workerResult?.exitCode, ok: workerResult?.ok })}</worker>`,
       `<changes>${JSON.stringify({

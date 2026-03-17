@@ -293,7 +293,12 @@ export async function loadConfig() {
     useReviewerForPlanning: runtime.reviewerProvider === "copilot"
       ? Boolean(fileConfig?.planner?.useReviewerForPlanning ?? true)
       : Boolean(fileConfig?.planner?.useClaudeForPlanning ?? true),
-    maxTasks: Number(fileConfig?.planner?.maxTasks ?? 5)
+    maxTasks: Number(fileConfig?.planner?.maxTasks ?? 5),
+    enforceTrumpExecutionStrategy: Boolean(fileConfig?.planner?.enforceTrumpExecutionStrategy ?? true),
+    defaultMaxWorkersPerWave: Number(fileConfig?.planner?.defaultMaxWorkersPerWave ?? 3),
+    preferFewestWorkers: Boolean(fileConfig?.planner?.preferFewestWorkers ?? true),
+    allowSameCycleFollowUps: Boolean(fileConfig?.planner?.allowSameCycleFollowUps ?? false),
+    requireDependencyAwareWaves: Boolean(fileConfig?.planner?.requireDependencyAwareWaves ?? true)
   };
 
   const selfImprovement = {

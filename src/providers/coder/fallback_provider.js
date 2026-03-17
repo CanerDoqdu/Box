@@ -8,4 +8,5 @@ export async function writeFallbackPatchNote(taskId, taskTitle) {
   ].join("\n");
 
   await fs.writeFile("BOX_FALLBACK_NOTE.md", `${text}\n`, "utf8");
+  console.error(`fallback-provider: copilot CLI not available, task ${taskId} cannot produce real code changes`);
 }

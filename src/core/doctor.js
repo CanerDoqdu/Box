@@ -3,7 +3,7 @@ import { info, warn } from "./logger.js";
 
 function check(command) {
   try {
-    execSync(command, { stdio: "ignore" });
+    execSync(command, { stdio: "ignore", windowsHide: true });
     return true;
   } catch {
     return false;

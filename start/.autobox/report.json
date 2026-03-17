@@ -1,0 +1,89 @@
+{
+  "report": {
+    "projectName": "start",
+    "analyzedAt": "2026-03-10T17:23:14.461Z",
+    "purpose": "General software product with mixed capabilities",
+    "stack": [],
+    "ceiling": {
+      "score": 2.88,
+      "ceiling": "low",
+      "factors": {
+        "fileCount": 12,
+        "dependencyCount": 0,
+        "extensionDiversity": 3,
+        "testSignals": 0
+      }
+    },
+    "metrics": {
+      "fileCount": 12,
+      "docsCount": 6,
+      "testSignals": 0,
+      "topExtensions": [
+        {
+          "ext": ".md",
+          "count": 6
+        },
+        {
+          "ext": ".json",
+          "count": 5
+        },
+        {
+          "ext": ".example",
+          "count": 1
+        }
+      ]
+    }
+  },
+  "priorities": [
+    {
+      "key": "reliability",
+      "score": 5
+    },
+    {
+      "key": "security",
+      "score": 4
+    },
+    {
+      "key": "performance",
+      "score": 4
+    },
+    {
+      "key": "architecture",
+      "score": 4
+    },
+    {
+      "key": "testing",
+      "score": 4
+    },
+    {
+      "key": "delivery",
+      "score": 3
+    }
+  ],
+  "verify": null,
+  "generatedAssets": {
+    "generatedDir": "C:\\Users\\caner\\Desktop\\Box\\start\\.autobox\\generated",
+    "files": [
+      "C:\\Users\\caner\\Desktop\\Box\\start\\.autobox\\generated\\prompts\\project.prompt.md",
+      "C:\\Users\\caner\\Desktop\\Box\\start\\.autobox\\generated\\agents\\project.agent.md",
+      "C:\\Users\\caner\\Desktop\\Box\\start\\.autobox\\generated\\instructions\\runtime.instructions.md"
+    ]
+  },
+  "placeholders": {
+    "count": 0,
+    "keys": []
+  },
+  "autopilot": null,
+  "bootstrap": null,
+  "copilotPack": null,
+  "aiExecution": null,
+  "modernization": {
+    "totalOutdated": 0,
+    "safeCount": 0,
+    "majorCount": 0,
+    "selectedMajor": [],
+    "safeCandidates": []
+  },
+  "adaptivePack": null,
+  "generatedAt": "2026-03-10T17:23:14.468Z"
+}

@@ -26,12 +26,34 @@ export function spawnAsync(command, args, options) {
     const stderrChunks = [];
     const child = spawn(command, args, {
       env: options.env,
+      cwd: options.cwd,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"]
     });
-    child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
+    child.stdout.on("data", (chunk) => {
+      stdoutChunks.push(chunk);
+      if (options.onStdout) options.onStdout(chunk);
+    });
     child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
+
+    let settled = false;
+    const timeoutMs = options.timeoutMs ?? 45 * 60 * 1000; // 45-minute default
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      resolve({
+        status: -1,
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        stderr: `[BOX] Process killed after ${timeoutMs / 1000}s timeout`,
+        timedOut: true
+      });
+    }, timeoutMs);
+
     child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       resolve({
         status: code ?? 1,
         stdout: Buffer.concat(stdoutChunks).toString("utf8"),
@@ -39,6 +61,9 @@ export function spawnAsync(command, args, options) {
       });
     });
     child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       resolve({ status: 1, stdout: "", stderr: String(err.message) });
     });
   });

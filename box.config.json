@@ -1,32 +1,155 @@
 {
   "loopIntervalMs": 20000,
-  "maxParallelWorkers": 2,
+  "maxParallelWorkers": 10,
   "defaultBranchPrefix": "box/task-",
   "workerImage": "box-worker:local",
   "workspaceDir": ".box-work",
-  "taskFile": "state/tasks.json",
-  "summaryFile": "state/project_summary.json",
-  "budgetFile": "state/budget.json",
   "progressFile": "state/progress.txt",
-  "testsStateFile": "state/tests.json",
-  "copilotUsageFile": "state/copilot_usage.json",
-  "copilotUsageMonthlyFile": "state/copilot_usage_monthly.json",
   "policyFile": "policy.json",
   "git": {
-    "autoCreatePr": true
+    "autoCreatePr": true,
+    "autoMergeOnGreen": false,
+    "autoMergeWaitSeconds": 300,
+    "autoMergePollSeconds": 15,
+    "autoMergeMethod": "squash",
+    "requiredCheckRuns": [],
+    "requiredStatusContexts": []
+  },
+  "runtime": {
+    "claudeEnabled": false,
+    "reviewerProvider": "none",
+    "copilotAutoCompact": true,
+    "copilotRehydrateOnFail": true,
+    "copilotMaxRetries": 2,
+    "claudeEscalationOnly": false,
+    "claudeSupervisorOnly": false,
+    "autonomousMaxAttemptsPerTask": 3,
+    "autonomousTaskSplitOnFailure": true,
+    "maxQueuedTasks": 30,
+    "runningTaskTimeoutMinutes": 0,
+    "workerTimeoutMinutes": 45,
+    "blockedTaskRequeueMinutes": 120,
+    "semanticFailureWindowMinutes": 180,
+    "semanticFailureMaxCount": 3,
+    "securityFamilyFailureMaxCount": 3,
+    "securityFamilyFailureWindowMinutes": 240,
+    "securityFamilyCooldownMinutes": 240,
+    "environmentBlockerCooldownMinutes": 180,
+    "strategicLoopMinutes": 10,
+    "leadershipBootstrapCooldownMinutes": 5,
+    "sprintFreezeRatio": 0.8,
+    "requireTaskContract": true,
+    "autonomySupervisorEnabled": true,
+    "deepProjectAnalysisEnabled": true,
+    "issueHandoffEnabled": true,
+    "issueAutoCloseOnRecovery": true,
+    "workerMaxFilesChanged": 0,
+    "workerForbiddenPathPrefixes": [
+      ".next/",
+      "node_modules/",
+      ".github/workflows/",
+      "infra/",
+      "security/"
+    ],
+    "plannerMaxGenerations": 3,
+    "maxTacticalCycles": 6,
+    "maxDescendantDepth": 3,
+    "maxSplitCountPerLineage": 10,
+    "semanticSimilarityThreshold": 0.92,
+    "contextRevisionRequiredForSameFailureRetry": true,
+    "staleIssueMaxAgeHours": 24,
+    "staleIssueCloseGraceHours": 2,
+    "runtimeBudget": {
+      "maxTasksPerCycle": 12,
+      "maxWorkerSpawnsPerCycle": 12,
+      "maxSplitsPerCycle": 8
+    }
+  },
+  "roadmap": {
+    "strategy": "roadmap-first",
+    "maxParallelDomainWorkers": 5
+  },
+  "escalationPolicy": {
+    "userAlertRetryThreshold": 3
+  },
+  "roleRegistry": {
+    "ceoSupervisor": {
+      "id": "ceo-supervisor",
+      "name": "Jesus",
+      "model": "Claude Sonnet 4.6",
+      "provider": "copilot"
+    },
+    "deepPlanner": {
+      "id": "deep-planner",
+      "name": "Trump",
+      "model": "GPT-5.3-Codex",
+      "provider": "copilot"
+    },
+    "leadWorker": {
+      "id": "lead-worker",
+      "name": "Moses",
+      "model": "Claude Sonnet 4.6",
+      "provider": "copilot"
+    },
+    "workers": {
+      "backend": { "id": "worker-backend", "name": "King David", "model": "Claude Sonnet 4.6" },
+      "frontend": { "id": "worker-frontend", "name": "Esther", "model": "GPT-5.3-Codex" },
+      "api": { "id": "worker-api", "name": "Aaron", "model": "Claude Sonnet 4.6" },
+      "integration": { "id": "worker-integration", "name": "Joseph", "model": "Claude Sonnet 4.6" },
+      "test": { "id": "worker-test", "name": "Samuel", "model": "GPT-5.3-Codex" },
+      "qa": { "id": "worker-qa", "name": "Isaiah", "model": "GPT-5.3-Codex" },
+      "devops": { "id": "worker-devops", "name": "Noah", "model": "Claude Sonnet 4.6" },
+      "security": { "id": "worker-security", "name": "Elijah", "model": "Claude Sonnet 4.6" },
+      "scanA": { "id": "worker-scan-a", "name": "Issachar", "model": "Claude Sonnet 4.6" },
+      "scanB": { "id": "worker-scan-b", "name": "Ezra", "model": "Claude Sonnet 4.6" }
+    }
   },
   "planner": {
-    "useClaudeForPlanning": true,
-    "maxTasks": 5
+    "useClaudeForPlanning": false,
+    "useReviewerForPlanning": true,
+    "maxTasks": 5,
+    "enforceTrumpExecutionStrategy": true,
+    "defaultMaxWorkersPerWave": 10,
+    "preferFewestWorkers": true,
+    "allowSameCycleFollowUps": false,
+    "requireDependencyAwareWaves": true
+  },
+  "selfImprovement": {
+    "enabled": true,
+    "maxReports": 200,
+    "maxImprovementTasksPerCycle": 3,
+    "enforceCoreModuleGuard": true,
+    "coreProtectedModules": [
+      "src/core/orchestrator.js",
+      "src/core/task_queue.js",
+      "src/core/policy_engine.js"
+    ],
+    "knowledgeMemoryEnabled": true,
+    "experimentEngineEnabled": true
+  },
+  "systemGuardian": {
+    "enabled": true,
+    "cooldownMinutes": 30,
+    "trashTaskRatioThreshold": 0.35,
+    "repeatedFailureThreshold": 4,
+    "orphanedCheckpointThreshold": 4,
+    "staleWorkerMinutes": 20
   },
   "gates": {
     "requireBuild": true,
     "requireTests": true,
     "requireLint": false,
+    "requireSecurityScan": true,
     "minCoveragePercent": 80
   },
   "claude": {
     "model": "claude-sonnet-4-6",
+    "pricing": {
+      "inputUsdPerMToken": 3,
+      "outputUsdPerMToken": 15,
+      "cacheReadUsdPerMToken": 0.3,
+      "cacheCreationUsdPerMToken": 3.75
+    },
     "reviewMaxRetries": 2,
     "reviewMaxTokens": 800,
     "planMaxTokens": 1400,
@@ -37,14 +160,38 @@
   },
   "copilot": {
     "strategy": "task-best",
-    "defaultModel": "Claude Sonnet 4.5",
+    "defaultModel": "Claude Sonnet 4.6",
     "preferredModelsByTaskKind": {
-      "quality": "Claude Sonnet 4.5",
-      "stability": "GPT-5.3-Codex",
-      "production": "GPT-5.2-Codex",
-      "refactor": "GPT-5.2-Codex"
+      "scan": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
+      "analysis": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
+      "planning": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
+      "implementation": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
+      "test": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
+      "qa": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
+      "security": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
+      "devops": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
+      "refactor": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
+      "quality": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
+      "stability": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
+      "production": ["Claude Sonnet 4.6", "GPT-5.3-Codex"]
     },
-    "opusModel": "Claude Opus 4.6",
+    "preferredModelsByRole": {
+      "Trump": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
+      "Moses": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
+      "Jesus": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
+      "King David": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
+      "Esther": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
+      "Aaron": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
+      "Joseph": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
+      "Samuel": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
+      "Isaiah": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
+      "Noah": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
+      "Elijah": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
+      "Issachar": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
+      "Ezra": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
+      "Moses": ["Claude Sonnet 4.6", "GPT-5.3-Codex"]
+    },
+    "opusModel": "Claude Sonnet 4.6",
     "allowOpusEscalation": false,
     "opusEscalationKeywords": [
       "critical",
@@ -54,13 +201,31 @@
       "severe"
     ],
     "neverUseModels": [
-      "Claude Opus 4.6 (fast mode) (preview)"
+      "Claude Opus 4.6 (fast mode) (preview)",
+      "Claude Opus 4.6 Fast",
+      "claude-opus-4.6-fast",
+      "Claude Opus 4.5 Fast",
+      "claude-opus-4.5-fast"
     ],
+    "bannedModelPatterns": [
+      "fast",
+      "preview",
+      "30x"
+    ],
+    "modelPolicy": {
+      "opusAllowedForLargeTasks": true,
+      "opusMinEstimatedLines": 3000,
+      "opusMinDurationMinutes": 120,
+      "opusAllowedComplexities": ["critical", "massive", "high"],
+      "3xRateAllowed": true,
+      "3xRateMinDurationMinutes": 60,
+      "30xRateAllowed": false,
+      "fastModeAllowed": false
+    },
     "allowedModels": [
-      "Claude Sonnet 4.5",
+      "Claude Sonnet 4.6",
       "GPT-5.2-Codex",
-      "GPT-5.3-Codex",
-      "Claude Opus 4.6"
+      "GPT-5.3-Codex"
     ],
     "maxMultiplier": 1,
     "opusMinBudgetUsd": 2,
@@ -70,12 +235,11 @@
       "Claude Sonnet 4.5": 1,
       "Claude Sonnet 4.6": 1,
       "Claude Opus 4.6": 3,
-      "Claude Opus 4.6 (fast mode) (preview)": 30,
       "GPT-5 mini": 0,
       "GPT-4.1": 0,
       "GPT-5.2-Codex": 1,
       "GPT-5.3-Codex": 1,
-      "Grok Code Fast 1": 0.25,
+      "Grok Code Fast 1": 0,
       "Raptor mini": 0
     },
     "taskKindRouting": {
@@ -93,11 +257,31 @@
       },
       "stability": {
         "agent": "box-coder",
-        "promptFile": ".github/prompts/box-plan-and-implement.prompt.md"
+        "promptFile": ".github/prompts/backend-stability.prompt.md"
       },
       "refactor": {
         "agent": "box-coder",
-        "promptFile": ".github/prompts/box-plan-and-implement.prompt.md"
+        "promptFile": ".github/prompts/backend-stability.prompt.md"
+      },
+      "scan": {
+        "agent": "box-coder",
+        "promptFile": ".github/prompts/scan-fix.prompt.md"
+      },
+      "devops": {
+        "agent": "box-coder",
+        "promptFile": ".github/prompts/devops-triage.prompt.md"
+      },
+      "security": {
+        "agent": "box-coder",
+        "promptFile": ".github/prompts/security-fix.prompt.md"
+      },
+      "frontend": {
+        "agent": "box-coder",
+        "promptFile": ".github/prompts/frontend-fix.prompt.md"
+      },
+      "backend": {
+        "agent": "box-coder",
+        "promptFile": ".github/prompts/backend-stability.prompt.md"
       }
     }
   }

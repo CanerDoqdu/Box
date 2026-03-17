@@ -33,7 +33,6 @@ function validatePlan(payload, fallbackTasks) {
   const tasks = safeArray(payload?.tasks)
     .map(sanitizeTask)
     .filter((t) => Number.isFinite(t.id) && t.title.length > 0 && Number.isFinite(t.priority));
-
   return tasks.length > 0 ? { tasks } : { tasks: fallbackTasks };
 }
 
@@ -57,6 +56,98 @@ function validateOpusDecision(payload, fallback) {
   };
 }
 
+function validateAutonomyAudit(payload, fallback) {
+  if (typeof payload?.healthy !== "boolean") {
+    return fallback;
+  }
+  return {
+    healthy: payload.healthy,
+    reason: String(payload?.reason || "autonomy audit completed"),
+    notifyUser: Boolean(payload?.notifyUser)
+  };
+}
+
+function validateProjectAnalysis(payload, fallback) {
+  const frameworks = safeArray(payload?.frameworks).map((item) => String(item).trim()).filter(Boolean);
+  const domains = safeArray(payload?.domains).map((item) => String(item).trim()).filter(Boolean);
+  const criticalPaths = safeArray(payload?.criticalPaths).map((item) => String(item).trim()).filter(Boolean);
+  const objectives = safeArray(payload?.objectives).map((item) => String(item).trim()).filter(Boolean);
+  const risks = safeArray(payload?.risks).map((item) => String(item).trim()).filter(Boolean);
+
+  if (frameworks.length === 0 && domains.length === 0 && criticalPaths.length === 0 && objectives.length === 0) {
+    return fallback;
+  }
+
+  return {
+    frameworks,
+    domains,
+    criticalPaths,
+    objectives,
+    risks
+  };
+}
+
+function validateLoopDecision(payload, fallback) {
+  const mode = String(payload?.mode || "").trim().toLowerCase();
+  if (mode !== "strategic" && mode !== "tactical") {
+    return fallback;
+  }
+  return {
+    mode,
+    reason: String(payload?.reason || fallback.reason || "loop decision completed")
+  };
+}
+
+function validatePlannerTriggerDecision(payload, fallback) {
+  if (typeof payload?.shouldPlan !== "boolean") {
+    return fallback;
+  }
+  return {
+    shouldPlan: payload.shouldPlan,
+    reason: String(payload?.reason || fallback.reason || "planner trigger decision completed")
+  };
+}
+
+function validateFailureChainDecision(payload, fallback) {
+  const action = String(payload?.action || "").trim().toLowerCase();
+  const allowed = new Set(["retry", "split", "park", "escalate_jesus"]);
+  if (!allowed.has(action)) {
+    return fallback;
+  }
+  return {
+    action,
+    reason: String(payload?.reason || fallback.reason || "failure chain decision completed")
+  };
+}
+
+function validateEscalatedFailureResolution(payload, fallback) {
+  const action = String(payload?.action || "").trim().toLowerCase();
+  const allowed = new Set(["retry", "park", "notify_user"]);
+  if (!allowed.has(action)) {
+    return fallback;
+  }
+  return {
+    action,
+    reason: String(payload?.reason || fallback.reason || "escalated failure resolution completed"),
+    notifyUser: Boolean(payload?.notifyUser)
+  };
+}
+
+function validateWaveDistributionDecision(payload, fallback) {
+  const orderedTaskIdsRaw = safeArray(payload?.orderedTaskIds).map((item) => Number(item)).filter((item) => Number.isFinite(item));
+  const deferTaskIdsRaw = safeArray(payload?.deferTaskIds).map((item) => Number(item)).filter((item) => Number.isFinite(item));
+
+  if (orderedTaskIdsRaw.length === 0 && deferTaskIdsRaw.length === 0) {
+    return fallback;
+  }
+
+  return {
+    orderedTaskIds: [...new Set(orderedTaskIdsRaw)],
+    deferTaskIds: [...new Set(deferTaskIdsRaw)],
+    reason: String(payload?.reason || fallback.reason || "wave distribution decision completed")
+  };
+}
+
 function getEvidenceQuotes(workerResult) {
   const lines = [];
   const stdoutLines = String(workerResult?.stdout || "").split(/\r?\n/).filter(Boolean);
@@ -72,6 +163,25 @@ function getEvidenceQuotes(workerResult) {
   return lines;
 }
 
+function summarizeWorkerResult(workerResult) {
+  const stdoutLines = String(workerResult?.stdout || "").split(/\r?\n/).filter(Boolean);
+  const stderrLines = String(workerResult?.stderr || "").split(/\r?\n/).filter(Boolean);
+  const stdoutTail = stdoutLines.slice(-10).join("\n");
+  const stderrTail = stderrLines.slice(-12).join("\n");
+
+  return {
+    ok: Boolean(workerResult?.ok),
+    exitCode: Number(workerResult?.exitCode ?? -1),
+    buildOk: Boolean(workerResult?.buildOk),
+    testsOk: Boolean(workerResult?.testsOk),
+    lintOk: Boolean(workerResult?.lintOk),
+    securityOk: Boolean(workerResult?.securityOk),
+    copilotMeta: workerResult?.copilotMeta || null,
+    stdoutTail,
+    stderrTail
+  };
+}
+
 export class ClaudeReviewer {
   constructor(apiKey, options = {}) {
     this.apiKey = apiKey;
@@ -80,6 +190,36 @@ export class ClaudeReviewer {
     this.reviewMaxTokens = Number(options.reviewMaxTokens || 800);
     this.planMaxTokens = Number(options.planMaxTokens || 1400);
     this.thinking = options.thinking || { type: "adaptive", effort: "medium" };
+    this.pricing = {
+      inputUsdPerMToken: Number(options?.pricing?.inputUsdPerMToken ?? 3),
+      outputUsdPerMToken: Number(options?.pricing?.outputUsdPerMToken ?? 15),
+      cacheReadUsdPerMToken: Number(options?.pricing?.cacheReadUsdPerMToken ?? 0.3),
+      cacheCreationUsdPerMToken: Number(options?.pricing?.cacheCreationUsdPerMToken ?? 3.75)
+    };
+    this.lastUsage = null;
+  }
+
+  estimateUsd(usage) {
+    const perM = (tokens, usdPerMToken) => (Number(tokens || 0) / 1_000_000) * Number(usdPerMToken || 0);
+    const total =
+      perM(usage.inputTokens, this.pricing.inputUsdPerMToken) +
+      perM(usage.outputTokens, this.pricing.outputUsdPerMToken) +
+      perM(usage.cacheReadTokens, this.pricing.cacheReadUsdPerMToken) +
+      perM(usage.cacheCreationTokens, this.pricing.cacheCreationUsdPerMToken);
+
+    return Number(total.toFixed(6));
+  }
+
+  consumeLastUsage(stage = "unknown") {
+    if (!this.lastUsage) {
+      return null;
+    }
+    const usage = {
+      ...this.lastUsage,
+      stage
+    };
+    this.lastUsage = null;
+    return usage;
   }
 
   buildOutputConfig() {
@@ -94,8 +234,11 @@ export class ClaudeReviewer {
 
     for (let attempt = 1; attempt <= this.reviewMaxRetries + 1; attempt += 1) {
       try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 60_000);
         const response = await fetch(API_URL, {
           method: "POST",
+          signal: controller.signal,
           headers: {
             "content-type": "application/json",
             "x-api-key": this.apiKey,
@@ -111,11 +254,24 @@ export class ClaudeReviewer {
         });
 
         if (!response.ok) {
+          clearTimeout(timeoutId);
           const body = await response.text();
           throw new Error(`claude request failed: ${response.status} ${body}`);
         }
 
+        clearTimeout(timeoutId);
         const json = await response.json();
+        const usage = {
+          model: this.model,
+          inputTokens: Number(json?.usage?.input_tokens || 0),
+          outputTokens: Number(json?.usage?.output_tokens || 0),
+          cacheReadTokens: Number(json?.usage?.cache_read_input_tokens || 0),
+          cacheCreationTokens: Number(json?.usage?.cache_creation_input_tokens || 0)
+        };
+        this.lastUsage = {
+          ...usage,
+          estimatedUsd: this.estimateUsd(usage)
+        };
         const text = json?.content?.map((c) => c.text).filter(Boolean).join("\n") || "";
         const parsed = tryExtractJson(text);
         const validated = validator(parsed, fallback);
@@ -193,7 +349,7 @@ export class ClaudeReviewer {
       "</examples>",
       "<context>",
       `<task>${JSON.stringify(task)}</task>`,
-      `<worker_result>${JSON.stringify(workerResult)}</worker_result>`,
+      `<worker_result_summary>${JSON.stringify(summarizeWorkerResult(workerResult))}</worker_result_summary>`,
       `<gates>${JSON.stringify(gates)}</gates>`,
       "<evidence_quotes>",
       ...quotes.map((line) => `<quote>${line}</quote>`),
@@ -242,5 +398,233 @@ export class ClaudeReviewer {
       { allowOpus: false, reason: "fallback no escalation" },
       validateOpusDecision
     );
+  }
+
+  async auditAutonomyHealth(context) {
+    if (!this.apiKey) {
+      return { healthy: true, reason: "claude disabled", notifyUser: false };
+    }
+
+    const prompt = [
+      "<role>You are BOX CEO supervisor validating lead-worker quality and autonomous system health.</role>",
+      "<instructions>",
+      "Return strict JSON only with no markdown.",
+      "Output schema: {\"healthy\":boolean,\"reason\":string,\"notifyUser\":boolean}",
+      "Set notifyUser=true only if autonomous flow is blocked or unsafe.",
+      "Keep reason concise and operational.",
+      "</instructions>",
+      "<context>",
+      `<snapshot>${JSON.stringify(context)}</snapshot>`,
+      "</context>",
+      "<output_requirements>Return only JSON object matching schema.</output_requirements>"
+    ].join("\n");
+
+    return this.requestJson(
+      prompt,
+      400,
+      { healthy: true, reason: "fallback healthy", notifyUser: false },
+      validateAutonomyAudit
+    );
+  }
+
+  async analyzeProjectContext(summary) {
+    if (!this.apiKey) {
+      return {
+        frameworks: [],
+        domains: [],
+        criticalPaths: [],
+        objectives: [],
+        risks: []
+      };
+    }
+
+    const prompt = [
+      "<role>You are BOX team lead performing deep repository analysis before planning.</role>",
+      "<instructions>",
+      "Return strict JSON only with no markdown.",
+      "Output schema: {\"frameworks\":string[],\"domains\":string[],\"criticalPaths\":string[],\"objectives\":string[],\"risks\":string[]}",
+      "Use only evidence in project summary and repository signals.",
+      "criticalPaths should be concrete repository paths.",
+      "objectives should be actionable, short, and implementation-oriented.",
+      "</instructions>",
+      "<context>",
+      `<project_summary>${JSON.stringify(summary)}</project_summary>`,
+      "</context>",
+      "<output_requirements>Return only JSON object matching schema.</output_requirements>"
+    ].join("\n");
+
+    return this.requestJson(
+      prompt,
+      this.planMaxTokens,
+      {
+        frameworks: [],
+        domains: [],
+        criticalPaths: [],
+        objectives: [],
+        risks: []
+      },
+      validateProjectAnalysis
+    );
+  }
+
+  async chooseLoopMode(context) {
+    if (!this.apiKey) {
+      return {
+        mode: context?.strategicDue ? "strategic" : "tactical",
+        reason: "claude disabled"
+      };
+    }
+
+    const fallback = {
+      mode: context?.strategicDue ? "strategic" : "tactical",
+      reason: context?.strategicDue
+        ? "deterministic selector: strategic interval due"
+        : "deterministic selector: active sprint queue"
+    };
+
+    const prompt = [
+      "<role>You are Jesus, deciding BOX loop mode for resilient autonomous continuation.</role>",
+      "<instructions>",
+      "Return strict JSON only with no markdown.",
+      "Output schema: {\"mode\":\"strategic|tactical\",\"reason\":string}",
+      "Choose strategic when backlog quality is degrading, tactical when current sprint execution should continue.",
+      "Prioritize continuity after restarts and avoid unnecessary mode flapping.",
+      "</instructions>",
+      "<context>",
+      `<snapshot>${JSON.stringify(context)}</snapshot>`,
+      "</context>",
+      "<output_requirements>Return only JSON object matching schema.</output_requirements>"
+    ].join("\n");
+
+    return this.requestJson(prompt, 320, fallback, validateLoopDecision);
+  }
+
+  async decidePlannerTrigger(context) {
+    if (!this.apiKey) {
+      return {
+        shouldPlan: Boolean(context?.strategicDue) || Number(context?.queueTotals?.queued || 0) === 0,
+        reason: "claude disabled"
+      };
+    }
+
+    const fallback = {
+      shouldPlan: Boolean(context?.strategicDue) || Number(context?.queueTotals?.queued || 0) === 0,
+      reason: context?.strategicDue
+        ? "deterministic planner trigger: strategic due"
+        : "deterministic planner trigger: queue depleted"
+    };
+
+    const prompt = [
+      "<role>You are Jesus, deciding if Trump planner should run now.</role>",
+      "<instructions>",
+      "Return strict JSON only with no markdown.",
+      "Output schema: {\"shouldPlan\":boolean,\"reason\":string}",
+      "Choose true when strategic refresh is required or tactical queue is not healthy.",
+      "Choose false when current tactical queue should continue without planner churn.",
+      "</instructions>",
+      "<context>",
+      `<snapshot>${JSON.stringify(context)}</snapshot>`,
+      "</context>",
+      "<output_requirements>Return only JSON object matching schema.</output_requirements>"
+    ].join("\n");
+
+    return this.requestJson(prompt, 320, fallback, validatePlannerTriggerDecision);
+  }
+
+  async analyzeTaskFailure(context) {
+    if (!this.apiKey) {
+      return {
+        action: Number(context?.task?.attempt || 1) < Number(context?.maxAttempts || 3) ? "retry" : "split",
+        reason: "claude disabled"
+      };
+    }
+
+    const fallback = {
+      action: Number(context?.task?.attempt || 1) < Number(context?.maxAttempts || 3) ? "retry" : "split",
+      reason: "deterministic fallback: bounded autonomous recovery"
+    };
+
+    const prompt = [
+      "<role>You are Moses, lead worker coordinating incident recovery after a worker failure.</role>",
+      "<instructions>",
+      "Return strict JSON only with no markdown.",
+      "Output schema: {\"action\":\"retry|split|park|escalate_jesus\",\"reason\":string}",
+      "Choose retry for transient issues, split for decomposable complexity, park for cooldown patterns, escalate_jesus when lead-level recovery is exhausted.",
+      "Do not choose actions that violate retry/safety constraints in context.",
+      "</instructions>",
+      "<context>",
+      `<snapshot>${JSON.stringify(context)}</snapshot>`,
+      "</context>",
+      "<output_requirements>Return only JSON object matching schema.</output_requirements>"
+    ].join("\n");
+
+    return this.requestJson(prompt, 360, fallback, validateFailureChainDecision);
+  }
+
+  async resolveEscalatedFailure(context) {
+    if (!this.apiKey) {
+      return {
+        action: context?.environmentBlocked ? "notify_user" : "park",
+        reason: "claude disabled",
+        notifyUser: Boolean(context?.environmentBlocked)
+      };
+    }
+
+    const fallback = {
+      action: context?.environmentBlocked ? "notify_user" : "park",
+      reason: context?.environmentBlocked
+        ? "deterministic fallback: environment blocker requires user visibility"
+        : "deterministic fallback: Jesus parks unresolved incident",
+      notifyUser: Boolean(context?.environmentBlocked)
+    };
+
+    const prompt = [
+      "<role>You are Jesus, final incident supervisor after Moses escalation.</role>",
+      "<instructions>",
+      "Return strict JSON only with no markdown.",
+      "Output schema: {\"action\":\"retry|park|notify_user\",\"reason\":string,\"notifyUser\":boolean}",
+      "Choose notify_user only when autonomous path cannot safely recover.",
+      "Choose retry only if bounded deterministic constraints still permit safe retry.",
+      "</instructions>",
+      "<context>",
+      `<snapshot>${JSON.stringify(context)}</snapshot>`,
+      "</context>",
+      "<output_requirements>Return only JSON object matching schema.</output_requirements>"
+    ].join("\n");
+
+    return this.requestJson(prompt, 360, fallback, validateEscalatedFailureResolution);
+  }
+
+  async decideWaveDistribution(context) {
+    if (!this.apiKey) {
+      return {
+        orderedTaskIds: safeArray(context?.plannedTasks).map((task) => Number(task?.id || 0)).filter((id) => Number.isFinite(id) && id > 0),
+        deferTaskIds: [],
+        reason: "claude disabled"
+      };
+    }
+
+    const fallback = {
+      orderedTaskIds: safeArray(context?.plannedTasks).map((task) => Number(task?.id || 0)).filter((id) => Number.isFinite(id) && id > 0),
+      deferTaskIds: [],
+      reason: "deterministic fallback: priority order and ownership constraints"
+    };
+
+    const prompt = [
+      "<role>You are Moses, distributing Trump planning wave to role workers.</role>",
+      "<instructions>",
+      "Return strict JSON only with no markdown.",
+      "Output schema: {\"orderedTaskIds\":number[],\"deferTaskIds\":number[],\"reason\":string}",
+      "orderedTaskIds and deferTaskIds must contain only IDs present in plannedTasks.",
+      "Use deferTaskIds for tasks blocked by dependency/conflict pressure.",
+      "Never violate deterministic ownership/policy constraints in context.",
+      "</instructions>",
+      "<context>",
+      `<snapshot>${JSON.stringify(context)}</snapshot>`,
+      "</context>",
+      "<output_requirements>Return only JSON object matching schema.</output_requirements>"
+    ].join("\n");
+
+    return this.requestJson(prompt, 360, fallback, validateWaveDistributionDecision);
   }
 }

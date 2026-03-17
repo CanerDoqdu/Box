@@ -59,6 +59,164 @@ const REBASE_STATE = {
   lastOutput: ""
 };
 
+const TRUMP_PLAN_HISTORY = [];
+const TRUMP_PLAN_HISTORY_LIMIT = 24;
+
+function normalizeText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function textLooksRelated(a, b) {
+  const aa = normalizeText(a);
+  const bb = normalizeText(b);
+  if (!aa || !bb) return false;
+  if (aa.includes(bb) || bb.includes(aa)) return true;
+  const aParts = aa.split(" ").filter((p) => p.length > 5);
+  let matches = 0;
+  for (const part of aParts) {
+    if (bb.includes(part)) matches += 1;
+    if (matches >= 2) return true;
+  }
+  return false;
+}
+
+function getLastWorkerMessage(session, roleName) {
+  const history = Array.isArray(session?.history) ? session.history : [];
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const entry = history[i];
+    if (!entry || entry.from === "moses") continue;
+    if (roleName && entry.from && entry.from !== roleName) continue;
+    return entry;
+  }
+  return null;
+}
+
+function computePlanStatus(plan, workerSessions, mosesCoordination) {
+  const role = String(plan?.role || "");
+  const task = String(plan?.task || "");
+  const session = workerSessions?.[role] || {};
+  const sessionStatus = String(session?.status || "idle").toLowerCase();
+  const completedTasks = Array.isArray(mosesCoordination?.completedTasks) ? mosesCoordination.completedTasks : [];
+  const completedHit = completedTasks.some((item) => textLooksRelated(item, task));
+
+  const history = Array.isArray(session?.history) ? session.history : [];
+  let lastWorkerEntry = null;
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const entry = history[i];
+    if (!entry || entry.from === "moses") continue;
+    lastWorkerEntry = entry;
+    break;
+  }
+
+  if (completedHit) return "done";
+  if (sessionStatus === "working" && textLooksRelated(session?.lastTask || "", task)) return "running";
+
+  const lastWorkerStatus = String(lastWorkerEntry?.status || "").toLowerCase();
+  const lastWorkerSummary = String(lastWorkerEntry?.content || "");
+  const benchHint = /benched|not re-dispatched|skipped this cycle/i.test(String(mosesCoordination?.summary || ""));
+  if (benchHint && role && String(mosesCoordination?.summary || "").includes(role)) return "skipped";
+  if (lastWorkerStatus === "done" && textLooksRelated(lastWorkerSummary, task)) return "done";
+  if ((lastWorkerStatus === "blocked" || lastWorkerStatus === "error") && textLooksRelated(lastWorkerSummary, task)) return "skipped";
+  if (sessionStatus === "error" && textLooksRelated(session?.lastTask || "", task)) return "skipped";
+  return "queued";
+}
+
+function buildTrumpPlanBoard(trumpAnalysis, workerSessions, mosesCoordination) {
+  const sessions = workerSessions || {};
+  const coord = mosesCoordination || {};
+
+  const coordMs = coord?.coordinatedAt ? new Date(coord.coordinatedAt).getTime() : Date.now();
+  const cycleItems = Object.entries(sessions)
+    .map(([role, session], index) => {
+      const lastTask = String(session?.lastTask || "").trim();
+      if (!lastTask) return null;
+      const lastActiveMs = session?.lastActiveAt ? new Date(session.lastActiveAt).getTime() : 0;
+      // Keep only recent cycle activity on the front board to avoid showing old finished waves.
+      if (!Number.isFinite(lastActiveMs) || lastActiveMs <= 0) return null;
+      if (Math.abs(coordMs - lastActiveMs) > (180 * 60 * 1000)) return null;
+      const status = String(session?.status || "idle").toLowerCase();
+      let normalized = "queued";
+      if (status === "working") normalized = "running";
+      else if (status === "idle") {
+        const last = getLastWorkerMessage(session, role);
+        const lastStatus = String(last?.status || "").toLowerCase();
+        normalized = lastStatus === "done" ? "done" : "queued";
+      } else if (status === "error" || status === "blocked") normalized = "skipped";
+      return {
+        id: index + 1,
+        role,
+        priority: index + 1,
+        kind: "cycle",
+        task: lastTask,
+        status: normalized
+      };
+    })
+    .filter(Boolean);
+
+  const cycleKey = `cycle:${coord?.coordinatedAt || "none"}:${normalizeText(coord?.summary || "").slice(0, 60)}`;
+  const cycleSnapshot = {
+    key: cycleKey,
+    analyzedAt: coord?.coordinatedAt || null,
+    projectHealth: String(coord?.jesusDecision || "tactical"),
+    summary: String(coord?.summary || "").slice(0, 260),
+    items: cycleItems,
+    source: "moses-cycle",
+    updatedAt: new Date().toISOString()
+  };
+
+  if (cycleItems.length > 0) {
+    const cycleIndex = TRUMP_PLAN_HISTORY.findIndex((entry) => entry.key === cycleKey);
+    if (cycleIndex >= 0) TRUMP_PLAN_HISTORY[cycleIndex] = cycleSnapshot;
+    else TRUMP_PLAN_HISTORY.unshift(cycleSnapshot);
+  }
+
+  const plans = Array.isArray(trumpAnalysis?.plans) ? trumpAnalysis.plans : [];
+  const analyzedAt = trumpAnalysis?.analyzedAt || null;
+  const key = `${analyzedAt || "no-analysis"}|${plans.length}|${plans.map((p) => `${p?.role || "?"}:${normalizeText(p?.task || "")}`).join("||")}`;
+
+  const items = plans.map((plan, index) => ({
+    id: index + 1,
+    role: String(plan?.role || "unknown"),
+    priority: Number(plan?.priority || (index + 1)),
+    kind: String(plan?.kind || "default"),
+    task: String(plan?.task || ""),
+    status: computePlanStatus(plan, workerSessions || {}, mosesCoordination || {})
+  }));
+
+  const existingIndex = TRUMP_PLAN_HISTORY.findIndex((entry) => entry.key === key);
+  const snapshot = {
+    key,
+    analyzedAt,
+    projectHealth: String(trumpAnalysis?.projectHealth || "unknown"),
+    summary: String(trumpAnalysis?.analysis || "").slice(0, 260),
+    items,
+    source: "trump-analysis",
+    updatedAt: new Date().toISOString()
+  };
+
+  if (existingIndex >= 0) {
+    TRUMP_PLAN_HISTORY[existingIndex] = snapshot;
+  } else {
+    TRUMP_PLAN_HISTORY.unshift(snapshot);
+  }
+
+  if (TRUMP_PLAN_HISTORY.length > TRUMP_PLAN_HISTORY_LIMIT) {
+    TRUMP_PLAN_HISTORY.length = TRUMP_PLAN_HISTORY_LIMIT;
+  }
+
+  const activeKey = coord?.hadTrumpPlans === false && cycleItems.length > 0 ? cycleKey : key;
+  const active = TRUMP_PLAN_HISTORY.find((entry) => entry.key === activeKey) || snapshot;
+
+  return {
+    activeKey,
+    active,
+    history: TRUMP_PLAN_HISTORY
+  };
+}
+
 function runRebaseCommand() {
   return new Promise((resolve) => {
     const child = execFile("node", ["src/cli.js", "rebase"], { cwd: ROOT, windowsHide: true }, (error, stdout, stderr) => {
@@ -607,6 +765,107 @@ function deriveProjectLabel(targetRepo, packageName) {
   return String(packageName || "unknown");
 }
 
+function deriveTasks(trumpAnalysis, workerSessions) {
+  const allPlans = Array.isArray(trumpAnalysis?.plans) ? trumpAnalysis.plans : [];
+  // Filter out Issachar/Ezra scan-only tasks (removed from active plan)
+  const plans = allPlans.filter(p => !/^(Issachar|Ezra)/i.test(String(p.role || "")));
+  const sessions = workerSessions || {};
+  const list = plans.map((plan, idx) => {
+    const role = String(plan.role || "unknown");
+    const session = sessions[role] || {};
+    const sessionStatus = String(session.status || "idle").toLowerCase();
+    const lastHistory = Array.isArray(session.history) ? session.history[session.history.length - 1] : null;
+    const lastStatus = String(lastHistory?.status || "").toLowerCase();
+    let status;
+    if (sessionStatus === "working") {
+      // Cross-check: worker may be stuck at "working" if daemon died
+      // If last history entry says "done", treat as passed
+      if (lastStatus === "done") status = "passed";
+      else status = "running";
+    }
+    else if (sessionStatus === "done") status = "passed";
+    else if (sessionStatus === "blocked" || sessionStatus === "error") status = "failed";
+    else {
+      if (lastStatus === "done") status = "passed";
+      else if (lastStatus === "blocked") status = "failed";
+      else status = "queued";
+    }
+    return {
+      id: idx + 1,
+      title: String(plan.task || "").slice(0, 120),
+      status,
+      kind: String(plan.kind || "default"),
+      assignedRole: role,
+      priority: plan.priority || idx + 1,
+      complexity: plan.estimatedComplexity || "medium"
+    };
+  });
+  const totals = { queued: 0, running: 0, passed: 0, failed: 0, other: 0 };
+  for (const t of list) {
+    if (totals[t.status] !== undefined) totals[t.status]++;
+    else totals.other++;
+  }
+  return { total: list.length, totals, list };
+}
+
+function deriveAlerts(alertsData) {
+  const entries = Array.isArray(alertsData?.entries) ? alertsData.entries : [];
+  const recent = entries.slice(-20);
+  return {
+    total: entries.length,
+    list: recent.map(a => ({
+      timestamp: a.timestamp || null,
+      severity: a.severity || "info",
+      title: a.title || "",
+      message: a.message || "",
+      source: a.source || ""
+    }))
+  };
+}
+
+function derivePremiumUsageByWorker(log) {
+  const entries = Array.isArray(log) ? log : (Array.isArray(log?.entries) ? log.entries : []);
+  const byWorker = {};
+  for (const e of entries) {
+    const w = e.worker || "unknown";
+    if (!byWorker[w]) byWorker[w] = { count: 0, totalDurationMs: 0, models: {}, entries: [] };
+    byWorker[w].count++;
+    byWorker[w].totalDurationMs += Number(e.durationMs || 0);
+    const m = e.model || "unknown";
+    byWorker[w].models[m] = (byWorker[w].models[m] || 0) + 1;
+    byWorker[w].entries.push({
+      taskKind: e.taskKind || "",
+      model: m,
+      startedAt: e.startedAt || "",
+      completedAt: e.completedAt || "",
+      durationMs: e.durationMs || 0
+    });
+  }
+  // Keep only last 10 entries per worker for dashboard payload size
+  for (const w of Object.keys(byWorker)) {
+    byWorker[w].entries = byWorker[w].entries.slice(-10);
+  }
+  return { totalRequests: entries.length, byWorker };
+}
+
+function derivePremiumEstimate(trumpAnalysis, usedRequests, quota) {
+  const budget = trumpAnalysis?.requestBudget || {};
+  const estimated = Number(budget.estimatedPremiumRequestsTotal || 0);
+  const confidence = String(budget.confidence || "").trim();
+  const byRole = Array.isArray(budget.byRole) ? budget.byRole : [];
+  const byWave = Array.isArray(budget.byWave) ? budget.byWave : [];
+  return {
+    estimatedTotal: estimated,
+    confidence,
+    used: Number(usedRequests || 0),
+    quota: Number(quota || 0),
+    remaining: Math.max(0, Number(quota || 0) - Number(usedRequests || 0)),
+    afterProject: Math.max(0, Number(quota || 0) - Number(usedRequests || 0) - estimated),
+    byRole,
+    byWave
+  };
+}
+
 async function collectDashboardData() {
   const [
     boxConfig,
@@ -616,7 +875,9 @@ async function collectDashboardData() {
     workerSessions,
     mosesCoordination,
     jesusDirective,
-    trumpAnalysis
+    trumpAnalysis,
+    alertsData,
+    premiumUsageLog
   ] = await Promise.all([
     readJsonSafe(path.join(ROOT, "box.config.json"), {}),
     readTailLines(path.join(STATE_DIR, "progress.txt"), 80),
@@ -625,10 +886,27 @@ async function collectDashboardData() {
     readJsonSafe(path.join(STATE_DIR, "worker_sessions.json"), {}),
     readJsonSafe(path.join(STATE_DIR, "moses_coordination.json"), {}),
     readJsonSafe(path.join(STATE_DIR, "jesus_directive.json"), {}),
-    readJsonSafe(path.join(STATE_DIR, "trump_analysis.json"), {})
+    readJsonSafe(path.join(STATE_DIR, "trump_analysis.json"), {}),
+    readJsonSafe(path.join(STATE_DIR, "alerts.json"), { entries: [] }),
+    readJsonSafe(path.join(STATE_DIR, "premium_usage_log.json"), [])
   ]);
 
   const [daemonStatus, prDeltaResult] = await Promise.all([getDaemonStatus(), getHourlyPrDeltaStats()]);
+
+  // Read last thinking snippet from each worker's debug file
+  const thinkingMap = {};
+  for (const role of Object.keys(workerSessions || {})) {
+    try {
+      const fname = `debug_worker_${role.replace(/\s+/g, "_")}.txt`;
+      const raw = await fs.readFile(path.join(STATE_DIR, fname), "utf8");
+      // Extract text before BOX_STATUS= markers, last 350 chars of meaningful content
+      const beforeStatus = raw.split(/BOX_STATUS=/)[0];
+      const lines = beforeStatus.split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("```") && !l.startsWith("---") && !l.startsWith("##"));
+      const snippet = lines.slice(-5).join(" ").replace(/\s+/g, " ").trim().slice(0, 350);
+      if (snippet) thinkingMap[role] = snippet;
+    } catch { /* file may not exist yet */ }
+  }
+
   const docker = getDockerSummary();
   const currentMonth = getMonthKey();
   const hasPlatformOverride = CLAUDE_PLATFORM_TOTAL_COST_USD !== undefined && CLAUDE_PLATFORM_TOTAL_COST_USD !== null && CLAUDE_PLATFORM_TOTAL_COST_USD !== "";
@@ -653,6 +931,21 @@ async function collectDashboardData() {
     ? apiRemaining
     : Math.max(0, copilotQuota - copilotUsedRequests);
   const copilotUsedPercent = copilotQuota > 0 ? (copilotUsedRequests / copilotQuota) * 100 : 0;
+  const trumpPlanBoard = buildTrumpPlanBoard(trumpAnalysis, workerSessions, mosesCoordination);
+
+  // 3-state system status: offline / idle / working
+  const hasWorkingWorkers = Object.values(workerSessions || {}).some(s => s?.status === "working");
+  let systemStatus, systemStatusText;
+  if (!daemonStatus.running) {
+    systemStatus = "offline";
+    systemStatusText = "System Offline";
+  } else if (hasWorkingWorkers) {
+    systemStatus = "working";
+    systemStatusText = "Workers Active";
+  } else {
+    systemStatus = "idle";
+    systemStatusText = "System Idle";
+  }
 
   return {
     generatedAt: new Date().toISOString(),
@@ -660,8 +953,8 @@ async function collectDashboardData() {
     runtime: {
       targetRepo: TARGET_REPO,
       projectLabel: deriveProjectLabel(TARGET_REPO, ""),
-      systemStatus: daemonStatus.running ? "online" : "offline",
-      systemStatusText: daemonStatus.running ? "All Systems Operational" : "System Offline",
+      systemStatus,
+      systemStatusText,
       daemonPid: daemonStatus.pid,
       roleRegistry: {
         ceo: String(boxConfig?.roleRegistry?.ceoSupervisor?.name || "Jesus"),
@@ -686,11 +979,13 @@ async function collectDashboardData() {
       refreshInSec: oneTimeCost.refreshInSec
     },
     docker,
-    tasks: { total: 0, totals: { queued: 0, running: 0, passed: 0, failed: 0, other: 0 }, list: [] },
+    tasks: deriveTasks(trumpAnalysis, workerSessions),
+    trumpPlanBoard,
     taskInsights: {},
     issues: { total: 0, list: [] },
-    alerts: { total: 0, list: [] },
+    alerts: deriveAlerts(alertsData),
     tests: {},
+    premiumRequestEstimate: derivePremiumEstimate(trumpAnalysis, copilotUsedRequests, copilotQuota),
     usage: {
       copilot: {
         totalEntries: 0,
@@ -719,16 +1014,27 @@ async function collectDashboardData() {
       projectLinesDeleted: (prDeltaResult && prDeltaResult.prCount > 0) ? prDeltaResult.deletions : 0,
       source: (prDeltaResult && prDeltaResult.prCount > 0) ? prDeltaResult.source : "no-data"
     },
+    premiumUsageByWorker: derivePremiumUsageByWorker(premiumUsageLog),
     workerActivity: (function() {
       const sessions = workerSessions || {};
       const cleaned = {};
       for (const [role, s] of Object.entries(sessions)) {
+        // Cross-check: if status is "working" but last non-Moses history says "done",
+        // the worker actually finished — session file is stale
+        let effectiveStatus = s.status || "idle";
+        if (effectiveStatus === "working" && Array.isArray(s.history) && s.history.length > 0) {
+          const lastEntry = s.history.filter(h => h && h.role !== "Moses").pop();
+          if (lastEntry && ["done", "partial", "blocked"].includes(String(lastEntry.status || "").toLowerCase())) {
+            effectiveStatus = "idle";
+          }
+        }
         cleaned[role] = {
           role,
-          status: s.status || "idle",
+          status: effectiveStatus,
           lastTask: s.lastTask || "",
           lastActiveAt: s.lastActiveAt || null,
-          historyLength: Array.isArray(s.history) ? s.history.length : 0
+          historyLength: Array.isArray(s.history) ? s.history.length : 0,
+          lastThinking: thinkingMap[role] || ""
         };
       }
       return cleaned;
@@ -880,6 +1186,24 @@ function renderHtml() {
     .hero-live.is-workers-active::after {
       background: #ffd95c;
       box-shadow: 0 0 0 0 rgba(255, 220, 100, 0.8);
+    }
+    .hero-live.is-idle {
+      color: #d3ecff;
+      border: 1px solid rgba(80, 160, 220, 0.65);
+      background:
+        linear-gradient(115deg, rgba(10, 50, 90, 0.9), rgba(20, 90, 150, 0.78)),
+        radial-gradient(120% 180% at 15% 20%, rgba(130, 200, 255, 0.35), transparent 55%);
+      box-shadow:
+        inset 0 1px 0 rgba(180, 220, 255, 0.34),
+        inset 0 -8px 14px rgba(0, 0, 0, 0.28),
+        0 10px 18px rgba(10, 60, 110, 0.34);
+    }
+    .hero-live.is-idle::before {
+      background: linear-gradient(90deg, rgba(80, 160, 220, 0.02), rgba(140, 210, 255, 0.4), rgba(80, 160, 220, 0.02));
+    }
+    .hero-live.is-idle::after {
+      background: #7dc4ff;
+      box-shadow: 0 0 0 0 rgba(125, 196, 255, 0.8);
     }
     .hero-live span {
       position: relative;
@@ -1058,6 +1382,41 @@ function renderHtml() {
     .worker-chip.green { background: rgba(124, 214, 178, 0.26); border-color: rgba(64, 177, 133, 0.38); }
     .worker-chip.yellow { background: rgba(255, 205, 118, 0.24); border-color: rgba(224, 163, 58, 0.38); }
     .worker-chip.red { background: rgba(255, 182, 167, 0.30); border-color: rgba(219, 114, 96, 0.38); }
+    .trump-tabs { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); }
+    .trump-tab {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(222, 237, 247, 0.82);
+      color: var(--ink);
+      padding: 5px 10px;
+      font-size: 11px;
+      font-family: "IBM Plex Mono", Consolas, monospace;
+      cursor: pointer;
+      transition: transform 140ms ease, background 140ms ease;
+    }
+    .trump-tab:hover { transform: translateY(-1px); background: rgba(212, 228, 241, 0.96); }
+    .trump-tab.active { border-color: rgba(212, 160, 23, 0.65); background: rgba(212, 160, 23, 0.2); }
+    .trump-plan-list { display: grid; gap: 8px; padding: 10px; }
+    .trump-plan-item {
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: rgba(226, 239, 248, 0.72);
+      padding: 8px 10px;
+    }
+    .trump-plan-item.green { border-left: 4px solid #38b977; background: rgba(203, 241, 222, 0.7); }
+    .trump-plan-item.red { border-left: 4px solid #db6a63; background: rgba(249, 217, 214, 0.72); }
+    .trump-plan-item.neutral { border-left: 4px solid #c8a648; background: rgba(243, 232, 201, 0.62); }
+    .trump-plan-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      font-family: "IBM Plex Mono", Consolas, monospace;
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 5px;
+    }
+    .trump-plan-task { font-size: 13px; color: var(--ink); line-height: 1.3; }
     /* ── Leadership Flow Panel ─────────────────────────────────────── */
     .lf-panel { margin-bottom: 12px; }
     .lf-row {
@@ -1118,8 +1477,42 @@ function renderHtml() {
     .ws-badge.error   { background: rgba(219,114,96,0.22); color: #8a3b30; border: 1px solid rgba(219,114,96,0.4); }
     .ws-badge.done    { background: rgba(64,177,133,0.22); color: #1e6a4f; border: 1px solid rgba(64,177,133,0.38); }
     @keyframes wsPulse { 0%, 100% { opacity: 0.7; } 50% { opacity: 1; } }
+    @keyframes celebrationPulse {
+      0% { transform: scale(0.95); opacity: 0; }
+      30% { transform: scale(1.02); opacity: 1; }
+      60% { transform: scale(0.99); }
+      100% { transform: scale(1); opacity: 1; }
+    }
+    @keyframes particleFade {
+      0% { opacity: 0; transform: translateY(0) scale(0.5); }
+      40% { opacity: 1; transform: translateY(-20px) scale(1.2); }
+      100% { opacity: 0; transform: translateY(-60px) scale(0.3); }
+    }
     .ws-task { font-size: 11px; font-family: "IBM Plex Mono", Consolas, monospace; color: var(--muted); margin-top: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .ws-time { font-size: 10px; color: var(--muted); margin-top: 3px; font-family: "IBM Plex Mono", Consolas, monospace; }
+    .ws-details { margin-top: 5px; }
+    .ws-details > summary {
+      list-style: none; cursor: pointer; font-size: 11px;
+      color: var(--muted); opacity: 0.75; transition: opacity 0.15s;
+      display: flex; align-items: center; gap: 3px; user-select: none;
+    }
+    .ws-details > summary::-webkit-details-marker { display: none; }
+    .ws-details > summary:hover { opacity: 1; }
+    .ws-details .chevron { display: inline-block; transition: transform 0.2s; font-size: 10px; }
+    .ws-details[open] .chevron { transform: rotate(180deg); }
+    .ws-think {
+      margin-top: 6px; padding: 7px 8px;
+      background: rgba(0,0,0,0.06); border-radius: 6px;
+      font-size: 10.5px; font-family: "IBM Plex Mono", Consolas, monospace;
+      color: var(--ink); line-height: 1.5; white-space: pre-wrap; word-break: break-word;
+    }
+    .freshness-badge {
+      display: inline-block; font-size: 9px; font-family: "IBM Plex Mono", Consolas, monospace;
+      padding: 1px 6px; border-radius: 999px; font-weight: 700; margin-left: 6px; vertical-align: middle;
+    }
+    .freshness-badge.fresh  { background: rgba(64,177,133,0.2); color: #1e6a4f; border: 1px solid rgba(64,177,133,0.35); }
+    .freshness-badge.warm   { background: rgba(210,165,40,0.2);  color: #7a5a00; border: 1px solid rgba(210,165,40,0.35); }
+    .freshness-badge.stale  { background: rgba(219,114,96,0.2);  color: #8a3b30; border: 1px solid rgba(219,114,96,0.35); }
     .details-panel > summary {
       list-style: none;
       cursor: pointer;
@@ -1143,12 +1536,23 @@ function renderHtml() {
       <p id="meta">Connecting...</p>
     </section>
 
+    <!-- Celebration Banner (hidden until all tasks pass) -->
+    <section id="celebration-banner" style="display:none;text-align:center;padding:32px 20px;margin-bottom:16px;border-radius:12px;background:linear-gradient(135deg,#0a2a1a 0%,#0d3320 40%,#1a4a2e 100%);border:2px solid #00ff88;position:relative;overflow:hidden">
+      <div id="celebration-particles" style="position:absolute;inset:0;pointer-events:none;overflow:hidden"></div>
+      <div style="position:relative;z-index:1">
+        <div style="font-size:48px;margin-bottom:8px" id="celebration-emoji">🎉</div>
+        <h2 style="font-size:28px;font-weight:800;color:#00ff88;margin:0 0 8px 0;letter-spacing:1px" id="celebration-title">TARGET REPO READY</h2>
+        <p style="font-size:16px;color:#b0ffd0;margin:0 0 4px 0" id="celebration-repo">—</p>
+        <p style="font-size:13px;color:#7ac9a0;margin:0" id="celebration-detail">All tasks completed successfully</p>
+      </div>
+    </section>
+
     <section class="grid">
       <article class="card"><div class="k">Project</div><div class="v" id="m-project">-</div><div class="sub" id="m-role-head">CEO: - | Lead: -</div></article>
-      <article class="card"><div class="k">Tasks Total</div><div class="v" id="m-tasks">0</div></article>
-      <article class="card"><div class="k">Queued / Running</div><div class="v" id="m-qr">0 / 0</div></article>
+      <article class="card"><div class="k">Tasks Total</div><div class="v" id="m-tasks">0</div><div class="sub" id="m-tasks-sub">queued: 0 | running: 0</div></article>
+      <article class="card"><div class="k">Workers Active</div><div class="v" id="m-qr">0 / 0</div><div class="sub" id="m-qr-sub">working / total</div></article>
       <article class="card"><div class="k">Passed / Failed</div><div class="v" id="m-pf">0 / 0</div></article>
-      <article class="card"><div class="k">Docker Running</div><div class="v" id="m-docker">0</div></article>
+      <article class="card"><div class="k">Premium Req. Estimate</div><div class="v" id="m-premium">-</div><div class="sub" id="m-premium-sub">for current project</div></article>
       <article class="card"><div class="k">Copilot Quota Left</div><div class="v" id="m-copilot">0</div><div class="sub" id="m-copilot-sub">used: 0%</div></article>
       <article class="card"><div class="k">Code Delta (Project)</div><div class="v" id="m-delta">+0 / -0</div><div class="sub" id="m-delta-sub">from worker runs</div></article>
       <article class="card">
@@ -1159,7 +1563,7 @@ function renderHtml() {
           <div class="legend" id="status-legend"></div>
         </div>
       </article>
-      <article class="card"><div class="k">SystemGuardianAI</div><div class="v" id="m-guardian">idle</div><div class="sub" id="m-guardian-sub">last: -</div></article>
+      <article class="card"><div class="k">Alerts</div><div class="v" id="m-alerts">0</div><div class="sub" id="m-alerts-sub">no alerts</div></article>
     </section>
 
     <!-- Leadership Flow: Jesus → Moses -->
@@ -1196,6 +1600,25 @@ function renderHtml() {
       <h2>Workers — Live Status</h2>
       <div class="worker-grid" id="worker-grid">
         <div class="muted" style="padding:6px">No worker data yet</div>
+      </div>
+    </section>
+
+    <section class="panel" style="margin-bottom:12px">
+      <h2>Trump Plan Board — Live + History</h2>
+      <div id="trump-plan-meta" class="muted" style="padding:0 10px 8px 10px">Awaiting Trump plan snapshots...</div>
+      <div id="trump-plan-tabs" class="trump-tabs"></div>
+      <div id="trump-plan-list" class="trump-plan-list">
+        <div class="muted">No plans yet</div>
+      </div>
+    </section>
+
+    <!-- Premium Usage by Worker -->
+    <section class="panel" style="margin-bottom:12px">
+      <h2>💎 Premium Request Usage — Per Worker (Live)</h2>
+      <div id="premium-usage-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px;margin-top:8px">
+        <div class="muted" style="padding:6px">No premium usage data yet</div>
+      </div>
+      <div id="premium-usage-timeline" style="margin-top:12px;max-height:200px;overflow-y:auto;font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--muted)">
       </div>
     </section>
 
@@ -1241,6 +1664,7 @@ function renderHtml() {
           <h2 class="chain-title" style="color:#b8860b">Trump (Deep Planner)</h2>
           <div class="chain-body">
             <div id="trump-health">Not yet analyzed</div>
+            <div id="trump-requests" style="margin-top:4px;font-size:11px;color:var(--muted);font-family:'IBM Plex Mono',monospace">Estimated Premium Requests: awaiting...</div>
             <details style="margin-top:6px">
               <summary style="cursor:pointer;font-size:11px;color:var(--muted);font-family:'IBM Plex Mono',monospace">Full Analysis ▾</summary>
               <div id="trump-analysis" style="margin-top:4px;font-size:11px;font-family:'IBM Plex Mono',monospace;white-space:pre-wrap;color:#2a2a0e;background:rgba(212,160,23,0.12);border-radius:6px;padding:6px;max-height:200px;overflow-y:auto">Awaiting Trump deep analysis...</div>
@@ -1350,6 +1774,9 @@ function renderHtml() {
     let latestState = null;
     let selectedTaskId = null;
     let showAllCalls = false;
+    let selectedTrumpPlanKey = null;
+    let trumpPlanUserSelected = false;
+    let trumpPlanFingerprint = '';
 
     function esc(v) {
       var value = (v === null || v === undefined) ? "" : v;
@@ -1496,20 +1923,20 @@ function renderHtml() {
         var phase = String(w.phase || "idle").toLowerCase();
         var phaseClass = "phase-" + phase.replace(/[^a-z0-9-]/g, "-");
         var isRunning = ["preparing", "routing", "model-selection", "coding", "reviewing"].includes(phase);
-        var statusLabel = isRunning ? "Calisiyor" : "Idle";
-        var taskLine = taskId ? ("Task #" + esc(taskId) + ": " + esc(w.taskTitle || "-")) : "Task atanmamis";
+        var statusLabel = isRunning ? "Working" : "Idle";
+        var taskLine = taskId ? ("Task #" + esc(taskId) + ": " + esc(w.taskTitle || "-")) : "No task assigned";
         var linesAdded = Number(insight.linesAdded || 0);
         var linesDeleted = Number(insight.linesDeleted || 0);
         var logPreview = String(insight.liveLogTail || insight.responsePreview || "").trim();
         if (!logPreview || logPreview === "-") {
-          logPreview = String(w.phaseDetail || "Log bekleniyor...");
+          logPreview = String(w.phaseDetail || "Waiting for logs...");
         }
         var logLines = logPreview.split(/\\r?\\n/).slice(-6).join("\\n");
 
         return '<div class="activity-worker">' +
           '<div class="aw-header"><span class="aw-slot">' + esc(headerLabel) + '<span class="aw-slot-sub">slot:' + esc(slot) + '</span></span><span class="aw-phase ' + phaseClass + '">' + esc(statusLabel) + '</span></div>' +
           '<div class="aw-detail">' + taskLine + '</div>' +
-            '<div class="aw-detail">Yazilan satir: +' + String(linesAdded) + ' / -' + String(linesDeleted) + '</div>' +
+            '<div class="aw-detail">Lines: +' + String(linesAdded) + ' / -' + String(linesDeleted) + '</div>' +
             '<div class="aw-meta">role=' + esc(insight.assignedRole || w.roleName || "-") + ' | layer=' + esc(roleLayer(insight.assignedRole || w.roleName || "", roleLayerMap)) + ' | agent=' + esc(insight.selectedAgent || w.agent || "-") + '</div>' +
             '<div class="aw-meta">model=' + esc(w.model || "-") + (w.updatedAt ? ' | updated=' + esc(w.updatedAt) : '') + '</div>' +
           '<pre style="margin-top:6px;max-height:120px;overflow:auto;">' + esc(logLines) + '</pre>' +
@@ -1771,15 +2198,156 @@ function renderHtml() {
         var lastTask = String(session.lastTask || '—');
         if (lastTask.length > 55) lastTask = lastTask.slice(0, 55) + '…';
         var emoji = emojis[name] || '🤖';
-        return '<div class="ws-card ' + cardClass + '">' +
+        var thinking = String(session.lastThinking || '').trim();
+        var safeId = 'ws-details-' + name.replace(/[^a-zA-Z0-9]/g, '-');
+        var expandBtn = thinking
+          ? '<details class="ws-details" id="' + safeId + '"><summary><span class="chevron">&#9662;</span> last output</summary>' +
+            '<div class="ws-think">' + esc(thinking) + '</div></details>'
+          : '';
+        return '<div class="ws-card ' + cardClass + '" data-worker="' + esc(name) + '">' +
           '<div class="ws-name">' + emoji + ' ' + esc(name) + '</div>' +
           '<span class="ws-badge ' + badgeClass + '">' + esc(status) + '</span>' +
           '<div class="ws-task">' + esc(lastTask) + '</div>' +
           '<div class="ws-time">' + esc(session.lastActiveAt ? relativeTime(session.lastActiveAt) : '—') + '</div>' +
+          expandBtn +
           '</div>';
       }).join('');
 
+      // Preserve open details state across re-renders
+      var openDetails = {};
+      container.querySelectorAll('details.ws-details[id]').forEach(function(el) {
+        if (el.open) openDetails[el.id] = true;
+      });
+
       container.innerHTML = html || '<div class="muted" style="padding:6px">No workers registered</div>';
+
+      // Restore open state
+      Object.keys(openDetails).forEach(function(id) {
+        var el = document.getElementById(id);
+        if (el) el.open = true;
+      });
+    }
+
+    var celebrationAnimated = false;
+    function renderCelebration(data) {
+      var banner = document.getElementById('celebration-banner');
+      if (!banner) return;
+      var tasks = data.tasks || {};
+      var totals = tasks.totals || {};
+      var total = Number(tasks.total || 0);
+      var passed = Number(totals.passed || 0);
+      var failed = Number(totals.failed || 0);
+      var running = Number(totals.running || 0);
+      var queued = Number(totals.queued || 0);
+      var allDone = total > 0 && passed === total && running === 0 && queued === 0 && failed === 0;
+      if (!allDone) {
+        banner.style.display = 'none';
+        celebrationAnimated = false;
+        return;
+      }
+      banner.style.display = 'block';
+      var repo = (data.runtime && data.runtime.targetRepo) || '—';
+      document.getElementById('celebration-repo').textContent = repo;
+      document.getElementById('celebration-detail').textContent =
+        passed + '/' + total + ' tasks completed | ' +
+        String(Number((data.codeDelta || {}).projectLinesAdded || 0)) + ' lines added';
+      if (!celebrationAnimated) {
+        celebrationAnimated = true;
+        banner.style.animation = 'none';
+        void banner.offsetHeight;
+        banner.style.animation = 'celebrationPulse 2s ease-in-out';
+        spawnParticles();
+      }
+    }
+
+    function spawnParticles() {
+      var container = document.getElementById('celebration-particles');
+      if (!container) return;
+      container.innerHTML = '';
+      var emojis = ['\u2728', '\u{1F389}', '\u{1F38A}', '\u2B50', '\u{1F680}', '\u{1F525}', '\u{1F4A5}', '\u{1F3AF}'];
+      for (var i = 0; i < 30; i++) {
+        var span = document.createElement('span');
+        span.textContent = emojis[i % emojis.length];
+        span.style.cssText = 'position:absolute;font-size:' + (14 + Math.random() * 18) + 'px;' +
+          'left:' + (Math.random() * 100) + '%;top:' + (Math.random() * 100) + '%;' +
+          'opacity:0;animation:particleFade ' + (1.5 + Math.random() * 2) + 's ease-out ' + (Math.random() * 1.5) + 's forwards;' +
+          'pointer-events:none';
+        container.appendChild(span);
+      }
+    }
+
+    function renderPremiumUsagePanel(data) {
+      var pu = (data && data.premiumUsageByWorker) ? data.premiumUsageByWorker : {};
+      var byWorker = pu.byWorker || {};
+      var totalReqs = Number(pu.totalRequests || 0);
+      var gridEl = document.getElementById('premium-usage-grid');
+      var timelineEl = document.getElementById('premium-usage-timeline');
+      if (!gridEl) return;
+
+      var workerNames = Object.keys(byWorker).sort(function(a, b) {
+        return (byWorker[b].count || 0) - (byWorker[a].count || 0);
+      });
+
+      if (workerNames.length === 0) {
+        gridEl.innerHTML = '<div class="muted" style="padding:6px">No premium usage data yet — starts tracking when workers run</div>';
+        if (timelineEl) timelineEl.innerHTML = '';
+        return;
+      }
+
+      var emojis = {
+        'King David': '👑', 'Esther': '💎', 'Aaron': '🔌', 'Joseph': '🔗',
+        'Samuel': '🧪', 'Isaiah': '🔍', 'Noah': '🚢', 'Elijah': '🛡️',
+        'Issachar': '📊', 'Ezra': '📝'
+      };
+
+      var cards = workerNames.map(function(name) {
+        var w = byWorker[name];
+        var emoji = emojis[name] || '🤖';
+        var avgMs = w.count > 0 ? Math.round(w.totalDurationMs / w.count / 1000) : 0;
+        var models = Object.keys(w.models || {}).map(function(m) {
+          return esc(m) + ': ' + String(w.models[m]);
+        }).join(', ');
+        var lastEntry = (w.entries && w.entries.length > 0) ? w.entries[w.entries.length - 1] : null;
+        var lastTime = lastEntry ? relativeTime(lastEntry.completedAt || lastEntry.startedAt) : '—';
+        var pctOfTotal = totalReqs > 0 ? ((w.count / totalReqs) * 100).toFixed(1) : '0';
+        return '<div style="background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px">' +
+          '<div style="font-weight:600;margin-bottom:4px">' + emoji + ' ' + esc(name) +
+          '<span style="float:right;font-size:20px;font-weight:700;color:#00d4ff">' + String(w.count) + '</span></div>' +
+          '<div style="font-size:11px;color:var(--muted)">' + pctOfTotal + '% of total | avg ' + avgMs + 's/req</div>' +
+          '<div style="font-size:11px;color:var(--muted);margin-top:2px">Models: ' + (models || 'n/a') + '</div>' +
+          '<div style="font-size:10px;color:var(--muted);margin-top:2px">Last: ' + esc(lastTime) + '</div>' +
+          '<div style="margin-top:6px;height:4px;background:var(--chart-bg);border-radius:2px;overflow:hidden">' +
+          '<div style="height:100%;width:' + pctOfTotal + '%;background:linear-gradient(90deg,#00d4ff,#7b61ff);border-radius:2px"></div></div>' +
+          '</div>';
+      }).join('');
+
+      gridEl.innerHTML = '<div style="margin-bottom:8px;font-size:12px;color:var(--muted)">Total premium requests tracked: <strong style="color:#00d4ff">' +
+        String(totalReqs) + '</strong></div>' + cards;
+
+      // Timeline: last 20 entries across all workers
+      if (timelineEl) {
+        var allEntries = [];
+        workerNames.forEach(function(name) {
+          (byWorker[name].entries || []).forEach(function(e) {
+            allEntries.push({ worker: name, taskKind: e.taskKind, model: e.model, completedAt: e.completedAt, durationMs: e.durationMs });
+          });
+        });
+        allEntries.sort(function(a, b) { return (a.completedAt || '').localeCompare(b.completedAt || ''); });
+        var recent = allEntries.slice(-20);
+        if (recent.length > 0) {
+          var tl = '<div style="font-weight:600;margin-bottom:4px;font-size:12px;color:var(--fg)">Recent Activity Timeline</div>';
+          tl += recent.map(function(e) {
+            var emoji2 = emojis[e.worker] || '🤖';
+            var durSec = Math.round(Number(e.durationMs || 0) / 1000);
+            var time = e.completedAt ? new Date(e.completedAt).toLocaleTimeString() : '?';
+            return '<div>' + time + ' ' + emoji2 + ' ' + esc(e.worker) + ' — ' +
+              esc(e.taskKind || '?') + ' (' + esc(e.model || '?') + ', ' + durSec + 's)</div>';
+          }).join('');
+          timelineEl.innerHTML = tl;
+        } else {
+          timelineEl.innerHTML = '';
+        }
+      }
     }
 
     function renderLeadershipPanel(data) {
@@ -1826,7 +2394,17 @@ function renderHtml() {
         : 'No blocked tasks';
       document.getElementById('user-queue').textContent = 'Workers Active: ' + Object.keys(workerActivity).length;
 
-      document.getElementById('jesus-status').textContent = 'Health: ' + healthText + ' | Mode: ' + String(jesus.decision || '?');
+      // Freshness helpers
+      function freshnessBadge(isoDate) {
+        if (!isoDate) return '<span class="freshness-badge stale">no data</span>';
+        var ageMin = (Date.now() - new Date(isoDate).getTime()) / 60000;
+        if (ageMin < 10) return '<span class="freshness-badge fresh">' + (ageMin < 1 ? 'just now' : Math.round(ageMin) + 'm ago') + '</span>';
+        if (ageMin < 30) return '<span class="freshness-badge warm">' + Math.round(ageMin) + 'm ago</span>';
+        return '<span class="freshness-badge stale">stale · ' + Math.round(ageMin) + 'm ago</span>';
+      }
+
+      var jesusStatusEl = document.getElementById('jesus-status');
+      if (jesusStatusEl) jesusStatusEl.innerHTML = 'Health: ' + healthText + ' | Mode: ' + esc(String(jesus.decision || '?')) + freshnessBadge(jesus.decidedAt);
       document.getElementById('jesus-action').textContent = 'Brief to Moses: ' + nextAction;
       document.getElementById('jesus-blocked').textContent = 'Trump needed: ' + (jesus.callTrump ? 'YES — ' + String(jesus.trumpReason || '').slice(0, 80) : 'No');
       document.getElementById('jesus-queue').textContent = 'Priorities: ' + (Array.isArray(jesus.priorities) ? jesus.priorities.join(', ') : 'none');
@@ -1838,9 +2416,11 @@ function renderHtml() {
         jesusReasoningEl.title = 'Decided: ' + String(jesus.decidedAt || '') + ' | Model: ' + String(jesus.model || '');
       }
 
-      document.getElementById('moses-counts').textContent =
-        'Status: ' + String(moses.statusReport || 'No coordination yet') +
-        ' | Workers: ' + String(moses.activeSessions || 0);
+      var mosesCountsEl = document.getElementById('moses-counts');
+      if (mosesCountsEl) mosesCountsEl.innerHTML =
+        'Status: ' + esc(String(moses.statusReport || 'No coordination yet')) +
+        ' | Workers: ' + esc(String(moses.activeSessions || 0)) +
+        freshnessBadge(moses.coordinatedAt || moses.updatedAt || null);
       document.getElementById('moses-gates').textContent = 'Completed: ' + (Array.isArray(moses.completedTasks) ? moses.completedTasks.length : 0) + ' tasks';
 
       var mosesReportEl = document.getElementById('moses-statusreport');
@@ -1864,6 +2444,15 @@ function renderHtml() {
         trumpHealthEl.textContent = trump.projectHealth
           ? ('Project Health: ' + trump.projectHealth + ' | Plans: ' + (Array.isArray(trump.plans) ? trump.plans.length : 0) + ' items')
           : 'Not yet analyzed';
+      }
+      var trumpRequestsEl = document.getElementById('trump-requests');
+      if (trumpRequestsEl) {
+        var requestBudget = (trump && trump.requestBudget) ? trump.requestBudget : {};
+        var totalRequests = Number(requestBudget.estimatedPremiumRequestsTotal || 0);
+        var confidence = String(requestBudget.confidence || '').trim();
+        trumpRequestsEl.textContent = requestBudget && Number.isFinite(totalRequests) && totalRequests > 0
+          ? ('Estimated Premium Requests: ' + formatRequestCount(totalRequests) + (confidence ? (' | Confidence: ' + confidence) : ''))
+          : 'Estimated Premium Requests: not available';
       }
 
       var mosesWorkers = (moses && moses.workers) ? { ...moses.workers } : {};
@@ -1939,6 +2528,85 @@ function renderHtml() {
         : '<div class="muted">No workers</div>';
     }
 
+    function renderTrumpPlanBoard(data) {
+      var board = data && data.trumpPlanBoard ? data.trumpPlanBoard : { activeKey: null, active: null, history: [] };
+      var history = Array.isArray(board.history) ? board.history : [];
+
+      // Build a fingerprint from active key + item statuses to skip re-render when unchanged
+      var currentKey = trumpPlanUserSelected ? selectedTrumpPlanKey : (board.activeKey || null);
+      var selected = history.find(function(entry) { return entry.key === currentKey; }) || board.active || history[0] || null;
+      if (!trumpPlanUserSelected) {
+        selectedTrumpPlanKey = board.activeKey || null;
+      }
+      if (selected && selected.key) {
+        if (!trumpPlanUserSelected) selectedTrumpPlanKey = selected.key;
+      }
+
+      var items = selected ? (Array.isArray(selected.items) ? selected.items : []) : [];
+      var fp = String(selectedTrumpPlanKey || '') + '|' +
+        String(history.length) + '|' +
+        items.map(function(it) { return it.role + ':' + it.status; }).join(',');
+      if (fp === trumpPlanFingerprint) return; // nothing changed — skip DOM update
+      trumpPlanFingerprint = fp;
+
+      var tabsEl = document.getElementById('trump-plan-tabs');
+      var listEl = document.getElementById('trump-plan-list');
+      var metaEl = document.getElementById('trump-plan-meta');
+      if (!tabsEl || !listEl || !metaEl) return;
+
+      if (!selected) {
+        tabsEl.innerHTML = '<div class="muted">No snapshot history</div>';
+        listEl.innerHTML = '<div class="muted">No plans yet</div>';
+        metaEl.textContent = 'Awaiting Trump plan snapshots...';
+        return;
+      }
+
+      var tabs = history.map(function(entry, idx) {
+        var at = entry.analyzedAt ? String(entry.analyzedAt).replace('T', ' ').replace('Z', '') : ('snapshot-' + (idx + 1));
+        var shortAt = at.length > 19 ? at.slice(0, 19) : at;
+        var cls = entry.key === selectedTrumpPlanKey ? 'trump-tab active' : 'trump-tab';
+        return '<button type="button" class="' + cls + '" data-trump-key="' + esc(entry.key) + '">' +
+          esc(shortAt) + ' · ' + esc(entry.projectHealth || 'unknown') +
+          '</button>';
+      });
+      tabsEl.innerHTML = tabs.length ? tabs.join('') : '<div class="muted">No snapshot history</div>';
+
+      Array.from(tabsEl.querySelectorAll('button[data-trump-key]')).forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          trumpPlanUserSelected = true;
+          selectedTrumpPlanKey = String(btn.getAttribute('data-trump-key') || '');
+          trumpPlanFingerprint = ''; // force re-render on manual tab switch
+          if (latestState) renderTrumpPlanBoard(latestState);
+        });
+      });
+
+      var rows = items.map(function(item, idx) {
+        var rawStatus = String(item.status || 'queued').toLowerCase();
+        var color = (rawStatus === 'done' || rawStatus === 'running') ? 'green' : ((rawStatus === 'skipped' || rawStatus === 'error' || rawStatus === 'failed') ? 'red' : 'neutral');
+        var label = (rawStatus === 'done') ? 'done' : ((rawStatus === 'running') ? 'in-progress' : ((rawStatus === 'skipped') ? 'skipped/failed' : 'queued'));
+        return '<div class="trump-plan-item ' + color + '">' +
+          '<div class="trump-plan-head">' +
+            '<span>P' + esc(item.priority) + ' · ' + esc(item.role) + ' · ' + esc(item.kind || '-') + '</span>' +
+            '<span>' + esc(label) + '</span>' +
+          '</div>' +
+          '<div class="trump-plan-task">' + esc(item.task || '-') + '</div>' +
+        '</div>';
+      });
+      listEl.innerHTML = rows.length ? rows.join('') : '<div class="muted">No plans in selected snapshot</div>';
+
+      metaEl.textContent = 'Active snapshot: ' + String(selected.analyzedAt || 'unknown') +
+        ' | source=' + String(selected.source || 'unknown') +
+        ' | health=' + String(selected.projectHealth || 'unknown') +
+        ' | plans=' + String(items.length) +
+        (function() {
+          if (!selected.analyzedAt) return '';
+          var ageMs = Date.now() - new Date(selected.analyzedAt).getTime();
+          if (ageMs > 3600000) return ' | ⚠ stale (' + Math.round(ageMs / 3600000) + 'h ago)';
+          if (ageMs > 600000) return ' | ' + Math.round(ageMs / 60000) + 'm ago';
+          return '';
+        })();
+    }
+
     function applyState(data) {
       latestState = data;
 
@@ -1959,31 +2627,70 @@ function renderHtml() {
       var heroLive = document.getElementById("hero-live");
       var heroLiveText = document.getElementById("hero-live-text");
       var runtimeStatus = String((data.runtime && data.runtime.systemStatus) || "offline").toLowerCase();
-      var statusText = String((data.runtime && data.runtime.systemStatusText) || (runtimeStatus === "online" ? "All Systems Operational" : "System Offline"));
+      var statusText = String((data.runtime && data.runtime.systemStatusText) || "System Offline");
       if (heroLive && heroLiveText) {
         heroLiveText.textContent = statusText;
-        heroLive.classList.remove("is-offline", "is-workers-active");
+        heroLive.classList.remove("is-offline", "is-workers-active", "is-idle");
         if (runtimeStatus === "offline") {
           heroLive.classList.add("is-offline");
-        } else if (runtimeStatus === "workers-active") {
+        } else if (runtimeStatus === "working") {
           heroLive.classList.add("is-workers-active");
+        } else {
+          heroLive.classList.add("is-idle");
         }
       }
-      document.getElementById("m-project").textContent = data.runtime.projectLabel || data.runtime.targetRepo || data.summary.packageName || "unknown";
+      document.getElementById("m-project").textContent = data.runtime.projectLabel || data.runtime.targetRepo || "unknown";
       var roleRegistry = (data.runtime && data.runtime.roleRegistry) ? data.runtime.roleRegistry : {};
       var roleLayerMap = buildRoleLayerMap(roleRegistry);
       document.getElementById("m-role-head").textContent = 'CEO: ' + String(roleRegistry.ceo || '-') + ' | Lead: ' + String(roleRegistry.lead || '-');
       document.getElementById("m-tasks").textContent = String(data.tasks.total || 0);
-      document.getElementById("m-qr").textContent = String(data.tasks.totals.queued || 0) + ' / ' + String(data.tasks.totals.running || 0);
+      document.getElementById("m-tasks-sub").textContent = 'queued: ' + queued + ' | running: ' + running;
+
+      // Workers active card: count working vs total registered
+      var workerAct = data.workerActivity || {};
+      var workerNames = Object.keys(workerAct);
+      var workingCount = workerNames.filter(function(n) { return String((workerAct[n] || {}).status || '').toLowerCase() === 'working'; }).length;
+      document.getElementById("m-qr").textContent = String(workingCount) + ' / ' + String(workerNames.length);
+      document.getElementById("m-qr-sub").textContent = 'working / total';
+
       document.getElementById("m-pf").textContent = String(data.tasks.totals.passed || 0) + ' / ' + String(data.tasks.totals.failed || 0);
-      document.getElementById("m-docker").textContent = String(data.docker.running || 0);
-      document.getElementById("m-copilot").textContent = formatRequestCount(data.usage.copilot.monthly.remainingRequests || 0);
-      var guardianRunning = Boolean(data.guardian && data.guardian.rebase && data.guardian.rebase.running);
-      var guardianLast = data.guardian && data.guardian.lastRecovery ? data.guardian.lastRecovery : {};
-      document.getElementById("m-guardian").textContent = guardianRunning ? "rebase-running" : (guardianLast.id ? "armed" : "idle");
-      document.getElementById("m-guardian-sub").textContent = guardianLast.id
-        ? ('last: ' + String(guardianLast.id) + ' queue ' + String(guardianLast.queue?.beforeTotal || 0) + '->' + String(guardianLast.queue?.afterTotal || 0))
-        : 'last: -';
+
+      // Premium request estimate card — show REMAINING estimate, not total
+      var pre = data.premiumRequestEstimate || {};
+      var preEstimated = Number(pre.estimatedTotal || 0);
+      var preUsed = Number(pre.used || 0);
+      var preAfter = Number(pre.afterProject || 0);
+      var completedTasks = Number(data.tasks.totals.passed || 0);
+      var totalTasks = Number(data.tasks.total || 0);
+      var remainingEstimate = totalTasks > 0 ? Math.max(0, Math.round(preEstimated * (1 - completedTasks / totalTasks))) : preEstimated;
+      if (preEstimated > 0) {
+        document.getElementById("m-premium").textContent = '~' + formatRequestCount(remainingEstimate) + ' left';
+        document.getElementById("m-premium-sub").textContent = 'total ~' + formatRequestCount(preEstimated) + ' | done: ' + completedTasks + '/' + totalTasks + ' tasks';
+      } else {
+        document.getElementById("m-premium").textContent = '-';
+        document.getElementById("m-premium-sub").textContent = 'no estimate available';
+      }
+
+      var copilotRemaining = Number(data.usage.copilot.monthly.remainingRequests || 0);
+      var copilotSource = String(data.usage.copilot.monthly.source || '');
+      if (copilotSource.includes('unconfigured') || copilotSource.includes('failed')) {
+        document.getElementById("m-copilot").textContent = 'N/A';
+      } else {
+        document.getElementById("m-copilot").textContent = formatRequestCount(copilotRemaining);
+      }
+
+      // Alerts card
+      var alertTotal = Number((data.alerts && data.alerts.total) || 0);
+      var alertsEl = document.getElementById("m-alerts");
+      var alertsSubEl = document.getElementById("m-alerts-sub");
+      if (alertsEl) alertsEl.textContent = String(alertTotal);
+      if (alertsSubEl) {
+        if (alertTotal === 0) alertsSubEl.textContent = 'no alerts';
+        else {
+          var lastAlert = (data.alerts.list || []).slice(-1)[0];
+          alertsSubEl.textContent = lastAlert ? esc(String(lastAlert.source || '') + ': ' + String(lastAlert.title || '').slice(0, 40)) : '';
+        }
+      }
       document.getElementById("m-delta").textContent = '+' + String(Number(data.codeDelta?.projectLinesAdded || 0)) + ' / -' + String(Number(data.codeDelta?.projectLinesDeleted || 0));
       document.getElementById("m-delta-sub").textContent = data.codeDelta?.source === 'github-merged-prs' ? 'from github merged PRs' : 'from completed copilot entries';
       const copilotRefreshInSec = Math.max(0, Number(data.usage.copilot.monthly.refreshInSec || 0));
@@ -2073,7 +2780,10 @@ function renderHtml() {
       renderWorkerActivity(data.workerActivity || {}, data.taskInsights || {}, roleLayerMap);
       renderLeadershipPanel(data);
       renderLeadershipFlow(data);
+      renderTrumpPlanBoard(data);
       renderWorkerGrid(data);
+      renderPremiumUsagePanel(data);
+      renderCelebration(data);
       renderTaskDetail();
 
       var recoveryText = data.guardian && data.guardian.lastRecovery
@@ -2197,13 +2907,39 @@ async function serve(req, res) {
   res.end(renderHtml());
 }
 
-const server = http.createServer((req, res) => {
-  serve(req, res).catch((error) => {
-    res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify({ error: String(error?.message || error) }));
-  });
-});
+let _server = null;
 
-server.listen(PORT, () => {
-  console.log(`[box] dashboard started at http://localhost:${PORT}`);
-});
+/**
+ * Start the dashboard HTTP server.
+ * Safe to call multiple times — subsequent calls are no-ops if already listening.
+ * @param {{ port?: number }} [opts]
+ * @returns {http.Server}
+ */
+export function startDashboard(opts = {}) {
+  if (_server) return _server;
+  const port = Number(opts.port || PORT);
+  _server = http.createServer((req, res) => {
+    serve(req, res).catch((error) => {
+      res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ error: String(error?.message || error) }));
+    });
+  });
+  _server.listen(port, () => {
+    console.log(`[box] dashboard started at http://localhost:${port}`);
+  });
+  _server.on("error", (err) => {
+    // Port busy (e.g. standalone dashboard already running) — non-fatal
+    console.error(`[box] dashboard failed to bind port ${port}: ${err.message}`);
+    _server = null;
+  });
+  return _server;
+}
+
+// Auto-start when run directly (node src/dashboard/live_dashboard.js)
+const _isDirectRun = process.argv[1] && (
+  process.argv[1].endsWith("live_dashboard.js") ||
+  process.argv[1].endsWith("live_dashboard")
+);
+if (_isDirectRun) {
+  startDashboard();
+}

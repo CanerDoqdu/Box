@@ -55,24 +55,55 @@ async function fetchGitHubState(config) {
   }
 
   const base = `https://api.github.com/repos/${repo}`;
-  const [issues, prs, repoInfo, failedRuns] = await Promise.all([
+  const [issues, prs, repoInfo, recentRuns, mergedPrs] = await Promise.all([
     ghGet(`${base}/issues?state=open&per_page=20&sort=updated`),
     ghGet(`${base}/pulls?state=open&per_page=20&sort=updated`),
     ghGet(base),
-    ghGet(`${base}/actions/runs?status=failure&per_page=5`)
+    ghGet(`${base}/actions/runs?per_page=15`),
+    ghGet(`${base}/pulls?state=closed&sort=updated&direction=desc&per_page=10`)
   ]);
+
+  const defaultBranch = repoInfo?.default_branch || "main";
+  const allRuns = Array.isArray(recentRuns?.workflow_runs) ? recentRuns.workflow_runs : [];
+
+  // Latest completed run on default branch — the real CI health signal
+  const mainRuns = allRuns.filter(r => r.head_branch === defaultBranch && r.status === "completed");
+  const latestMainRun = mainRuns[0] || null;
+
+  // Only count failures from the last 24 hours on branches with open PRs or the default branch
+  const cutoff = Date.now() - 86400000;
+  const openPrBranches = new Set(
+    (Array.isArray(prs) ? prs : []).map(p => p.head?.ref).filter(Boolean)
+  );
+  openPrBranches.add(defaultBranch);
+  const recentFailures = allRuns
+    .filter(r => r.conclusion === "failure" &&
+      new Date(r.updated_at).getTime() > cutoff &&
+      openPrBranches.has(r.head_branch))
+    .slice(0, 5);
 
   return {
     issues: Array.isArray(issues) ? issues.slice(0, 15).map(i => ({ number: i.number, title: i.title, labels: i.labels?.map(l => l.name) || [], state: i.state })) : [],
     pullRequests: Array.isArray(prs) ? prs.slice(0, 10).map(p => ({ number: p.number, title: p.title, state: p.state, draft: p.draft })) : [],
     repoInfo: repoInfo ? { name: repoInfo.name, defaultBranch: repoInfo.default_branch, openIssuesCount: repoInfo.open_issues_count } : null,
-    failedCiRuns: Array.isArray(failedRuns?.workflow_runs)
-      ? failedRuns.workflow_runs.slice(0, 5).map(r => ({
-          name: r.name,
-          branch: r.head_branch,
-          commit: r.head_sha?.slice(0, 7),
-          conclusion: r.conclusion,
-          updatedAt: r.updated_at
+    latestMainCi: latestMainRun ? {
+      conclusion: latestMainRun.conclusion,
+      branch: latestMainRun.head_branch,
+      commit: latestMainRun.head_sha?.slice(0, 7),
+      updatedAt: latestMainRun.updated_at
+    } : null,
+    failedCiRuns: recentFailures.map(r => ({
+      name: r.name,
+      branch: r.head_branch,
+      commit: r.head_sha?.slice(0, 7),
+      conclusion: r.conclusion,
+      updatedAt: r.updated_at
+    })),
+    recentlyMergedPrs: Array.isArray(mergedPrs)
+      ? mergedPrs.filter(p => p.merged_at).slice(0, 10).map(p => ({
+          number: p.number,
+          title: p.title,
+          mergedAt: p.merged_at
         }))
       : []
   };
@@ -116,14 +147,16 @@ export async function runJesusCycle(config) {
   const ghFingerprint = [
     githubState.issues.map(i => i.number).join(","),
     githubState.pullRequests.map(p => p.number).join(","),
-    githubState.failedCiRuns.length
+    githubState.failedCiRuns.length,
+    githubState.latestMainCi?.conclusion || ""
   ].join("|");
 
+  // Reuse directive if: (a) state unchanged + workers busy, OR (b) directive is very fresh with pending work
+  const hasPendingWork = Array.isArray(lastDirective?.workItems) && lastDirective.workItems.length > 0;
+  const isFreshDirective = minutesSinceLast < 2 && hasPendingWork && lastDirective?.wakeMoses;
   if (
-    minutesSinceLast < 8 &&
-    lastDirective?.decision &&
-    lastDirective?.githubStateHash === ghFingerprint &&
-    activeSessions > 0
+    (minutesSinceLast < 8 && lastDirective?.decision && lastDirective?.githubStateHash === ghFingerprint && activeSessions > 0) ||
+    isFreshDirective
   ) {
     await appendProgress(config, `[JESUS] State unchanged (${minutesSinceLast.toFixed(1)}m ago) — reusing last directive (AI call skipped)`);
     chatLog(stateDir, jesusName, `State unchanged — reusing last directive (saved AI call)`);
@@ -158,10 +191,20 @@ ${githubState.pullRequests.length > 0
   ? githubState.pullRequests.map(p => `  #${p.number}: ${p.title} [${p.draft ? "draft" : "open"}]`).join("\n")
   : "  No open PRs"}
 
-**Failing CI Runs (${githubState.failedCiRuns.length}):**
+**Latest CI on default branch (${githubState.latestMainCi?.branch || "main"}):**
+${githubState.latestMainCi
+  ? `  ${githubState.latestMainCi.conclusion} (${githubState.latestMainCi.commit}) [${githubState.latestMainCi.updatedAt}]`
+  : "  No CI runs found"}
+
+**Recent CI Failures (last 24h): ${githubState.failedCiRuns.length}**
 ${githubState.failedCiRuns.length > 0
   ? githubState.failedCiRuns.map(r => `  ${r.name} on ${r.branch} (${r.commit}) — ${r.conclusion} [${r.updatedAt}]`).join("\n")
-  : "  No failing CI runs"}
+  : "  No recent failures"}
+
+**Recently Merged PRs (${githubState.recentlyMergedPrs.length}):**
+${githubState.recentlyMergedPrs.length > 0
+  ? githubState.recentlyMergedPrs.map(p => `  #${p.number}: ${p.title} [merged ${p.mergedAt}]`).join("\n")
+  : "  No recently merged PRs"}
 
 **Last Moses Coordination:**
 ${mosesCoordination?.summary ? `  ${mosesCoordination.summary}` : "  No previous coordination"}
