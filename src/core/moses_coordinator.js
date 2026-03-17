@@ -20,13 +20,14 @@ import { readJson, writeJson, spawnAsync } from "./fs_utils.js";
 import { appendAlert, appendProgress } from "./state_tracker.js";
 import { getRoleRegistry } from "./role_registry.js";
 import { runWorkerConversation } from "./worker_runner.js";
-import { buildAgentArgs, parseAgentOutput, logAgentThinking } from "./agent_loader.js";
+import { buildAgentArgs, cleanupPromptFile, parseAgentOutput, logAgentThinking } from "./agent_loader.js";
 import { chatLog } from "./logger.js";
 import { validateWorkerContract, decideRework } from "./verification_gate.js";
 
 async function callCopilotAgent(command, agentSlug, contextPrompt) {
-  const args = buildAgentArgs({ agentSlug, prompt: contextPrompt });
+  const { args, promptFile } = buildAgentArgs({ agentSlug, prompt: contextPrompt });
   const result = await spawnAsync(command, args, { env: process.env });
+  cleanupPromptFile(promptFile);
   const stdout = String(result?.stdout || "");
   const stderr = String(result?.stderr || "");
   if (result.status !== 0) {

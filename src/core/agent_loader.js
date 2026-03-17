@@ -11,7 +11,7 @@
  * Edit an agent's behavior by editing their .agent.md file — no code changes needed.
  */
 
-import { existsSync, appendFileSync } from "node:fs";
+import { existsSync, appendFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { isModelBanned } from "./model_policy.js";
@@ -87,8 +87,15 @@ export function toCopilotModelSlug(name) {
 // agent's frontmatter model is used (unless overridden by model arg).
 // If no agent file exists, falls back to plain --model + -p call.
 
+// Windows limits total CLI argument length to ~32KB (CreateProcessW).
+// When the prompt exceeds PROMPT_FILE_THRESHOLD we write it to a temp file
+// and tell the agent to read that file instead.
+const PROMPT_FILE_THRESHOLD = 20_000;
+const PROMPT_TEMP_DIR = path.join(__dirname, "..", "..", "state");
+
 export function buildAgentArgs({ agentSlug, prompt, model, allowAll = true }) {
   const args = [];
+  let promptFile = null;
 
   if (allowAll) {
     args.push("--allow-all-tools");
@@ -112,8 +119,35 @@ export function buildAgentArgs({ agentSlug, prompt, model, allowAll = true }) {
   }
 
   const promptText = String(prompt);
-  args.push("-p", promptText);
-  return args;
+
+  if (promptText.length > PROMPT_FILE_THRESHOLD) {
+    // Write to temp file to avoid ENAMETOOLONG on Windows
+    const tmpName = `_prompt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.md`;
+    promptFile = path.join(PROMPT_TEMP_DIR, tmpName);
+    try {
+      writeFileSync(promptFile, promptText, "utf8");
+      args.push("-p", [
+        `IMPORTANT: Your complete instructions and context are in the file: ${promptFile}`,
+        `You MUST use the read_file tool to read that file BEFORE doing anything else.`,
+        `The file contains your full task description, context data, and expected output format.`,
+        `Do NOT attempt to answer without first reading the file contents.`
+      ].join("\n"));
+    } catch {
+      // Fallback: pass prompt directly (may hit ENAMETOOLONG on large prompts)
+      promptFile = null;
+      args.push("-p", promptText);
+    }
+  } else {
+    args.push("-p", promptText);
+  }
+
+  return { args, promptFile };
+}
+
+/** Remove temp prompt file created by buildAgentArgs. Safe to call with null. */
+export function cleanupPromptFile(filePath) {
+  if (!filePath) return;
+  try { unlinkSync(filePath); } catch { /* already gone */ }
 }
 
 // ── Parse agent output: extract thinking + structured JSON ───────────────────

@@ -19,7 +19,7 @@ import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { spawnAsync } from "./fs_utils.js";
 import { getRoleRegistry } from "./role_registry.js";
 import { appendProgress } from "./state_tracker.js";
-import { buildAgentArgs, nameToSlug } from "./agent_loader.js";
+import { buildAgentArgs, cleanupPromptFile, nameToSlug } from "./agent_loader.js";
 import { buildVerificationChecklist } from "./verification_profiles.js";
 import { parseVerificationReport, parseResponsiveMatrix } from "./verification_gate.js";
 import { enforceModelPolicy } from "./model_policy.js";
@@ -321,7 +321,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
   ];
 
   // buildAgentArgs: uses --agent <slug> if .agent.md exists, else --model <fallback>
-  const args = buildAgentArgs({ agentSlug, prompt: conversationContext, model });
+  const { args, promptFile } = buildAgentArgs({ agentSlug, prompt: conversationContext, model });
 
   // Compute timeout: config.runtime.workerTimeoutMinutes → ms, fallback to spawnAsync default (45min)
   const workerTimeoutMinutes = Number(config?.runtime?.workerTimeoutMinutes || 0);
@@ -338,6 +338,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     },
     timeoutMs: workerTimeoutMs
   });
+  cleanupPromptFile(promptFile);
 
   const stdout = String(result?.stdout || "");
   const stderr = String(result?.stderr || "");

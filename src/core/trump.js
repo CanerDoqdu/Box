@@ -16,7 +16,7 @@ import fs from "node:fs/promises";
 import { writeJson, spawnAsync } from "./fs_utils.js";
 import { appendAlert, appendProgress } from "./state_tracker.js";
 import { getRoleRegistry } from "./role_registry.js";
-import { buildAgentArgs, parseAgentOutput, logAgentThinking } from "./agent_loader.js";
+import { buildAgentArgs, cleanupPromptFile, parseAgentOutput, logAgentThinking } from "./agent_loader.js";
 import { chatLog } from "./logger.js";
 
 async function pathExists(targetPath) {
@@ -237,8 +237,9 @@ async function buildLocalRepoSnapshot(config) {
 }
 
 async function callCopilotAgent(command, agentSlug, contextPrompt) {
-  const args = buildAgentArgs({ agentSlug, prompt: contextPrompt });
+  const { args, promptFile } = buildAgentArgs({ agentSlug, prompt: contextPrompt });
   const result = await spawnAsync(command, args, { env: process.env });
+  cleanupPromptFile(promptFile);
   const stdout = String(result?.stdout || "");
   const stderr = String(result?.stderr || "");
   const raw = stdout || stderr;
@@ -255,8 +256,9 @@ async function callCopilotAgent(command, agentSlug, contextPrompt) {
 }
 
 async function callCopilotRaw(command, agentSlug, contextPrompt) {
-  const args = buildAgentArgs({ agentSlug, prompt: contextPrompt });
+  const { args, promptFile } = buildAgentArgs({ agentSlug, prompt: contextPrompt });
   const result = await spawnAsync(command, args, { env: process.env });
+  cleanupPromptFile(promptFile);
   const stdout = String(result?.stdout || "");
   const stderr = String(result?.stderr || "");
   const combinedRaw = `${stdout}\n${stderr}`.trim();
