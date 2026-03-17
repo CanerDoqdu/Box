@@ -274,8 +274,10 @@ async function mainLoop(config) {
       ? trumpAnalysis.executionStrategy.waves.length
       : 0;
 
-    const trumpActive = jesusDirective?.callTrump !== false;
-    const hasRemainingWork = trumpActive && trumpAnalysis && totalPlans > 0 && completedTasks.length < totalPlans;
+    // Trump plans are "active" if they exist and have plans, regardless of callTrump flag.
+    // callTrump only controls whether to RE-RUN Trump, not whether existing plans are valid.
+    const trumpActive = trumpAnalysis && totalPlans > 0;
+    const hasRemainingWork = trumpActive && completedTasks.length < totalPlans;
 
     if (hasRemainingWork && totalWaves > 0) {
       if (previousCompletedCount !== null && completedTasks.length <= previousCompletedCount) {

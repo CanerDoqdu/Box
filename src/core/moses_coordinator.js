@@ -261,18 +261,13 @@ async function mosesDecideNextActions(config, jesusDirective, trumpPlans, sessio
     .map(([kind, w]) => `  - "${w.name}" (kind: ${kind})`)
     .join("\n");
 
-  // Show COMPACT plan summaries to Moses (no context field — it's too large for cmd-line).
-  // Full Trump context is injected into worker instructions AFTER Moses dispatches.
+  // Show ultra-compact plan summaries — no substeps, no context (all injected post-dispatch).
   const trumpPlansCompact = trumpPlans?.plans
     ? trumpPlans.plans.slice(0, 10).map((p, i) => {
-        const substeps = Array.isArray(p.substeps) ? p.substeps.map((s, j) => `    ${j + 1}. ${s}`).join("\n") : "";
         return [
-          `### PLAN ${i + 1} [Priority ${p.priority}] — ${p.role} (${p.kind || "general"})`,
-          `Task: ${p.task}`,
-          substeps ? `Substeps:\n${substeps}` : "",
-          p.dependsOn ? `Depends on: ${Array.isArray(p.dependsOn) ? p.dependsOn.join(", ") : p.dependsOn}` : "",
-          p.preparesFor ? `Prepares for: ${Array.isArray(p.preparesFor) ? p.preparesFor.join(", ") : p.preparesFor}` : "",
-          p.estimatedComplexity ? `Complexity: ${p.estimatedComplexity}` : ""
+          `### PLAN ${i + 1} [P${p.priority}] — ${p.role} (${p.kind || "general"})`,
+          `Task: ${String(p.task).slice(0, 200)}`,
+          p.dependsOn ? `Depends on: ${Array.isArray(p.dependsOn) ? p.dependsOn.join(", ") : p.dependsOn}` : ""
         ].filter(Boolean).join("\n");
       }).join("\n\n")
     : "  No Trump analysis available";
@@ -296,7 +291,7 @@ ${jesusThinkingTruncated || "(No detailed thinking available)"}
 ## JESUS'S DIRECTIVE
 Decision: ${jesusDirective?.decision || "tactical"}
 Health: ${jesusDirective?.systemHealth || "unknown"}
-Brief: ${jesusDirective?.briefForMoses || "Continue with standard tasks"}
+Brief: ${String(jesusDirective?.briefForMoses || "Continue with standard tasks").slice(0, 1500)}
 Priorities: ${(jesusDirective?.priorities || []).join(", ") || "none specified"}
 
 Work items:
