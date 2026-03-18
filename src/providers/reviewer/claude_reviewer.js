@@ -1,3 +1,5 @@
+import { isSelfDevMode, validateFileChanges, validatePrSize } from "../../core/self_dev_guard.js";
+
 const API_URL = "https://api.anthropic.com/v1/messages";
 
 function tryExtractJson(text) {
@@ -324,6 +326,22 @@ export class ClaudeReviewer {
   async reviewResult(task, workerResult, gates) {
     if (!this.apiKey) {
       return { approved: gates.ok, reason: "claude disabled" };
+    }
+
+    // Self-dev guard: block changes to critical BOX files
+    if (isSelfDevMode({})) {
+      const changedFiles = Array.isArray(workerResult?.copilotMeta?.changedFiles)
+        ? workerResult.copilotMeta.changedFiles.map(f => String(f || ""))
+        : [];
+      const fileCheck = validateFileChanges(changedFiles);
+      if (!fileCheck.allowed) {
+        return { approved: false, reason: `Self-dev guard rejected: ${fileCheck.blocked[0]}` };
+      }
+      const changedFilesCount = Number(workerResult?.copilotMeta?.changedFilesCount || 0);
+      const sizeCheck = validatePrSize(changedFilesCount, {});
+      if (!sizeCheck.allowed) {
+        return { approved: false, reason: `Self-dev guard rejected: ${sizeCheck.reason}` };
+      }
     }
 
     const quotes = getEvidenceQuotes(workerResult);

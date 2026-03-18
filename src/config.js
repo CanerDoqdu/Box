@@ -321,6 +321,17 @@ export async function loadConfig() {
     experimentEngineEnabled: Boolean(fileConfig?.selfImprovement?.experimentEngineEnabled ?? true)
   };
 
+  const selfDev = {
+    ...(fileConfig.selfDev ?? {}),
+    enabled: Boolean(fileConfig?.selfDev?.enabled ?? false),
+    recoveryTag: String(fileConfig?.selfDev?.recoveryTag || "box/recovery-v0.1.0-pre-selfdev"),
+    maxFilesPerPr: Number(fileConfig?.selfDev?.maxFilesPerPr || 8),
+    mandatoryGates: Array.isArray(fileConfig?.selfDev?.mandatoryGates)
+      ? fileConfig.selfDev.mandatoryGates
+      : ["lint", "test"],
+    branchPrefix: String(fileConfig?.selfDev?.branchPrefix || "box/selfdev-"),
+  };
+
   const systemGuardian = {
     ...(fileConfig.systemGuardian ?? {}),
     enabled: env.systemGuardianEnabled
@@ -355,6 +366,7 @@ export async function loadConfig() {
     copilot: copilotWithRolePolicy,
     planner,
     selfImprovement,
+    selfDev,
     systemGuardian,
     gates,
     git,

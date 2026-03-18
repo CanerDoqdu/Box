@@ -23,6 +23,7 @@ import { runWorkerConversation } from "./worker_runner.js";
 import { buildAgentArgs, parseAgentOutput, logAgentThinking } from "./agent_loader.js";
 import { chatLog } from "./logger.js";
 import { validateWorkerContract, decideRework } from "./verification_gate.js";
+import { isSelfDevMode, getSelfDevWorkerContext } from "./self_dev_guard.js";
 
 async function callCopilotAgent(command, agentSlug, contextPrompt) {
   const args = buildAgentArgs({ agentSlug, prompt: contextPrompt });
@@ -450,6 +451,15 @@ export async function runMosesCycle(config, jesusDirective, trumpPlans) {
         instr.task = `${instr.task}\n\n## TRUMP'S DETAILED IMPLEMENTATION CONTEXT\n${matchingPlan.context}${substeps}${verification}`;
       }
     }
+  }
+
+  // ── Inject self-dev safety context when BOX is targeting itself ────────────
+  if (isSelfDevMode(config)) {
+    const selfDevContext = getSelfDevWorkerContext();
+    for (const instr of instructions) {
+      instr.task = `${instr.task}\n\n${selfDevContext}`;
+    }
+    await appendProgress(config, "[MOSES] Self-dev mode active — safety rules injected into all worker prompts");
   }
 
   // Moses dispatches all workers it plans — no artificial cap

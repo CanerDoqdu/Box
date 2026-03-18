@@ -281,5 +281,31 @@
         "promptFile": ".github/prompts/backend-stability.prompt.md"
       }
     }
+  },
+  "selfDev": {
+    "enabled": true,
+    "recoveryTag": "box/recovery-v0.1.0-pre-selfdev",
+    "maxFilesPerPr": 8,
+    "mandatoryGates": ["lint", "test"],
+    "forbiddenBranchTargets": ["main", "master"],
+    "branchPrefix": "box/selfdev-",
+    "criticalFiles": [
+      "src/core/orchestrator.js",
+      "src/core/self_dev_guard.js",
+      "src/core/daemon_control.js",
+      "src/core/policy_engine.js",
+      "src/cli.js",
+      ".env",
+      "policy.json"
+    ],
+    "cautionFiles": [
+      "src/core/task_queue.js",
+      "src/core/self_improvement.js",
+      "src/core/moses_coordinator.js",
+      "src/core/jesus_supervisor.js",
+      "src/core/trump.js",
+      "box.config.json",
+      "package.json"
+    ]
   }
 }

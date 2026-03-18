@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { toCopilotModelSlug } from "../../core/agent_loader.js";
+import { isSelfDevMode, validateFileChanges, validatePrSize } from "../../core/self_dev_guard.js";
 
 function safeArray(value) {
   return Array.isArray(value) ? value : [];
@@ -286,6 +287,35 @@ export class CopilotReviewer {
         taskId: Number(task?.id || 0),
         workerExitCode: Number(workerResult?.exitCode ?? -1)
       };
+    }
+
+    // Self-dev guard: block changes to critical BOX files
+    if (isSelfDevMode({})) {
+      const changedFiles = Array.isArray(workerResult?.copilotMeta?.changedFiles)
+        ? workerResult.copilotMeta.changedFiles.map(f => String(f || ""))
+        : [];
+      const fileCheck = validateFileChanges(changedFiles);
+      if (!fileCheck.allowed) {
+        return {
+          approved: false,
+          reason: `Self-dev guard rejected: ${fileCheck.blocked[0]}`,
+          model: this.model,
+          provider: this.provider,
+          taskId: Number(task?.id || 0),
+          workerExitCode: Number(workerResult?.exitCode ?? -1)
+        };
+      }
+      const sizeCheck = validatePrSize(changedFilesCount, {});
+      if (!sizeCheck.allowed) {
+        return {
+          approved: false,
+          reason: `Self-dev guard rejected: ${sizeCheck.reason}`,
+          model: this.model,
+          provider: this.provider,
+          taskId: Number(task?.id || 0),
+          workerExitCode: Number(workerResult?.exitCode ?? -1)
+        };
+      }
     }
 
     const fallback = {
