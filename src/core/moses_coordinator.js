@@ -175,6 +175,27 @@ function autoCompleteEligibleWaves(executionStrategy, completedTasks, activeInst
   );
   const completedThisCycle = [];
 
+  // Build a set of worker roles mentioned in completedTasks entries.
+  // Entries like "wave-2: Aaron — PR #73" contain the role name, so we can
+  // detect that a wave's workers are all done even when the wave ID itself
+  // was never explicitly added (e.g. workers completed across multiple cycles).
+  const completedTasksLower = completedTasks.map(t => String(t || "").toLowerCase());
+
+  // Check if a dependency wave is satisfied — either by exact wave ID or by
+  // confirming all workers assigned to that wave appear in completedTasks.
+  function isWaveDone(depWaveId) {
+    if (doneNormalized.has(normalizeTaskId(depWaveId))) return true;
+    const depWave = waves.find(w => String(w?.id || "").trim() === depWaveId);
+    if (!depWave) return false;
+    const depWorkers = Array.isArray(depWave.workers)
+      ? depWave.workers.map(w => String(w || "").trim().toLowerCase()).filter(Boolean)
+      : [];
+    if (depWorkers.length === 0) return false;
+    return depWorkers.every(role =>
+      completedTasksLower.some(task => task.includes(role))
+    );
+  }
+
   const activeRoles = new Set(
     (activeInstructions || []).map((item) => String(item?.role || "").trim()).filter(Boolean)
   );
@@ -195,7 +216,7 @@ function autoCompleteEligibleWaves(executionStrategy, completedTasks, activeInst
     if (!waveId || doneNormalized.has(waveKey)) continue;
 
     const deps = Array.isArray(wave?.dependsOn) ? wave.dependsOn : [];
-    const depsMet = deps.every((dep) => doneNormalized.has(normalizeTaskId(dep)));
+    const depsMet = deps.every((dep) => isWaveDone(dep));
     if (!depsMet) continue;
 
     const requiredWorkers = Array.isArray(wave?.workers)

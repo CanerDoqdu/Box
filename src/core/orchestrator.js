@@ -311,6 +311,19 @@ async function mainLoop(config) {
         if (role && taskLower.includes(role)) completedRoles.add(role);
       }
     }
+    // Fallback: also check per-worker session files for "done" evidence.
+    // Workers that completed across retries may not be in completedTasks if Moses
+    // failed to persist the wave-level completion (e.g. dependency chain broke).
+    for (const role of planRoles) {
+      if (completedRoles.has(role)) continue;
+      try {
+        const wf = path.join(stateDir, `worker_${role.replace(/\s+/g, "_")}.json`);
+        const ws = await readJson(wf, null);
+        if (!ws) continue;
+        const lastLog = Array.isArray(ws.activityLog) ? ws.activityLog[ws.activityLog.length - 1] : null;
+        if (lastLog?.status === "done" && lastLog.pr) completedRoles.add(role);
+      } catch { /* ignore */ }
+    }
     const dedupedCompletedCount = completedRoles.size;
     const totalWaves = Array.isArray(trumpAnalysis?.executionStrategy?.waves)
       ? trumpAnalysis.executionStrategy.waves.length
