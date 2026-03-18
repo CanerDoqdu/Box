@@ -291,6 +291,17 @@ async function mainLoop(config) {
     const mosesState = await readJson(path.join(stateDir, "moses_coordination.json"), {});
     const completedTasks = Array.isArray(mosesState?.completedTasks) ? mosesState.completedTasks : [];
     const totalPlans = Array.isArray(trumpAnalysis?.plans) ? trumpAnalysis.plans.length : 0;
+    // Count completed plans by matching Trump plan roles in completedTasks text.
+    // Moses adds duplicate/verbose entries — deduplicate by actual plan role.
+    const planRoles = (trumpAnalysis?.plans || []).map(p => String(p.role || "").toLowerCase());
+    const completedRoles = new Set();
+    for (const task of completedTasks) {
+      const taskLower = String(task).toLowerCase();
+      for (const role of planRoles) {
+        if (role && taskLower.includes(role)) completedRoles.add(role);
+      }
+    }
+    const dedupedCompletedCount = completedRoles.size;
     const totalWaves = Array.isArray(trumpAnalysis?.executionStrategy?.waves)
       ? trumpAnalysis.executionStrategy.waves.length
       : 0;
@@ -298,15 +309,15 @@ async function mainLoop(config) {
     // Trump plans are "active" if they exist and have plans, regardless of callTrump flag.
     // callTrump only controls whether to RE-RUN Trump, not whether existing plans are valid.
     const trumpActive = trumpAnalysis && totalPlans > 0;
-    const hasRemainingWork = trumpActive && completedTasks.length < totalPlans;
+    const hasRemainingWork = trumpActive && dedupedCompletedCount < totalPlans;
 
     if (hasRemainingWork && totalWaves > 0) {
-      if (previousCompletedCount !== null && completedTasks.length <= previousCompletedCount) {
+      if (previousCompletedCount !== null && dedupedCompletedCount <= previousCompletedCount) {
         stalledCycles += 1;
       } else {
         stalledCycles = 0;
       }
-      previousCompletedCount = completedTasks.length;
+      previousCompletedCount = dedupedCompletedCount;
 
       const nowMs = Date.now();
       const escalationCooldownPassed = (nowMs - lastAutoEscalationAtMs) >= STALLED_WAVE_ESCALATION_COOLDOWN_MS;
@@ -328,7 +339,7 @@ async function mainLoop(config) {
     }
 
     if (hasRemainingWork) {
-      await appendProgress(config, `[LOOP] Moses continuation — ${completedTasks.length}/${totalPlans} plans done`);
+      await appendProgress(config, `[LOOP] Moses continuation — ${dedupedCompletedCount}/${totalPlans} plans done`);
       try {
         await runMosesCycle(config, jesusDirective, trumpAnalysis);
         await waitForWorkersAndFinalize(config);
@@ -347,7 +358,7 @@ async function mainLoop(config) {
       }
 
       // All work done — system sleeps until stop or escalation. NO Jesus re-trigger.
-      await appendProgress(config, `[LOOP] All work complete (${completedTasks.length}/${totalPlans}). System idle — waiting for stop request or escalation.`);
+      await appendProgress(config, `[LOOP] All work complete (${dedupedCompletedCount}/${totalPlans}). System idle — waiting for stop request or escalation.`);
       await sleep(RE_EVAL_SLEEP_MS);
     }
   }
