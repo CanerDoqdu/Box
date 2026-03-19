@@ -280,8 +280,8 @@ function buildConversationContext(history, instruction, sessionState = {}, confi
 }
 
 // ── Parse worker response ────────────────────────────────────────────────────
-
-function parseWorkerResponse(stdout, stderr) {
+// Exported for unit testing of marker extraction and access-guard normalization.
+export function parseWorkerResponse(stdout, stderr) {
   const output = String(stdout || "");
   const combined = `${output}\n${String(stderr || "")}`;
 

@@ -1,3 +1,15 @@
+/**
+ * @deprecated
+ * This module is superseded by `verification_gate.js` which is the single source of truth
+ * for post-worker result validation. `validateWorkerContract` in verification_gate.js is wired
+ * into the Moses coordinator loop and handles all required-evidence checks.
+ *
+ * `evaluateGates` remains exported for backward compatibility but is not called by any runtime
+ * path. The fields it checks (buildOk, testsOk, lintOk, securityOk) are not populated by the
+ * worker response parser — verification is done via VERIFICATION_REPORT text markers instead.
+ *
+ * Do not add new logic here. Extend verification_gate.js or verification_profiles.js instead.
+ */
 export function evaluateGates(config, workerResult, task = {}) {
   const gates = config.gates;
   const failures = [];

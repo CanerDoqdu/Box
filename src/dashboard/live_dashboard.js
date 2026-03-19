@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import http from "node:http";
+import crypto from "node:crypto";
 import { execSync, spawn } from "node:child_process";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -31,6 +32,11 @@ const GITHUB_API_VERSION = process.env.BOX_GITHUB_API_VERSION || "2022-11-28";
 const COPILOT_USAGE_REFRESH_MS = Number(process.env.BOX_COPILOT_USAGE_REFRESH_MS || "3600000");
 const PR_DELTA_REFRESH_MS = Number(process.env.BOX_PR_DELTA_REFRESH_MS || "3600000");
 const DASHBOARD_PROJECT_LABEL = String(process.env.BOX_DASHBOARD_PROJECT_LABEL || "").trim();
+
+// Bearer token required for all mutation (POST) endpoints.
+// If not set, mutation endpoints are hard-blocked (fail-safe).
+// Token is read lazily at request time (not cached) so tests can inject via process.env.
+// Never log this value.
 
 const COST_CACHE = {
   value: null,
@@ -260,9 +266,9 @@ async function stopDaemon() {
     return { ok: true, message: "Daemon was not running" };
   }
   const pid = status.pid;
-  // Write stop request so daemon exits gracefully
+  // Write stop request so daemon exits gracefully via daemon_control.js contract (daemon.stop.json)
   try {
-    const stopFile = path.join(STATE_DIR, "stop_request.json");
+    const stopFile = path.join(STATE_DIR, "daemon.stop.json");
     await fs.writeFile(stopFile, JSON.stringify({ requestedAt: new Date().toISOString(), reason: "dashboard-stop" }), "utf8");
   } catch { /* best effort */ }
   // Wait up to 6s for graceful exit
@@ -3049,6 +3055,68 @@ function renderHtml() {
 </html>`;
 }
 
+/**
+ * Verify a Bearer token from the Authorization header using a timing-safe comparison.
+ * Returns an object describing the auth result.
+ *
+ * @param {string|undefined} authHeader - value of req.headers.authorization
+ * @returns {{ ok: boolean, status: number, error: string } | { ok: true }}
+ */
+export function checkDashboardAuth(authHeader) {
+  // Read token lazily — allows env injection in tests and avoids caching a secret in memory longer than needed.
+  const token = process.env.BOX_DASHBOARD_TOKEN?.trim() || "";
+
+  // Fail-safe: if operator did not configure a token, mutations must be blocked.
+  if (!token) {
+    return { ok: false, status: 403, error: "Dashboard auth token not configured — set BOX_DASHBOARD_TOKEN" };
+  }
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return { ok: false, status: 401, error: "Unauthorized" };
+  }
+
+  const provided = authHeader.slice(7); // strip "Bearer "
+  if (!provided) {
+    return { ok: false, status: 401, error: "Unauthorized" };
+  }
+
+  // Constant-time comparison to prevent timing attacks.
+  // Pad both buffers to equal length before comparison.
+  const tokenBuf = Buffer.from(token, "utf8");
+  const providedBuf = Buffer.from(provided, "utf8");
+
+  if (tokenBuf.length !== providedBuf.length) {
+    // Lengths differ — do a dummy comparison to keep timing consistent, then reject.
+    crypto.timingSafeEqual(tokenBuf, tokenBuf);
+    return { ok: false, status: 401, error: "Unauthorized" };
+  }
+
+  if (!crypto.timingSafeEqual(tokenBuf, providedBuf)) {
+    return { ok: false, status: 401, error: "Unauthorized" };
+  }
+
+  return { ok: true };
+}
+
+/**
+ * Enforce Bearer token auth on a mutation request.
+ * Writes a JSON error response and returns false if the request is not authorized.
+ * Returns true if the caller should proceed.
+ *
+ * @param {http.IncomingMessage} req
+ * @param {http.ServerResponse} res
+ * @returns {boolean}
+ */
+function requireDashboardAuth(req, res) {
+  const result = checkDashboardAuth(req.headers["authorization"]);
+  if (!result.ok) {
+    res.writeHead(result.status, { "content-type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ ok: false, error: result.error }));
+    return false;
+  }
+  return true;
+}
+
 async function serve(req, res) {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 
@@ -3058,6 +3126,8 @@ async function serve(req, res) {
       res.end(JSON.stringify({ ok: false, error: "method-not-allowed" }));
       return;
     }
+
+    if (!requireDashboardAuth(req, res)) return;
 
     if (REBASE_STATE.running) {
       res.writeHead(409, { "content-type": "application/json; charset=utf-8" });
@@ -3100,14 +3170,15 @@ async function serve(req, res) {
       res.end(JSON.stringify({ ok: false, error: "method-not-allowed" }));
       return;
     }
+    if (!requireDashboardAuth(req, res)) return;
     const status = await getDaemonStatus();
     if (status.running) {
       res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true, message: `Daemon already running pid=${status.pid}` }));
       return;
     }
-    // Clear stale stop request before starting
-    try { await fs.writeFile(path.join(STATE_DIR, "stop_request.json"), "{}", "utf8"); } catch { /* best effort */ }
+    // Remove stale stop request (daemon.stop.json) before starting — daemon_control.js contract
+    try { await fs.rm(path.join(STATE_DIR, "daemon.stop.json"), { force: true }); } catch { /* best effort */ }
     const result = await startDaemonDetached();
     res.writeHead(result.ok ? 200 : 500, { "content-type": "application/json; charset=utf-8" });
     res.end(JSON.stringify(result));
@@ -3120,6 +3191,7 @@ async function serve(req, res) {
       res.end(JSON.stringify({ ok: false, error: "method-not-allowed" }));
       return;
     }
+    if (!requireDashboardAuth(req, res)) return;
     const result = await stopDaemon();
     res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
     res.end(JSON.stringify(result));

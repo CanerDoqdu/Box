@@ -271,15 +271,10 @@ async function createCompletionRelease(config, summary) {
       workerTable || "| — | — | — | — |",
       ``,
       `### Rollback`,
-      `To undo all BOX changes:`,
+      `To undo all BOX changes (safe, non-destructive):`,
       `\`\`\`bash`,
       `git revert --no-commit ${summary.baselineTag || "box/baseline-YYYY-MM-DD"}..HEAD`,
       `git commit -m "Revert all BOX changes"`,
-      `\`\`\``,
-      `Or hard reset (destructive):`,
-      `\`\`\`bash`,
-      `git reset --hard ${summary.baselineTag || "box/baseline-YYYY-MM-DD"}`,
-      `git push --force-with-lease`,
       `\`\`\``,
     ].join("\n");
 
