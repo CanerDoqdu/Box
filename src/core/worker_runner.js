@@ -1,5 +1,5 @@
 /**
- * Worker Runner — Persistent Conversation Sessions
+ * Worker Runner — Single-Prompt Worker Sessions
  *
  * Each worker (King David, Esther, Aaron, etc.) has a conversation thread.
  * Moses calls runWorkerConversation() to send a task and get a response.
@@ -7,11 +7,10 @@
  * The conversation history is passed as context on every call,
  * making it feel like a persistent session even though Copilot CLI is stateless.
  *
- * Workers use --allow-all-tools so they can:
- *   - Clone the target repo
- *   - Read and edit files
- *   - Run build/test commands
- *   - Create branches and PRs
+ * Workers use single-prompt mode (--model + -p):
+ *   - 1 worker call = 1 premium request (no autopilot/tool calls)
+ *   - Worker outputs file changes as <<<FILE:path>>>...<<<END_FILE>>> blocks
+ *   - Git operations (branch, commit, push, PR) are handled by the runner
  */
 
 import path from "node:path";
@@ -19,7 +18,7 @@ import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { spawnAsync } from "./fs_utils.js";
 import { getRoleRegistry } from "./role_registry.js";
 import { appendProgress } from "./state_tracker.js";
-import { buildAgentArgs, nameToSlug } from "./agent_loader.js";
+import { buildWorkerPromptArgs, nameToSlug } from "./agent_loader.js";
 import { buildVerificationChecklist } from "./verification_profiles.js";
 import { parseVerificationReport, parseResponsiveMatrix } from "./verification_gate.js";
 import { enforceModelPolicy } from "./model_policy.js";
@@ -366,8 +365,9 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     { from: "moses", content: instruction.task, timestamp: new Date().toISOString() }
   ];
 
-  // buildAgentArgs: uses --agent <slug> if .agent.md exists, else --model <fallback>
-  const args = buildAgentArgs({ agentSlug, prompt: conversationContext, model });
+  // Single-prompt mode: worker gets ONE request with persona embedded.
+  // No --autopilot, no --allow-all, no tool calls. 1 worker = 1 premium request.
+  const args = buildWorkerPromptArgs({ agentSlug, prompt: conversationContext, model });
 
   // Compute timeout: config.runtime.workerTimeoutMinutes → ms, fallback to spawnAsync default (45min)
   const workerTimeoutMinutes = Number(config?.runtime?.workerTimeoutMinutes || 0);
