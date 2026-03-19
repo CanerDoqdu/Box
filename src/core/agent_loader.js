@@ -11,7 +11,7 @@
  * Edit an agent's behavior by editing their .agent.md file — no code changes needed.
  */
 
-import { existsSync, appendFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, appendFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { isModelBanned } from "./model_policy.js";
@@ -124,6 +124,52 @@ export function buildAgentArgs({ agentSlug, prompt, model, allowAll = true }) {
     promptText = `Your full instructions are in the file: ${promptFile}\nRead that file NOW with your read_file / view tool, then follow every instruction in it.`;
   }
   args.push("-p", promptText);
+  return args;
+}
+
+// ── Read agent persona text from .agent.md (strips YAML frontmatter) ─────────
+
+export function readAgentPersona(slug) {
+  const filePath = path.join(AGENTS_DIR, `${slug}.agent.md`);
+  if (!existsSync(filePath)) return "";
+  const raw = readFileSync(filePath, "utf8");
+  // Strip YAML frontmatter (--- ... ---)
+  const stripped = raw.replace(/^---[\s\S]*?---\s*/, "");
+  return stripped.trim();
+}
+
+// ── Build CLI args for single-prompt worker calls (no autopilot/tools) ───────
+//
+// Workers get ONE request: --model + -p with persona embedded in prompt.
+// No --agent, no --autopilot, no --allow-all, no tool calls.
+// The worker must output everything in a single response.
+
+export function buildWorkerPromptArgs({ agentSlug, prompt, model }) {
+  const args = [];
+
+  // Resolve model
+  const banCheck = isModelBanned(model || "");
+  if (banCheck.banned) {
+    const safe = toCopilotModelSlug("Claude Sonnet 4.6");
+    if (safe) args.push("--model", safe);
+    logBannedModelAttempt(model, banCheck.reason);
+  } else {
+    const slug = toCopilotModelSlug(model || "Claude Sonnet 4.6");
+    if (slug) args.push("--model", slug);
+  }
+
+  // Embed persona from .agent.md into prompt
+  const persona = agentSlug ? readAgentPersona(agentSlug) : "";
+  let fullPrompt = persona
+    ? `## YOUR ROLE\n${persona}\n\n${String(prompt)}`
+    : String(prompt);
+
+  if (fullPrompt.length > PROMPT_FILE_THRESHOLD) {
+    const promptFile = path.join(STATE_DIR, `prompt_${agentSlug || "worker"}_${Date.now()}.md`);
+    writeFileSync(promptFile, fullPrompt, "utf8");
+    fullPrompt = `Your full instructions are in the file: ${promptFile}\nRead that file NOW, then follow every instruction in it.`;
+  }
+  args.push("-p", fullPrompt);
   return args;
 }
 
