@@ -6,6 +6,7 @@
   "description": "Repo-agnostic autonomous engineering orchestrator starter",
   "scripts": {
     "lint": "eslint src/",
+    "test": "node --test",
     "box:on": "node src/cli.js on",
     "box:off": "node src/cli.js off",
     "box:up": "pwsh -NoProfile -File scripts/box-up.ps1",
