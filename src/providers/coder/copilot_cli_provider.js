@@ -1,4 +1,15 @@
-import { execSync } from "node:child_process";
+import { execSync, spawnSync } from "node:child_process";
+import { toCopilotModelSlug } from "../../core/agent_loader.js";
+
+const COPILOT_CLI_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.BOX_COPILOT_CLI_TIMEOUT_MS || "0");
+  // 0 means no timeout — workers must be free to think as long as needed.
+  // Set BOX_COPILOT_CLI_TIMEOUT_MS to a positive integer (ms) to enforce a cap.
+  if (!Number.isFinite(raw) || raw < 0) {
+    return 0;
+  }
+  return Math.floor(raw);
+})();
 
 function normalizeModelName(name) {
   return String(name || "").trim();
@@ -20,6 +31,88 @@ function parseMultipliers(jsonText) {
   }
 }
 
+function parsePreferenceValue(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeModelName(item)).filter(Boolean);
+  }
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text) {
+      return [];
+    }
+    if (text.includes(",")) {
+      return text.split(",").map((item) => normalizeModelName(item)).filter(Boolean);
+    }
+    return [normalizeModelName(text)].filter(Boolean);
+  }
+  return [];
+}
+
+function modelCapabilityScore(modelName) {
+  const key = String(modelName || "").toLowerCase();
+  const scored = [
+    [/claude\s+opus/, 5.0],
+    [/claude\s+sonnet/, 4.4],
+    [/gpt-?5\.3\s*codex|gpt\s*5\.3\s*codex/, 4.1],
+    [/gpt-?5\.2\s*codex|gpt\s*5\.2\s*codex/, 3.8],
+    [/gpt-?5/, 3.6],
+    [/claude\s+haiku/, 3.0],
+    [/gpt-?4\.1|gpt\s*4\.1/, 3.0]
+  ];
+  for (const [pattern, score] of scored) {
+    if (pattern.test(key)) {
+      return score;
+    }
+  }
+  return 3.4;
+}
+
+function estimateComplexityBand(taskTitle, taskKind) {
+  const text = `${String(taskTitle || "")} ${String(taskKind || "")}`.toLowerCase();
+  const highSignals = [
+    "security", "incident", "critical", "architecture", "migration", "production", "outage", "auth", "data loss", "race condition"
+  ];
+  const lowSignals = [
+    "docs", "readme", "format", "typo", "small", "lint", "rename", "comment"
+  ];
+
+  if (highSignals.some((signal) => text.includes(signal))) {
+    return "high";
+  }
+  if (lowSignals.some((signal) => text.includes(signal))) {
+    return "low";
+  }
+  return "medium";
+}
+
+function targetCapabilityForBand(band) {
+  if (band === "high") {
+    return 4.3;
+  }
+  if (band === "low") {
+    return 3.6;
+  }
+  return 4.0;
+}
+
+function chooseDynamicCandidate(candidates, targetCapability) {
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const rankedAsc = candidates
+    .map((model) => ({ model, score: modelCapabilityScore(model) }))
+    .sort((a, b) => a.score - b.score);
+
+  const atOrAbove = rankedAsc.filter((item) => item.score >= targetCapability);
+  if (atOrAbove.length > 0) {
+    // Pick the lightest model that still meets target capability.
+    return atOrAbove[0].model;
+  }
+
+  return rankedAsc[rankedAsc.length - 1].model;
+}
+
 function shouldEscalateToOpus(taskTitle, taskKind, allowOpusEscalation, escalationKeywords) {
   if (!allowOpusEscalation) {
     return false;
@@ -35,8 +128,17 @@ function shouldEscalateToOpus(taskTitle, taskKind, allowOpusEscalation, escalati
 
 function commandSupportsModelFlag(command) {
   try {
-    const output = execSync(`${command} code --help`, { stdio: ["ignore", "pipe", "pipe"] }).toString("utf8").toLowerCase();
+    const output = execSync(`${command} --help`, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }).toString("utf8").toLowerCase();
     return output.includes("--model");
+  } catch {
+    return false;
+  }
+}
+
+function commandUsesPromptMode(command) {
+  try {
+    const output = execSync(`${command} --help`, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }).toString("utf8").toLowerCase();
+    return output.includes("--prompt") || output.includes("-p, --prompt");
   } catch {
     return false;
   }
@@ -70,8 +172,10 @@ export function chooseCopilotModel({
   strategy,
   taskTitle,
   taskKind,
+  roleName,
   defaultModel,
   preferredModelsByTaskKindJson,
+  preferredModelsByRoleJson,
   opusModel,
   allowOpusEscalation,
   teamLeadAllowOpus,
@@ -84,29 +188,36 @@ export function chooseCopilotModel({
 }) {
   const targetStrategy = String(strategy || "task-best").toLowerCase();
   const preferredModels = parseMultipliers(preferredModelsByTaskKindJson);
+  const preferredByRole = parseMultipliers(preferredModelsByRoleJson);
   const neverUseModels = parseCsv(neverUseModelsCsv);
   const allowedModels = parseCsv(allowedModelsCsv);
   const escalationKeywords = parseCsv(opusEscalationKeywordsCsv);
   const multipliers = parseMultipliers(multipliersJson);
 
-  const normalizedDefault = normalizeModelName(defaultModel) || "Claude Sonnet 4.5";
+  const normalizedDefault = normalizeModelName(defaultModel) || "GPT-5.3-Codex";
   const normalizedTaskKind = String(taskKind || "general").toLowerCase();
 
   let selected = normalizedDefault;
   let escalationSource = null;
   if (targetStrategy === "task-best") {
-    const byKind = normalizeModelName(preferredModels[normalizedTaskKind]);
-    if (byKind) {
-      selected = byKind;
+    const normalizedRoleName = String(roleName || "").trim();
+    const roleCandidates = parsePreferenceValue(preferredByRole[normalizedRoleName]);
+    const kindCandidates = parsePreferenceValue(preferredModels[normalizedTaskKind]);
+    const candidatePool = [...new Set([...roleCandidates, ...kindCandidates, normalizedDefault])];
+    const complexityBand = estimateComplexityBand(taskTitle, normalizedTaskKind);
+    const targetCapability = targetCapabilityForBand(complexityBand);
+    const dynamicSelected = chooseDynamicCandidate(candidatePool, targetCapability);
+    if (dynamicSelected) {
+      selected = dynamicSelected;
     }
 
     if (teamLeadAllowOpus) {
-      selected = normalizeModelName(opusModel) || "Claude Opus 4.6";
+      selected = normalizeModelName(opusModel) || "GPT-5.3-Codex";
       escalationSource = "team-lead";
     }
 
     if (shouldEscalateToOpus(taskTitle, normalizedTaskKind, allowOpusEscalation, escalationKeywords)) {
-      selected = normalizeModelName(opusModel) || "Claude Opus 4.6";
+      selected = normalizeModelName(opusModel) || "GPT-5.3-Codex";
       escalationSource = escalationSource || "keyword";
     }
   }
@@ -117,7 +228,7 @@ export function chooseCopilotModel({
     multipliers,
     maxMultiplier,
     defaultModel: normalizedDefault,
-    opusModel: normalizeModelName(opusModel) || "Claude Opus 4.6",
+    opusModel: normalizeModelName(opusModel) || "GPT-5.3-Codex",
     allowOpusEscalation
   });
 
@@ -133,41 +244,152 @@ export function chooseCopilotModel({
   };
 }
 
-function escapePrompt(prompt) {
-  return String(prompt || "").replace(/"/g, '\\"');
+function runCopilotCli(command, args) {
+  const timeoutOption = COPILOT_CLI_TIMEOUT_MS > 0 ? { timeout: COPILOT_CLI_TIMEOUT_MS, killSignal: "SIGKILL" } : {};
+  const result = spawnSync(command, args, {
+    encoding: "utf8",
+    ...timeoutOption,
+    maxBuffer: 100 * 1024 * 1024,
+    windowsHide: true
+  });
+  const stdout = String(result.stdout || "");
+  const stderr = String(result.stderr || "");
+
+  if (stdout) {
+    process.stdout.write(stdout);
+  }
+  if (stderr) {
+    process.stderr.write(stderr);
+  }
+
+  return {
+    ok: result.status === 0,
+    status: result.status,
+    stdout,
+    stderr,
+    error: result.error ? String(result.error.message || result.error) : "",
+    timedOut: Boolean(result.error && String(result.error.code || "") === "ETIMEDOUT")
+  };
+}
+
+function clipText(value, max = 1200) {
+  const text = String(value || "");
+  return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+
+function buildResponsePreview(result) {
+  const stdout = String(result?.stdout || "").trim();
+  const stderr = String(result?.stderr || "").trim();
+  const error = String(result?.error || "").trim();
+  const merged = [stdout, stderr, error].filter(Boolean).join("\n");
+  return clipText(merged, 1800);
 }
 
 export function buildTaskPrompt({ taskTitle, taskKind }) {
   return [
-    `Implement this task with minimal safe diff: ${taskTitle}.`,
-    `Task kind: ${taskKind || "general"}.`,
-    "Select the highest quality implementation for the task scope.",
-    "Follow repository conventions and existing abstractions.",
-    "Do not add unrelated refactors or speculative features.",
-    "Run build and tests after changes."
-  ].join(" ");
+    "<role>",
+    "You are a senior software engineer with 10+ years of professional experience, working inside an autonomous delivery runtime.",
+    "You write production-quality code: correct, minimal, testable, and aligned with the existing codebase conventions.",
+    "You think before you act — read the relevant code first, form a precise plan, then apply the smallest diff that satisfies the requirement.",
+    "</role>",
+    "<task>",
+    `Task: ${taskTitle}.`,
+    `Kind: ${taskKind || "general"}.`,
+    "Deliver a concrete, working implementation. Do not stop at analysis or suggestions — apply the actual changes.",
+    "</task>",
+    "<engineering_standards>",
+    "1. Correctness first: the change must be semantically correct and not break existing behavior.",
+    "2. Minimal diff: touch only the files and lines required by this task.",
+    "3. Preserve architecture: match the existing patterns, naming conventions, and module boundaries.",
+    "4. No speculative changes: do not improve unrelated code, add unasked-for abstractions, or future-proof unnecessarily.",
+    "5. Deterministic: avoid randomness, timing dependencies, or environment-specific assumptions.",
+    "6. Reversible: prefer changes that can be safely reverted without cascading side effects.",
+    "7. If the task is genuinely ambiguous or impossible given the codebase state, fail explicitly with a clear reason — do not guess.",
+    "</engineering_standards>",
+    "<allowed_actions>",
+    "- Read and edit task-related source files.",
+    "- Add or adjust targeted tests covering the changed behavior.",
+    "- Run build, test, lint, and security checks as required by the repository.",
+    "</allowed_actions>",
+    "<forbidden_actions>",
+    "- Do not modify CI, infrastructure, or deployment configuration unless this task explicitly requires it.",
+    "- Do not perform broad refactors or cleanups unrelated to this task.",
+    "- Do not introduce new dependencies without a clear necessity.",
+    "- Do not invent new architectural patterns or abstractions beyond task scope.",
+    "</forbidden_actions>",
+    "<acceptance_criteria>",
+    "1. Only task-related files are modified — no collateral changes.",
+    "2. All required gates (build, tests, lint, security) pass for this repository.",
+    "3. The implementation is production-safe, policy-compliant, and consistent with codebase conventions.",
+    "4. No secrets, credentials, or environment-specific values are hardcoded.",
+    "</acceptance_criteria>",
+    "<output_format>",
+    "Apply code edits directly. Provide concise implementation notes explaining non-obvious decisions only.",
+    "</output_format>"
+  ].join("\n");
 }
 
 export function runCopilotPrompt(command, prompt, modelDecision) {
-  const baseCommand = `${command} code --prompt "${escapePrompt(prompt)}"`;
   const supportsModel = commandSupportsModelFlag(command);
+  const usesPromptMode = commandUsesPromptMode(command);
+  const requestedModel = toCopilotModelSlug(modelDecision.model);
+  const baseArgs = usesPromptMode
+    ? ["--allow-all-tools", "--prompt", String(prompt || "")]
+    : ["code", "--prompt", String(prompt || "")];
 
-  if (modelDecision.model && supportsModel) {
-    const manualCmd = `${baseCommand} --model "${modelDecision.model}"`;
-    try {
-      execSync(manualCmd, { stdio: "inherit" });
-      return { ...modelDecision, invocation: "task-best-manual" };
-    } catch {
-      execSync(baseCommand, { stdio: "inherit" });
-      return { ...modelDecision, invocation: "auto-fallback" };
+  function throwFailure(result, mode) {
+    const details = [
+      `copilot invocation failed (${mode})`,
+      `status=${result.status}`,
+      `timedOut=${result.timedOut ? "true" : "false"}`,
+      `stdout=${result.stdout || ""}`,
+      `stderr=${result.stderr || ""}`,
+      `error=${result.error || ""}`
+    ].join("\n");
+    throw new Error(details);
+  }
+
+  if (requestedModel && supportsModel) {
+    const manual = runCopilotCli(command, [...baseArgs, "--model", requestedModel]);
+    if (manual.ok) {
+      return {
+        ...modelDecision,
+        invocation: "task-best-manual",
+        responsePreview: buildResponsePreview(manual)
+      };
     }
+
+    const fallback = runCopilotCli(command, baseArgs);
+    if (fallback.ok) {
+      return {
+        ...modelDecision,
+        invocation: "auto-fallback",
+        responsePreview: buildResponsePreview(fallback)
+      };
+    }
+
+    throwFailure(fallback, "manual-then-auto-fallback");
   }
 
   if (modelDecision.model && !supportsModel) {
-    execSync(baseCommand, { stdio: "inherit" });
-    return { ...modelDecision, invocation: "no-model-flag-fallback" };
+    const result = runCopilotCli(command, baseArgs);
+    if (!result.ok) {
+      throwFailure(result, "no-model-flag-fallback");
+    }
+    return {
+      ...modelDecision,
+      invocation: "no-model-flag-fallback",
+      responsePreview: buildResponsePreview(result)
+    };
   }
 
-  execSync(baseCommand, { stdio: "inherit" });
-  return { ...modelDecision, invocation: "auto" };
+  const result = runCopilotCli(command, baseArgs);
+  if (!result.ok) {
+    throwFailure(result, "auto");
+  }
+  return {
+    ...modelDecision,
+    invocation: "auto",
+    responsePreview: buildResponsePreview(result)
+  };
 }

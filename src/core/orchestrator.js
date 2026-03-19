@@ -1,228 +1,512 @@
-import { scanProject } from "./project_scanner.js";
-import { createPlan } from "./task_planner.js";
-import { enqueueMissingTasks, popNextQueuedTask, markTask } from "./task_queue.js";
-import { loadBudget, chargeBudget, canUseClaude } from "./budget_controller.js";
-import { loadPolicy } from "./policy_engine.js";
-import { writeCheckpoint } from "./checkpoint_engine.js";
-import { evaluateGates } from "./gates.js";
-import { runWorkerTask } from "./worker_runner.js";
-import { writeJson } from "./fs_utils.js";
-import { ClaudeReviewer } from "../providers/reviewer/claude_reviewer.js";
-import { info, warn } from "./logger.js";
-import { resolveTaskRoute } from "./task_routing.js";
-import {
-  appendCopilotUsage,
-  appendProgress,
-  getCurrentMonthCopilotStats,
-  updateTaskInTestsState
-} from "./state_tracker.js";
+/**
+ * BOX Orchestrator — Resume-From-Checkpoint Architecture
+ *
+ * Startup:
+ *   1. Read last checkpoint (moses_coordination.json + worker_sessions.json)
+ *   2. If workers are active → resume monitoring them, ZERO AI calls
+ *   3. If no checkpoint exists → first-ever run → Jesus activates ONCE
+ *   4. If Moses reports a systemic error → escalate to Jesus
+ *
+ * Ongoing loop (worker monitoring):
+ *   - Workers active → wait for them to finish (no AI cost)
+ *   - Workers finished + remaining plans → Moses dispatches next batch
+ *   - All plans done → system sleeps (no Jesus re-trigger)
+ *   - Only Moses escalation (jesus_escalation.json) can wake Jesus mid-run
+ */
 
-async function buildWorkerOverrides({ config, task, summary, taskRoute, reviewer, claudeEnabled }) {
-  const baseOverrides = {
-    selectedAgent: taskRoute.selectedAgent,
-    promptFile: taskRoute.promptFile,
-    promptTemplateText: taskRoute.promptTemplateText
-  };
+import path from "node:path";
+import { appendProgress } from "./state_tracker.js";
+import { readStopRequest, writeDaemonPid, clearDaemonPid, clearStopRequest, readReloadRequest, clearReloadRequest } from "./daemon_control.js";
+import { loadConfig } from "../config.js";
+import { runJesusCycle } from "./jesus_supervisor.js";
+import { runTrumpAnalysis } from "./trump.js";
+import { runMosesCycle } from "./moses_coordinator.js";
+import { runSelfImprovementCycle } from "./self_improvement.js";
+import { capturePreWorkBaseline, runProjectCompletion, isProjectAlreadyCompleted } from "./project_lifecycle.js";
+import { warn } from "./logger.js";
+import { readJson, writeJson } from "./fs_utils.js";
 
-  if (!claudeEnabled) {
-    return {
-      ...baseOverrides,
-      teamLeadAllowOpus: false,
-      teamLeadReason: "claude disabled"
-    };
-  }
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
+/** Attempt to start the dashboard server alongside the daemon (non-blocking, non-fatal). */
+async function tryStartDashboard() {
   try {
-    const budget = await loadBudget(config);
-    const opusDecision = await reviewer.recommendOpusForTask(task, summary, budget);
-    await chargeBudget(config, { usd: 0.02, claudeCalls: 1 });
-
-    const monthlyStats = await getCurrentMonthCopilotStats(config);
-    const enoughBudget = Number(budget.remainingUsd) >= Number(config.copilot.opusMinBudgetUsd || 2);
-    const underMonthlyCap = Number(monthlyStats.opusCalls) < Number(config.copilot.opusMonthlyMaxCalls || 8);
-    const finalAllowOpus = Boolean(opusDecision.allowOpus && enoughBudget && underMonthlyCap);
-
-    const gateReasons = [];
-    if (!enoughBudget) {
-      gateReasons.push(`budget below opus floor (${budget.remainingUsd} < ${config.copilot.opusMinBudgetUsd})`);
-    }
-    if (!underMonthlyCap) {
-      gateReasons.push(`monthly opus cap reached (${monthlyStats.opusCalls}/${config.copilot.opusMonthlyMaxCalls})`);
-    }
-
-    return {
-      ...baseOverrides,
-      teamLeadAllowOpus: finalAllowOpus,
-      teamLeadReason: finalAllowOpus
-        ? opusDecision.reason
-        : [
-            opusDecision.allowOpus ? null : `team lead denied: ${opusDecision.reason}`,
-            ...gateReasons
-          ].filter(Boolean).join("; ")
-    };
-  } catch (error) {
-    warn("opus escalation decision failed, defaulting to no escalation", error?.message ?? error);
-    return {
-      ...baseOverrides,
-      teamLeadAllowOpus: false,
-      teamLeadReason: "decision error fallback"
-    };
-  }
-}
-
-async function finalizeTaskResult({ config, task, workerResult, reviewer, claudeEnabled, policy }) {
-  if (workerResult.copilotMeta) {
-    await appendCopilotUsage(config, {
-      taskId: task.id,
-      taskKind: task.kind || "general",
-      taskTitle: task.title,
-      copilot: workerResult.copilotMeta
-    });
-    await appendProgress(
-      config,
-      `Task ${task.id} Copilot mode=${workerResult.copilotMeta.mode || "unknown"} model=${workerResult.copilotMeta.model || "unknown"}`
-    );
-  }
-
-  const gates = evaluateGates(config, workerResult);
-  let review = { approved: gates.ok, reason: "claude disabled" };
-  if (claudeEnabled) {
-    try {
-      review = await reviewer.reviewResult(task, workerResult, gates);
-      await chargeBudget(config, { usd: 0.06, claudeCalls: 1 });
-    } catch (error) {
-      warn("claude review failed, using deterministic fallback", error?.message ?? error);
-      review = { approved: gates.ok, reason: "fallback deterministic gates" };
-    }
-  }
-
-  const checkpointPath = await writeCheckpoint(config, {
-    timestamp: new Date().toISOString(),
-    task,
-    workerResult,
-    gates,
-    review,
-    policy
-  });
-
-  if (!workerResult.ok || !gates.ok || !review.approved) {
-    const failureNotes = [
-      workerResult.ok ? null : `worker exit ${workerResult.exitCode ?? "unknown"}`,
-      gates.ok ? null : `gates: ${gates.failures.join(", ")}`,
-      review.approved ? null : `review: ${review.reason}`
-    ].filter(Boolean).join(" | ");
-
-    await markTask(config, task, "failed", {
-      failureReason: [
-        workerResult.ok ? null : "worker failed",
-        gates.ok ? null : gates.failures.join(", "),
-        review.approved ? null : `review blocked: ${review.reason}`
-      ].filter(Boolean).join(" | "),
-      checkpointPath
-    });
-    await updateTaskInTestsState(config, task, "failed", failureNotes || "Task failed");
-    await chargeBudget(config, { workerRuns: 1 });
-    await appendProgress(config, `Task ${task.id} failed: ${review.reason}`);
-    warn(`task ${task.id} failed`, { gates, review, checkpointPath });
-    return;
-  }
-
-  await markTask(config, task, "passed", { checkpointPath, reviewReason: review.reason });
-  await updateTaskInTestsState(config, task, "passed", "Task gates passed and review approved");
-  await chargeBudget(config, { workerRuns: 1 });
-  await appendProgress(config, `Task ${task.id} passed`);
-  info(`task ${task.id} passed`, { checkpointPath });
-}
-
-export async function runOnce(config) {
-  const summary = await scanProject(config);
-  await writeJson(config.paths.summaryFile, summary);
-  await appendProgress(config, "Project scan completed");
-
-  const budget = await loadBudget(config);
-  const claudeEnabled = canUseClaude(budget) && Boolean(config.env.claudeApiKey);
-  const reviewer = new ClaudeReviewer(claudeEnabled ? config.env.claudeApiKey : null, config.claude);
-  const policy = await loadPolicy(config);
-
-  const plannedTasks = await createPlan({ summary, reviewer, config });
-  if (claudeEnabled && config.planner.useClaudeForPlanning) {
-    await chargeBudget(config, { usd: 0.04, claudeCalls: 1 });
-  }
-  await enqueueMissingTasks(config, plannedTasks);
-  await appendProgress(config, `Plan prepared with ${plannedTasks.length} tasks`);
-
-  const maxWorkers = Math.max(1, Number(config.maxParallelWorkers || 1));
-  const tasks = [];
-  for (let i = 0; i < maxWorkers; i += 1) {
-    const nextTask = await popNextQueuedTask(config);
-    if (!nextTask) {
-      break;
-    }
-    tasks.push(nextTask);
-  }
-
-  if (tasks.length === 0) {
-    info("no queued tasks left");
-    await appendProgress(config, "No queued tasks left");
-    return;
-  }
-
-  await appendProgress(config, `Dispatching ${tasks.length} task(s) with maxParallelWorkers=${maxWorkers}`);
-
-  const running = [];
-  for (const task of tasks) {
-    info(`running task ${task.id}: ${task.title}`);
-    await appendProgress(config, `Task ${task.id} started: ${task.title}`);
-    await updateTaskInTestsState(config, task, "running", "Worker execution started");
-
-    const taskRoute = await resolveTaskRoute(config, task);
-    await appendProgress(
-      config,
-      `Task ${task.id} routing agent=${taskRoute.selectedAgent} promptFile=${taskRoute.promptFile}`
-    );
-
-    const workerOverrides = await buildWorkerOverrides({
-      config,
-      task,
-      summary,
-      taskRoute,
-      reviewer,
-      claudeEnabled
-    });
-
-    await appendProgress(
-      config,
-      `Task ${task.id} team-lead Opus decision=${workerOverrides.teamLeadAllowOpus ? "allow" : "deny"} reason=${workerOverrides.teamLeadReason}`
-    );
-
-    running.push({
-      task,
-      workerPromise: runWorkerTask(config, task, workerOverrides)
-    });
-  }
-
-  for (const item of running) {
-    const workerResult = await item.workerPromise;
-    await finalizeTaskResult({
-      config,
-      task: item.task,
-      workerResult,
-      reviewer,
-      claudeEnabled,
-      policy
-    });
+    const { startDashboard } = await import("../dashboard/live_dashboard.js");
+    startDashboard();
+  } catch (err) {
+    warn(`[orchestrator] dashboard auto-start failed (non-fatal): ${String(err?.message || err)}`);
   }
 }
 
 export async function runDaemon(config) {
-  info("daemon started");
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    try {
-      await runOnce(config);
-    } catch (error) {
-      warn("runOnce crashed", error?.message ?? error);
+  const liveConfig = Object.assign({}, config);
+  const pid = process.pid;
+  const stateDir = liveConfig.paths?.stateDir || "state";
+  await writeDaemonPid(liveConfig, pid);
+  await appendProgress(liveConfig, `[BOX] Daemon started pid=${pid}`);
+
+  await tryStartDashboard();
+
+  process.on("SIGTERM", async () => {
+    await appendProgress(liveConfig, "[BOX] SIGTERM received, stopping");
+    await clearDaemonPid(liveConfig);
+    process.exit(0);
+  });
+
+  process.on("SIGINT", async () => {
+    await appendProgress(liveConfig, "[BOX] SIGINT received, stopping");
+    await clearDaemonPid(liveConfig);
+    process.exit(0);
+  });
+
+  // ── Checkpoint-based startup: resume from where we left off ──
+  const sessions = await readJson(path.join(stateDir, "worker_sessions.json"), {});
+  const mosesState = await readJson(path.join(stateDir, "moses_coordination.json"), {});
+  const jesusDirective = await readJson(path.join(stateDir, "jesus_directive.json"), null);
+
+  // Reset zombie workers that were "working" when daemon died (stale > 2× timeout)
+  // Must check BOTH aggregate (worker_sessions.json) AND per-worker files (worker_*.json)
+  // because Moses loadSessions overlays per-worker files on top of aggregate.
+  const workerTimeoutMs = Number(liveConfig.runtime?.workerTimeoutMinutes || 30) * 60 * 1000;
+  const staleThresholdMs = workerTimeoutMs * 2;
+  const now = Date.now();
+  let zombieReset = false;
+  const knownRoles = ["King David", "Esther", "Aaron", "Joseph", "Samuel", "Isaiah", "Noah", "Elijah", "Issachar", "Ezra"];
+  for (const roleName of knownRoles) {
+    const perWorkerPath = path.join(stateDir, `worker_${roleName.toLowerCase().replace(/\s+/g, "_")}.json`);
+    const perWorker = await readJson(perWorkerPath, null);
+    if (perWorker?.status === "working" && perWorker?.startedAt) {
+      const age = now - new Date(perWorker.startedAt).getTime();
+      if (age > staleThresholdMs) {
+        perWorker.status = "idle";
+        perWorker.startedAt = null;
+        await writeJson(perWorkerPath, perWorker);
+        if (sessions[roleName]) {
+          sessions[roleName].status = "idle";
+          sessions[roleName].startedAt = null;
+        }
+        zombieReset = true;
+        await appendProgress(liveConfig, `[STARTUP] Reset zombie worker ${roleName} (stale ${Math.round(age / 60000)}min)`);
+      }
     }
-    await new Promise((resolve) => setTimeout(resolve, config.loopIntervalMs));
+  }
+  if (zombieReset) {
+    await writeJson(path.join(stateDir, "worker_sessions.json"), sessions);
+  }
+
+  const activeWorkers = Object.entries(sessions)
+    .filter(([, s]) => s?.status === "working")
+    .map(([name]) => name);
+
+  const hasCheckpoint = mosesState?.coordinatedAt || (jesusDirective && jesusDirective.decidedAt);
+
+  if (activeWorkers.length > 0) {
+    // Workers still running from last session — just monitor them, zero AI cost
+    await appendProgress(liveConfig,
+      `[STARTUP] Resuming from checkpoint — ${activeWorkers.length} workers active (${activeWorkers.join(", ")}). No AI calls.`
+    );
+  } else if (hasCheckpoint) {
+    // Checkpoint exists but no active workers — continue from last coordination state
+    await appendProgress(liveConfig, "[STARTUP] Resuming from checkpoint — no active workers, entering main loop");
+  } else {
+    // No checkpoint at all — first ever run, Jesus must initialize
+    await appendProgress(liveConfig, "[STARTUP] No checkpoint found — first run, Jesus activating");
+    // Capture pre-work baseline tag before any changes (non-fatal)
+    await capturePreWorkBaseline(liveConfig);
+    await runStartupCycle(liveConfig);
+  }
+
+  await mainLoop(liveConfig);
+}
+
+export async function runOnce(config) {
+  await runStartupCycle(config);
+}
+
+export async function runRebase(_config, _opts = {}) {
+  return { triggered: false, reason: "not applicable in conversation-based architecture" };
+}
+
+// ── Loop intervals ────────────────────────────────────────────────────────────
+const _ESCALATION_POLL_MS = 30 * 1000;   // 30 sec — only checks stop+escalation, no AI
+const WORKERS_DONE_POLL_MS = 30 * 1000; // 30 sec — wait for all workers to finish
+
+function roleToWorkerStateFile(role) {
+  const slug = String(role || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return `worker_${slug}.json`;
+}
+
+function getLastWorkerReportedStatus(session, role) {
+  const history = Array.isArray(session?.history) ? session.history : [];
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    const entry = history[i];
+    if (!entry || entry.from === "moses") continue;
+    if (role && entry.from && entry.from !== role) continue;
+    const status = String(entry.status || "").toLowerCase();
+    if (status) return status;
+  }
+  return "";
+}
+
+async function recoverStaleWorkerSessions(config, stateDir, sessions) {
+  const recoveredRoles = [];
+
+  for (const [role, session] of Object.entries(sessions || {})) {
+    if (session?.status !== "working") continue;
+
+    const reportedStatus = getLastWorkerReportedStatus(session, role);
+    if (["done", "partial", "blocked"].includes(reportedStatus)) {
+      session.status = "idle";
+      recoveredRoles.push(role);
+      continue;
+    }
+
+    // No time-based recovery: long-running workers are allowed to run indefinitely.
+  }
+
+  if (recoveredRoles.length === 0) return false;
+
+  await writeJson(path.join(stateDir, "worker_sessions.json"), sessions);
+
+  for (const role of recoveredRoles) {
+    const workerStatePath = path.join(stateDir, roleToWorkerStateFile(role));
+    const workerState = await readJson(workerStatePath, null);
+    if (workerState && workerState.status === "working") {
+      workerState.status = "idle";
+      await writeJson(workerStatePath, workerState);
+    }
+  }
+
+  await appendProgress(
+    config,
+    `[LOOP] Recovered stale worker states (${recoveredRoles.length}): ${recoveredRoles.join(", ")}`
+  );
+  warn(`[orchestrator] Recovered stale worker states: ${recoveredRoles.join(", ")}`);
+  return true;
+}
+
+async function hasActiveWorkersAsync(config) {
+  try {
+    const stateDir = config.paths?.stateDir || "state";
+    const sessions = await readJson(path.join(stateDir, "worker_sessions.json"), {});
+    await recoverStaleWorkerSessions(config, stateDir, sessions);
+    return Object.values(sessions).some(s => s?.status === "working");
+  } catch { return false; }
+}
+
+// Wait until all workers are done (or timeout), then call Moses once for final report
+async function waitForWorkersAndFinalize(config) {
+  while (true) {
+    const stopReq = await readStopRequest(config);
+    if (stopReq?.requestedAt) {
+      await appendProgress(
+        config,
+        `[LOOP] Stop requested while waiting workers: reason=${stopReq.reason || "unknown"}`
+      );
+      return false; // stop requested — bail
+    }
+
+    const stillActive = await hasActiveWorkersAsync(config);
+    if (!stillActive) {
+      await appendProgress(config, "[LOOP] All workers done — cycle complete");
+      return true;
+    }
+    await sleep(WORKERS_DONE_POLL_MS);
   }
 }
+
+// ── Post-completion cleanup ──────────────────────────────────────────────────
+
+async function postCompletionCleanup(config) {
+  const repo = config.env?.targetRepo;
+  const token = config.env?.githubToken;
+  if (!repo || !token) return;
+
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "BOX/1.0"
+  };
+  const base = `https://api.github.com/repos/${repo}`;
+
+  try {
+    // 1. Close duplicate/stale open PRs created by BOX workers
+    const prsRes = await fetch(`${base}/pulls?state=open&per_page=50`, { headers });
+    if (prsRes.ok) {
+      const openPrs = await prsRes.json();
+      const mergedRes = await fetch(`${base}/pulls?state=closed&per_page=50&sort=updated&direction=desc`, { headers });
+      const closedPrs = mergedRes.ok ? await mergedRes.json() : [];
+      const mergedTitles = closedPrs
+        .filter(p => p.merged_at)
+        .map(p => String(p.title || "").toLowerCase().trim());
+
+      for (const pr of openPrs) {
+        const title = String(pr.title || "").toLowerCase().trim();
+        const isDuplicate = mergedTitles.some(mt => mt === title || (title.includes("wave") && mt.includes("wave") && title.slice(0, 30) === mt.slice(0, 30)));
+        if (isDuplicate) {
+          await fetch(`${base}/pulls/${pr.number}`, {
+            method: "PATCH",
+            headers: { ...headers, "Content-Type": "application/json" },
+            body: JSON.stringify({ state: "closed" })
+          });
+          // Add close comment
+          await fetch(`${base}/issues/${pr.number}/comments`, {
+            method: "POST",
+            headers: { ...headers, "Content-Type": "application/json" },
+            body: JSON.stringify({ body: "Duplicate of an already-merged PR. Auto-closed by BOX post-completion cleanup." })
+          });
+          await appendProgress(config, `[CLEANUP] Closed duplicate PR #${pr.number}: ${pr.title}`);
+        }
+      }
+    }
+
+    // 2. Delete remote branches created by BOX that have no open PR
+    //    Squash merges create different commit hashes, so compare-based checks
+    //    miss them. Instead: if it's a BOX branch with no open PR, it's stale.
+    const branchesRes = await fetch(`${base}/branches?per_page=100`, { headers });
+    if (branchesRes.ok) {
+      const branches = await branchesRes.json();
+      // Collect branches that still have an open PR
+      const openPrBranches = new Set();
+      const openPrsRes = await fetch(`${base}/pulls?state=open&per_page=100`, { headers });
+      if (openPrsRes.ok) {
+        const ops = await openPrsRes.json();
+        for (const pr of ops) {
+          if (pr.head?.ref) openPrBranches.add(pr.head.ref);
+        }
+      }
+
+      const boxPrefixes = ["box/", "wave", "pr-", "qa/", "scan/"];
+      for (const branch of branches) {
+        const name = branch.name;
+        if (name === "main" || name === "master" || name === "develop") continue;
+        if (!boxPrefixes.some(p => name.startsWith(p))) continue;
+        if (openPrBranches.has(name)) continue; // still used by an open PR
+
+        try {
+          const deleteRes = await fetch(`${base}/git/refs/heads/${encodeURIComponent(name)}`, {
+            method: "DELETE",
+            headers
+          });
+          if (deleteRes.ok) {
+            await appendProgress(config, `[CLEANUP] Deleted stale branch: ${name}`);
+          }
+        } catch { /* non-fatal */ }
+      }
+    }
+
+    // 3. Enable auto-delete head branches on merge (idempotent)
+    await fetch(base, {
+      method: "PATCH",
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ delete_branch_on_merge: true })
+    });
+  } catch (err) {
+    warn(`[orchestrator] post-completion cleanup error: ${String(err?.message || err)}`);
+  }
+}
+
+// ── Startup cycle: Jesus → Trump? → Moses (only called on first-ever run or escalation) ──
+async function runStartupCycle(config) {
+  try {
+    await appendProgress(config, "[STARTUP] ── Jesus strategic cycle starting ──");
+
+    const jesusDecision = await runJesusCycle(config);
+
+    if (!jesusDecision || jesusDecision.wait === true) {
+      await appendProgress(config, "[STARTUP] Jesus says: wait — nothing to do");
+      return;
+    }
+
+    let trumpPlans = null;
+    if (jesusDecision.callTrump === true) {
+      await appendProgress(config, "[STARTUP] Trump activated for deep project analysis");
+      // Retry Trump once if it fails
+      trumpPlans = await runTrumpAnalysis(config, jesusDecision);
+      if (!trumpPlans) {
+        await appendProgress(config, "[STARTUP] Trump analysis failed — retrying once");
+        trumpPlans = await runTrumpAnalysis(config, jesusDecision);
+        if (!trumpPlans) {
+          await appendProgress(config, "[STARTUP] Trump analysis failed twice — proceeding without Trump plans");
+        }
+      }
+    }
+
+    if (jesusDecision.wakeMoses !== false) {
+      await runMosesCycle(config, jesusDecision, trumpPlans);
+    }
+
+    await appendProgress(config, "[STARTUP] ── Jesus strategic cycle complete ──");
+  } catch (err) {
+    await appendProgress(config, `[STARTUP] Error: ${String(err?.message || err)}`);
+    warn(`[orchestrator] startup cycle error: ${String(err?.message || err)}`);
+  }
+}
+
+// ── Main loop: checkpoint-based ──────────────────────────────
+async function mainLoop(config) {
+  const stateDir = config.paths?.stateDir || "state";
+  const RE_EVAL_SLEEP_MS = 2 * 60 * 1000;
+  const STALLED_WAVE_CYCLES_THRESHOLD = Math.max(2, Number(config?.planner?.stalledWaveEscalationCycles || 3));
+  const STALLED_WAVE_ESCALATION_COOLDOWN_MS = Math.max(60000, Number(config?.planner?.stalledWaveEscalationCooldownMs || (5 * 60 * 1000)));
+  let previousCompletedCount = null;
+  let stalledCycles = 0;
+  let lastAutoEscalationAtMs = 0;
+
+  // Phase 1: wait for any active workers to finish
+  await waitForWorkersAndFinalize(config);
+
+  // Phase 2: continuation loop
+  while (true) {
+    const stopReq = await readStopRequest(config);
+    if (stopReq?.requestedAt) {
+      await appendProgress(config, `[BOX] Stop request detected, shutting down (reason=${stopReq.reason || "unknown"})`);
+      await clearStopRequest(config);
+      await clearDaemonPid(config);
+      break;
+    }
+
+    // Hot-reload
+    try {
+      const reloadReq = await readReloadRequest(config);
+      if (reloadReq?.requestedAt) {
+        await clearReloadRequest(config);
+        const freshConfig = await loadConfig();
+        for (const key of Object.keys(freshConfig)) {
+          config[key] = freshConfig[key];
+        }
+        await appendProgress(config, `[BOX] Hot-reload applied — config refreshed (reason=${reloadReq.reason || "cli-reload"})`);
+      }
+    } catch (err) {
+      warn(`[orchestrator] reload error: ${String(err?.message || err)}`);
+    }
+
+    // Moses escalation → Jesus (systemic problems ONLY)
+    try {
+      const escalation = await readJson(path.join(stateDir, "jesus_escalation.json"), null);
+      if (escalation?.requestedAt) {
+        await appendProgress(config, `[LOOP] Moses escalated to Jesus: ${escalation.reason || "(no reason)"} — running Jesus cycle`);
+        await import("./fs_utils.js").then(m => m.writeJson(path.join(stateDir, "jesus_escalation.json"), {}));
+        await runStartupCycle(config);
+        await waitForWorkersAndFinalize(config);
+        continue;
+      }
+    } catch { /* escalation file may not exist */ }
+
+    // Check remaining work
+    const trumpAnalysis = await readJson(path.join(stateDir, "trump_analysis.json"), null);
+    const jesusDirective = await readJson(path.join(stateDir, "jesus_directive.json"), {});
+    const mosesState = await readJson(path.join(stateDir, "moses_coordination.json"), {});
+    const completedTasks = Array.isArray(mosesState?.completedTasks) ? mosesState.completedTasks : [];
+    const totalPlans = Array.isArray(trumpAnalysis?.plans) ? trumpAnalysis.plans.length : 0;
+    // Count completed plans by matching Trump plan roles in completedTasks text.
+    // Moses adds duplicate/verbose entries — deduplicate by actual plan role.
+    const planRoles = (trumpAnalysis?.plans || []).map(p => String(p.role || "").toLowerCase());
+    const completedRoles = new Set();
+    for (const task of completedTasks) {
+      const taskLower = String(task).toLowerCase();
+      for (const role of planRoles) {
+        if (role && taskLower.includes(role)) completedRoles.add(role);
+      }
+    }
+    // Fallback: also check per-worker session files for "done" evidence.
+    // Workers that completed across retries may not be in completedTasks if Moses
+    // failed to persist the wave-level completion (e.g. dependency chain broke).
+    for (const role of planRoles) {
+      if (completedRoles.has(role)) continue;
+      try {
+        const wf = path.join(stateDir, `worker_${role.replace(/\s+/g, "_")}.json`);
+        const ws = await readJson(wf, null);
+        if (!ws) continue;
+        const lastLog = Array.isArray(ws.activityLog) ? ws.activityLog[ws.activityLog.length - 1] : null;
+        if (lastLog?.status === "done" && lastLog.pr) completedRoles.add(role);
+      } catch { /* ignore */ }
+    }
+    const dedupedCompletedCount = completedRoles.size;
+    const totalWaves = Array.isArray(trumpAnalysis?.executionStrategy?.waves)
+      ? trumpAnalysis.executionStrategy.waves.length
+      : 0;
+
+    // Trump plans are "active" if they exist and have plans, regardless of callTrump flag.
+    // callTrump only controls whether to RE-RUN Trump, not whether existing plans are valid.
+    const trumpActive = trumpAnalysis && totalPlans > 0;
+    const hasRemainingWork = trumpActive && dedupedCompletedCount < totalPlans;
+
+    if (hasRemainingWork && totalWaves > 0) {
+      if (previousCompletedCount !== null && dedupedCompletedCount <= previousCompletedCount) {
+        stalledCycles += 1;
+      } else {
+        stalledCycles = 0;
+      }
+      previousCompletedCount = dedupedCompletedCount;
+
+      const nowMs = Date.now();
+      const escalationCooldownPassed = (nowMs - lastAutoEscalationAtMs) >= STALLED_WAVE_ESCALATION_COOLDOWN_MS;
+      if (stalledCycles >= STALLED_WAVE_CYCLES_THRESHOLD && escalationCooldownPassed) {
+        await appendProgress(config,
+          `[LOOP][WATCHDOG] Wave progress stalled (${completedTasks.length}/${totalWaves} waves across ${stalledCycles} cycles) — escalating to Jesus`
+        );
+        await writeJson(path.join(stateDir, "jesus_escalation.json"), {
+          requestedAt: new Date().toISOString(),
+          reason: `auto-watchdog: no wave progress for ${stalledCycles} cycles`
+        });
+        lastAutoEscalationAtMs = nowMs;
+        stalledCycles = 0;
+        continue;
+      }
+    } else {
+      previousCompletedCount = null;
+      stalledCycles = 0;
+    }
+
+    if (hasRemainingWork) {
+      await appendProgress(config, `[LOOP] Moses continuation — ${dedupedCompletedCount}/${totalPlans} plans done`);
+      try {
+        await runMosesCycle(config, jesusDirective, trumpAnalysis);
+        await waitForWorkersAndFinalize(config);
+      } catch (err) {
+        const msg = String(err?.message || err).slice(0, 200);
+        warn(`[orchestrator] Moses continuation error: ${msg}`);
+        await appendProgress(config, `[LOOP][ERROR] Moses continuation failed: ${msg}`);
+      }
+      await sleep(RE_EVAL_SLEEP_MS);
+    } else {
+      // Workers still busy → just wait, zero cost
+      const workersStillBusy = await hasActiveWorkersAsync(config);
+      if (workersStillBusy) {
+        await sleep(WORKERS_DONE_POLL_MS);
+        continue;
+      }
+
+      // All work done — run post-completion cleanup, project completion, and self-improvement.
+      await postCompletionCleanup(config);
+
+      // Project completion: tag, release, and record (runs once per project)
+      const alreadyCompleted = await isProjectAlreadyCompleted(config);
+      if (!alreadyCompleted) {
+        try {
+          await runProjectCompletion(config);
+        } catch (err) {
+          warn(`[orchestrator] project completion error: ${String(err?.message || err)}`);
+        }
+      }
+
+      // Run self-improvement analysis (AI-driven, reads cycle outcomes)
+      try {
+        await runSelfImprovementCycle(config);
+      } catch (err) {
+        warn(`[orchestrator] self-improvement error: ${String(err?.message || err)}`);
+      }
+
+      await appendProgress(config, `[LOOP] All work complete (${dedupedCompletedCount}/${totalPlans}). System idle — waiting for stop request or escalation.`);
+      await sleep(RE_EVAL_SLEEP_MS);
+    }
+  }
+}
+

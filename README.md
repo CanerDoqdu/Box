@@ -1,138 +1,97 @@
-# BOX
+# BOX Orchestrator
 
-`BOX` is a repo-agnostic orchestration runtime for autonomous software delivery.
-It scans a project, plans tasks, runs isolated workers, and enforces quality gates before merge decisions.
+`BOX` is a Node.js-based orchestration runtime for autonomous software delivery. It coordinates leader/worker agent loops, reads project state, dispatches tasks, and records progress under `state/`.
 
-## For Humans (Short + Honest)
+## What is in this repository
 
-BOX is like that teammate who keeps shipping while everyone else is in a coffee break: it finds issues, plans work, opens branches, runs tests, and preps PRs. It turns the classic "quick look" that usually costs two hours into a cleaner, lower-drama workflow with fewer browser tabs.
+- Runtime entrypoint: `src/cli.js`
+- Config loader: `src/config.js`
+- Main orchestration loop: `src/core/orchestrator.js`
+- Leadership coordination: `src/core/jesus_supervisor.js`, `src/core/moses_coordinator.js`
+- Worker conversation runner: `src/core/worker_runner.js`
 
-## AI Handshake (Machine-Readable)
+## Requirements
 
-```yaml
-project:
-    name: BOX
-    runtime: nodejs-esm
-    purpose: autonomous software delivery orchestrator
-entrypoints:
-    once: npm run box:once
-    daemon: npm run box:start
-    worker: node src/workers/run_task.js
-required_env:
-    - GITHUB_TOKEN
-    - TARGET_REPO
-optional_env:
-    - COPILOT_CLI_COMMAND
-core_modules:
-    - src/core/orchestrator.js
-    - src/core/task_planner.js
-    - src/core/task_queue.js
-    - src/core/policy_engine.js
-    - src/core/budget_controller.js
-    - src/core/checkpoint_engine.js
-providers:
-    coder:
-        - src/providers/coder/copilot_cli_provider.js
-        - src/providers/coder/fallback_provider.js
-    reviewer:
-        - src/providers/reviewer/claude_reviewer.js
-state_files:
-    - state/tasks.json
-    - state/project_summary.json
-    - state/budget.json
-    - state/progress.txt
-    - state/tests.json
-    - state/copilot_usage.json
-    - state/copilot_usage_monthly.json
-docker:
-    worker_image: box-worker:local
-    dockerfile: docker/worker/Dockerfile
-quality_gates:
-    - tests
-    - policy
-    - budget
-    - reviewer_approval
-license:
-    file: LICENSE
-    commercial_use: prohibited
+- Node.js `>=20.0.0`
+- Docker (for compose flow and worker container workflows)
+- Copilot CLI available on PATH (`copilot` by default)
+- GitHub token access for the target repo
+
+## Quick start
+
+1. Copy env template:
+
+```bash
+cp .env.example .env
 ```
 
-## Quick Start
+2. Fill at least:
 
-1. Copy `.env.example` to `.env` and fill required values.
-2. Install dependencies.
+- `GITHUB_TOKEN`
+- `TARGET_REPO` (format: `owner/repo`)
+- `COPILOT_GITHUB_TOKEN` (or legacy fallback `GITHUB_FINEGRADED`)
+
+3. Install deps and run one cycle:
 
 ```bash
 npm install
-```
-
-3. Build worker image.
-
-```bash
-docker build -t box-worker:local -f docker/worker/Dockerfile .
-```
-
-4. Run one cycle.
-
-```bash
 npm run box:once
 ```
 
-5. Run daemon loop.
+4. Run daemon mode:
 
 ```bash
 npm run box:start
+npm run box:stop
 ```
 
-## Operational Notes
+## NPM scripts
 
-- `GITHUB_TOKEN` and `TARGET_REPO` are required for real repository operations.
-- `COPILOT_CLI_COMMAND` can be set per platform in `.env`.
-- Claude is used on critical planning/review paths by default.
-- Reviewer responses are validated via structured JSON + retry flow.
-- Tune behavior in `box.config.json` (for example: `claude.thinking`, `claude.reviewMaxRetries`).
+- `box:up` / `box:down`: start/stop docker-compose services.
+- `box:start`: run daemon loop.
+- `box:stop`: request daemon shutdown.
+- `box:once`: run one startup cycle.
+- `box:rebase`: compatibility command (currently returns not-applicable result).
+- `box:dashboard`: run live dashboard process.
+- `worker:run`: currently points to `src/workers/run_task.js`; verify/restore this entry file before using.
+- `doctor`: checks basic tool and env readiness.
 
-## Copilot Model Strategy
+## Environment variables
 
-- Default strategy is `task-best`.
-- Normal execution uses 1x models from `preferredModelsByTaskKind`.
-- `Claude Opus 4.6` (3x) is used only if team-lead review explicitly allows escalation.
-- `Claude Opus 4.6 (fast mode) (preview)` is blocked via `neverUseModels`.
-- `COPILOT_ALLOW_OPUS=false` disables heuristic escalation.
-- Opus escalation requires all gates: team-lead approval, `opusMinBudgetUsd`, and `opusMonthlyMaxCalls`.
+Authoritative source is `src/config.js`; `.env.example` mirrors the currently supported env surface.
 
-## Prompts, Agents, and Routing
+Practical minimum for real GitHub operations:
 
-- Prompt files: `.github/prompts/*.prompt.md`
-- Agent profiles: `.github/agents/*.md`
-- Included agents: `box-team-lead`, `box-coder`
-- Task-to-agent routing: `copilot.taskKindRouting` in `box.config.json`
-- Parallel dispatch limit: `maxParallelWorkers`
+- `GITHUB_TOKEN`
+- `TARGET_REPO`
+- `COPILOT_GITHUB_TOKEN` (or `GITHUB_FINEGRADED`)
 
-## Docker Behavior
+Common optional overrides:
 
-- Worker containers run as ephemeral jobs via `docker run --rm`.
-- Containers may finish too quickly to notice in Docker Desktop UI.
-- Worker image name should be `box-worker:local`.
-- Successful task branches are pushed and can auto-create PRs (`git.autoCreatePr=true`).
+- `TARGET_BASE_BRANCH` (default: `main`)
+- `BOX_BUDGET_USD` (default: `15`)
+- `BOX_MODE` (default: `local`)
+- `CLAUDE_API_KEY` and `CLAUDE_MODEL` (for Anthropic reviewer/planner paths)
 
-## Architecture
+## Dependency audit (documentation-only)
 
-```text
-BOX Core (orchestrator daemon)
-    |- Project Scanner
-    |- Task Planner
-    |- Policy Engine
-    |- Task Queue
-    |- Budget Controller
-    |- Checkpoint Engine
-                    |
-                    +--> Coder Worker (Copilot)
-                    +--> Reviewer Worker (Claude flow)
-                    +--> Test Worker (Jest/Playwright)
-                    +--> Refactor Worker
-                                        |
-                                        +--> Docker Pool
-                                        +--> Git Manager (branch/commit/push/PR)
-                                        +--> GitHub Repo
+Audit scope: `package.json`, lockfile metadata presence, and Dockerfiles.
+
+Potential upgrade candidates (not upgraded in this change):
+
+- `dotenv` (`^16.4.5`) - review against latest stable line.
+- `eslint` (`^10.0.3`) - verify intended version line and ecosystem compatibility.
+- `docker/worker/Dockerfile` pins `COPILOT_VERSION=v1.0.3` - review for newer Copilot CLI release.
+
+To verify outdated and vulnerable packages in your environment:
+
+```bash
+npm outdated
+npm audit
+npm audit --omit=dev
 ```
+
+## Notes from docs audit
+
+- `src/config.js` supports legacy env key `GITHUB_FINEGRADED` (spelling preserved for backward compatibility). Prefer `COPILOT_GITHUB_TOKEN` in new setups.
+- Some historical README sections referenced files that are not present in this repo snapshot; this README now reflects current paths and scripts only.

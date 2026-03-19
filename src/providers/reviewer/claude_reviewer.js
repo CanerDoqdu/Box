@@ -1,61 +1,6 @@
+import { tryExtractJson, validatePlan, validateDecision, validateOpusDecision } from "./utils.js";
+
 const API_URL = "https://api.anthropic.com/v1/messages";
-
-function tryExtractJson(text) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (!match) {
-      return null;
-    }
-    try {
-      return JSON.parse(match[0]);
-    } catch {
-      return null;
-    }
-  }
-}
-
-function safeArray(value) {
-  return Array.isArray(value) ? value : [];
-}
-
-function sanitizeTask(task) {
-  return {
-    id: Number(task.id),
-    title: String(task.title || ""),
-    priority: Number(task.priority || 0),
-    kind: String(task.kind || "general")
-  };
-}
-
-function validatePlan(payload, fallbackTasks) {
-  const tasks = safeArray(payload?.tasks)
-    .map(sanitizeTask)
-    .filter((t) => Number.isFinite(t.id) && t.title.length > 0 && Number.isFinite(t.priority));
-
-  return tasks.length > 0 ? { tasks } : { tasks: fallbackTasks };
-}
-
-function validateDecision(payload, fallback) {
-  if (typeof payload?.approved !== "boolean") {
-    return fallback;
-  }
-
-  const reason = String(payload?.reason || "review completed");
-  return { approved: payload.approved, reason };
-}
-
-function validateOpusDecision(payload, fallback) {
-  if (typeof payload?.allowOpus !== "boolean") {
-    return fallback;
-  }
-
-  return {
-    allowOpus: payload.allowOpus,
-    reason: String(payload?.reason || "no reason provided")
-  };
-}
 
 function getEvidenceQuotes(workerResult) {
   const lines = [];
@@ -77,8 +22,8 @@ export class ClaudeReviewer {
     this.apiKey = apiKey;
     this.model = options.model || "claude-sonnet-4-6";
     this.reviewMaxRetries = Number(options.reviewMaxRetries || 1);
-    this.reviewMaxTokens = Number(options.reviewMaxTokens || 800);
-    this.planMaxTokens = Number(options.planMaxTokens || 1400);
+    this.reviewMaxTokens = Number(options.reviewMaxTokens || 16000);
+    this.planMaxTokens = Number(options.planMaxTokens || 16000);
     this.thinking = options.thinking || { type: "adaptive", effort: "medium" };
   }
 

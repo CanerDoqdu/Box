@@ -23,7 +23,7 @@ export async function resolveTaskRoute(config, task) {
   try {
     templateText = await fs.readFile(promptPath, "utf8");
   } catch {
-    templateText = "";
+    // falls back to the initial empty string — prompt file is optional
   }
 
   return {
