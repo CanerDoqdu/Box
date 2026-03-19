@@ -441,7 +441,7 @@ async function buildRepoSignals(localRepoDir, files) {
   };
 }
 
-async function buildLocalRepoSnapshot(config) {
+async function _buildLocalRepoSnapshot(config) {
   const localRepoDir = await resolveLocalRepoDir(config);
   if (!localRepoDir) {
     return {

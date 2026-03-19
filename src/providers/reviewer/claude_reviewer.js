@@ -1,43 +1,6 @@
-import { safeArray, tryExtractJson } from "./utils.js";
+import { tryExtractJson, validatePlan, validateDecision, validateOpusDecision } from "./utils.js";
 
 const API_URL = "https://api.anthropic.com/v1/messages";
-
-function sanitizeTask(task) {
-  return {
-    id: Number(task.id),
-    title: String(task.title || ""),
-    priority: Number(task.priority || 0),
-    kind: String(task.kind || "general")
-  };
-}
-
-function validatePlan(payload, fallbackTasks) {
-  const tasks = safeArray(payload?.tasks)
-    .map(sanitizeTask)
-    .filter((t) => Number.isFinite(t.id) && t.title.length > 0 && Number.isFinite(t.priority));
-
-  return tasks.length > 0 ? { tasks } : { tasks: fallbackTasks };
-}
-
-function validateDecision(payload, fallback) {
-  if (typeof payload?.approved !== "boolean") {
-    return fallback;
-  }
-
-  const reason = String(payload?.reason || "review completed");
-  return { approved: payload.approved, reason };
-}
-
-function validateOpusDecision(payload, fallback) {
-  if (typeof payload?.allowOpus !== "boolean") {
-    return fallback;
-  }
-
-  return {
-    allowOpus: payload.allowOpus,
-    reason: String(payload?.reason || "no reason provided")
-  };
-}
 
 function getEvidenceQuotes(workerResult) {
   const lines = [];

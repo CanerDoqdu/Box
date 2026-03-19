@@ -377,7 +377,10 @@ export async function loadConfig() {
       policyFile: path.join(rootDir, fileConfig.policyFile || "policy.json"),
       workspaceDir: path.join(rootDir, fileConfig.workspaceDir || ".box-work"),
       stateDir: path.join(rootDir, "state"),
-      roadmapFile: path.join(rootDir, "state", "roadmap.json")
+      roadmapFile: path.join(rootDir, "state", "roadmap.json"),
+      budgetFile: path.join(rootDir, fileConfig.paths?.budgetFile || "state/budget.json"),
+      testsStateFile: path.join(rootDir, "state", "tests_state.json"),
+      repoStateFile: path.join(rootDir, "state", "repo_state.json")
     }
   };
 }
