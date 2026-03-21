@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { ensureParent, readJson, writeJson } from "./fs_utils.js";
+import { emitEvent } from "./logger.js";
+import { EVENTS, EVENT_DOMAIN } from "./event_schema.js";
 
 // ── Alert severity enum — deterministic constants for all alert records ───────
 export const ALERT_SEVERITY = {
@@ -159,6 +161,7 @@ export async function appendCopilotUsage(config, usage) {
     updatedAt: new Date().toISOString()
   });
 
+  const correlationId = String(usage?.correlationId || `copilot-${Date.now()}`);
   state.entries.push({
     ...usage,
     timestamp: new Date().toISOString()
@@ -176,6 +179,12 @@ export async function appendCopilotUsage(config, usage) {
     generatedAt: new Date().toISOString(),
     byMonth
   });
+
+  // Emit typed billing event (non-blocking; never throws)
+  emitEvent(EVENTS.BILLING_USAGE_RECORDED, EVENT_DOMAIN.BILLING, correlationId, {
+    source: "copilot",
+    model: String(usage?.copilot?.model || "unknown"),
+  });
 }
 
 export async function appendClaudeUsage(config, usage) {
@@ -187,6 +196,7 @@ export async function appendClaudeUsage(config, usage) {
     updatedAt: new Date().toISOString()
   });
 
+  const correlationId = String(usage?.correlationId || `claude-${Date.now()}`);
   state.entries.push({
     ...usage,
     timestamp: new Date().toISOString()
@@ -203,6 +213,14 @@ export async function appendClaudeUsage(config, usage) {
   await writeJson(claudeUsageMonthlyFile, {
     generatedAt: new Date().toISOString(),
     byMonth
+  });
+
+  // Emit typed billing event (non-blocking; never throws)
+  emitEvent(EVENTS.BILLING_USAGE_RECORDED, EVENT_DOMAIN.BILLING, correlationId, {
+    source: "claude",
+    stage: String(usage?.stage || "unknown"),
+    inputTokens: Number(usage?.inputTokens || 0),
+    outputTokens: Number(usage?.outputTokens || 0),
   });
 }
 
@@ -234,14 +252,17 @@ export async function appendAlert(config, alert) {
     updatedAt: new Date().toISOString()
   });
 
-  state.entries.push({
-    id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+  const correlationId = String(alert?.correlationId || `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`);
+  const entry = {
+    id: correlationId,
     timestamp: new Date().toISOString(),
     severity: String(alert?.severity || "warning"),
     source: String(alert?.source || "system"),
     title: String(alert?.title || "System alert"),
     message: String(alert?.message || "")
-  });
+  };
+
+  state.entries.push(entry);
 
   if (state.entries.length > 200) {
     state.entries = state.entries.slice(-200);
@@ -249,4 +270,11 @@ export async function appendAlert(config, alert) {
 
   state.updatedAt = new Date().toISOString();
   await writeJson(alertsFile, state);
+
+  // Emit typed observability event (non-blocking; never throws)
+  emitEvent(EVENTS.ORCHESTRATION_ALERT_EMITTED, EVENT_DOMAIN.ORCHESTRATION, correlationId, {
+    severity: entry.severity,
+    source: entry.source,
+    title: entry.title,
+  });
 }

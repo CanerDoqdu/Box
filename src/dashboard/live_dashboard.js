@@ -7,6 +7,7 @@ import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
 import { readPipelineProgress } from "../core/pipeline_progress.js";
+import { parseTypedEvent } from "../core/event_schema.js";
 
 dotenv.config();
 
@@ -69,6 +70,34 @@ const REBASE_STATE = {
 
 const PROMETHEUS_PLAN_HISTORY = [];
 const PROMETHEUS_PLAN_HISTORY_LIMIT = 24;
+
+/**
+ * Consume a typed event for dashboard rendering.
+ * Returns { ok, event } or { ok: false, code, message } — never throws.
+ * Dashboard MUST use this instead of free-form string/regex parsing on event lines.
+ * Exported for tests; not exposed via HTTP API.
+ *
+ * @param {any} raw — a typed event object, JSON string, or arbitrary input
+ * @returns {{ ok: boolean, event?: object, code?: string, message: string }}
+ */
+export function consumeTypedEvent(raw) {
+  return parseTypedEvent(raw);
+}
+
+/**
+ * Determine if a raw value is a known typed event belonging to a specific domain.
+ * Safe for use in dashboard rendering logic — avoids ad-hoc string parsing.
+ *
+ * @param {any} raw
+ * @param {string} [domain] — optional filter: one of EVENT_DOMAIN values
+ * @returns {boolean}
+ */
+export function isTypedEventForDomain(raw, domain) {
+  const result = parseTypedEvent(raw);
+  if (!result.ok) return false;
+  if (domain !== undefined && result.event.domain !== domain) return false;
+  return true;
+}
 
 function normalizeText(value) {
   return String(value || "")
