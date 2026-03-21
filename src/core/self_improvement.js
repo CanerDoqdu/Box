@@ -21,6 +21,7 @@ import { readJson, writeJson, spawnAsync } from "./fs_utils.js";
 import { appendProgress } from "./state_tracker.js";
 import { buildAgentArgs, parseAgentOutput } from "./agent_loader.js";
 import { chatLog, warn } from "./logger.js";
+import { loadRegistry, getRunningExperimentsForPath } from "./experiment_registry.js";
 
 // ── Knowledge Memory ─────────────────────────────────────────────────────────
 
@@ -199,6 +200,18 @@ Respond with ONLY valid JSON. No markdown, no explanation before or after.`;
 
 // ── Apply Safe Improvements ──────────────────────────────────────────────────
 
+/**
+ * Apply auto-approved config suggestions and tag each change with active experiment IDs.
+ *
+ * AC1 enforcement modes:
+ *   soft (default): changes are applied and tagged with experiment IDs when available;
+ *     a warning is logged if no experiment covers the path, but the change is NOT blocked.
+ *   hard: changes are blocked (skipped with explicit warning) if no running experiment
+ *     covers the config path. Enable via selfImprovement.experimentEnforcement = "hard".
+ *
+ * Applied change objects include `experimentIds: string[]` for traceability.
+ * Blocked changes include `status: "blocked"` and `blockReason` for observability.
+ */
 async function applyConfigSuggestions(config, suggestions) {
   if (!Array.isArray(suggestions)) return [];
   const applied = [];
@@ -212,6 +225,17 @@ async function applyConfigSuggestions(config, suggestions) {
   }
 
   const coreProtected = config.selfImprovement?.coreProtectedModules || [];
+  const stateDir = config.paths?.stateDir || "state";
+
+  // AC1: load registry once; mode is "soft" unless explicitly set to "hard"
+  const enforcementMode = config.selfImprovement?.experimentEnforcement === "hard" ? "hard" : "soft";
+  let registry;
+  try {
+    registry = await loadRegistry(stateDir);
+  } catch {
+    // Registry not yet initialised — treat as empty; soft mode continues normally
+    registry = { schemaVersion: 1, experiments: [] };
+  }
 
   for (const suggestion of suggestions) {
     if (!suggestion.autoApply) continue;
@@ -232,6 +256,28 @@ async function applyConfigSuggestions(config, suggestions) {
     ];
     if (!safeConfigPaths.some(safe => configKey.includes(safe))) continue;
 
+    // AC1: tag with running experiment IDs covering this config path
+    const experimentIds = getRunningExperimentsForPath(registry, configKey);
+
+    if (enforcementMode === "hard" && experimentIds.length === 0) {
+      // Hard mode: block the change and record it with an explicit status
+      warn(`[self-improvement] hard enforcement blocked config change at ${configKey} — no running experiment covers this path`);
+      applied.push({
+        path: configKey,
+        status: "blocked",
+        blockReason: "NO_EXPERIMENT_COVERAGE",
+        experimentIds: [],
+        suggestedValue: suggestion.suggestedValue,
+        reason: suggestion.reason
+      });
+      continue;
+    }
+
+    if (experimentIds.length === 0) {
+      // Soft mode: log warning but apply
+      warn(`[self-improvement] no experiment covers config path ${configKey} — applying without experiment tag (soft enforcement)`);
+    }
+
     // Apply the change
     const keys = configKey.split(".");
     let target = boxConfig;
@@ -250,14 +296,17 @@ async function applyConfigSuggestions(config, suggestions) {
       target[lastKey] = suggestion.suggestedValue;
       applied.push({
         path: configKey,
+        status: "applied",
         oldValue,
         newValue: suggestion.suggestedValue,
-        reason: suggestion.reason
+        reason: suggestion.reason,
+        experimentIds
       });
     }
   }
 
-  if (applied.length > 0) {
+  const actuallyApplied = applied.filter(c => c.status === "applied");
+  if (actuallyApplied.length > 0) {
     await fs.writeFile(configPath, JSON.stringify(boxConfig, null, 2) + "\n", "utf8");
   }
 
@@ -351,6 +400,8 @@ export async function runSelfImprovementCycle(config) {
   }
 
   // 6. Save improvement report
+  const appliedCount = appliedChanges.filter(c => c.status === "applied").length;
+  const blockedCount = appliedChanges.filter(c => c.status === "blocked").length;
   const report = {
     cycleAt: new Date().toISOString(),
     outcomes: {
@@ -368,7 +419,8 @@ export async function runSelfImprovementCycle(config) {
       systemHealthScore: analysis.systemHealthScore || 0,
       lessonsCount: newLessons.length,
       capabilityGapsCount: newGaps.length,
-      configChangesApplied: appliedChanges.length,
+      configChangesApplied: appliedCount,
+      configChangesBlocked: blockedCount,
       nextCyclePriorities: analysis.nextCyclePriorities || [],
       workerFeedback: analysis.workerFeedback || [],
       capabilityGaps: newGaps
@@ -390,7 +442,7 @@ export async function runSelfImprovementCycle(config) {
   const healthScore = analysis.systemHealthScore || 0;
   const lessonsStr = newLessons.map(l => `[${l.severity}] ${l.lesson}`).join("; ").slice(0, 300);
   await appendProgress(config,
-    `[SELF-IMPROVEMENT] Analysis complete — health=${healthScore}/100 | lessons=${newLessons.length} | config-changes=${appliedChanges.length} | ${lessonsStr}`
+    `[SELF-IMPROVEMENT] Analysis complete — health=${healthScore}/100 | lessons=${newLessons.length} | config-changes=${appliedCount} | config-blocked=${blockedCount} | ${lessonsStr}`
   );
 
   chatLog(stateDir, "SelfImprovement",
