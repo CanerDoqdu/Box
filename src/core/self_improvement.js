@@ -24,6 +24,7 @@ import { chatLog, warn } from "./logger.js";
 import { normalizeDecisionQualityLabel, DECISION_QUALITY_LABEL } from "./athena_reviewer.js";
 import { extractPostmortemEntries, migrateData, STATE_FILE_TYPE } from "./schema_registry.js";
 import { loadRegistry, getRunningExperimentsForPath } from "./experiment_registry.js";
+import { runShadowEvaluation, SHADOW_STATUS } from "./shadow_policy_evaluator.js";
 
 // ── Decision Quality Weights ──────────────────────────────────────────────────
 
@@ -431,6 +432,60 @@ async function applyConfigSuggestions(config, suggestions) {
   const coreProtected = config.selfImprovement?.coreProtectedModules || [];
   const stateDir = config.paths?.stateDir || "state";
 
+  // ── Shadow policy evaluation before applying any changes (T-017) ──────────
+  // Map auto-apply suggestions to shadow change descriptors.
+  const shadowChanges = suggestions
+    .filter(s => s?.autoApply)
+    .map(s => ({
+      type:     "config",
+      path:     String(s.path || ""),
+      oldValue: s.currentValue,
+      newValue: s.suggestedValue,
+    }));
+
+  let shadowEvalResult = null;
+  if (shadowChanges.length > 0) {
+    try {
+      const shadowPolicy  = config.selfImprovement?.shadowPolicy  || {};
+      const currentPolicy = await import("./policy_engine.js").then(m => m.loadPolicy(config));
+      shadowEvalResult = await runShadowEvaluation(currentPolicy, shadowChanges, {
+        stateDir,
+        threshold:   typeof shadowPolicy.threshold   === "number" ? shadowPolicy.threshold   : undefined,
+        cycleWindow: typeof shadowPolicy.cycleWindow === "number" ? shadowPolicy.cycleWindow : undefined,
+        owner:       "self-improvement",
+      });
+
+      const shadowStatus = shadowEvalResult.status;
+      if (shadowStatus === SHADOW_STATUS.BLOCKED) {
+        warn(`[self-improvement] shadow policy evaluation blocked config promotion — blockReason=${shadowEvalResult.blockReason} delta=${shadowEvalResult.delta}`);
+        // Record all candidate changes as shadow-blocked (explicit status, no silent fallback).
+        for (const s of suggestions.filter(s => s?.autoApply)) {
+          applied.push({
+            path:        String(s.path || ""),
+            status:      "shadow-blocked",
+            blockReason: shadowEvalResult.blockReason,
+            shadowEval:  {
+              delta:          shadowEvalResult.delta,
+              confidence:     shadowEvalResult.confidence,
+              sampleSize:     shadowEvalResult.sampleSize,
+              successCriteria: shadowEvalResult.successCriteria,
+            },
+            suggestedValue: s.suggestedValue,
+            reason:         s.reason,
+          });
+        }
+        return applied;
+      }
+
+      if (shadowStatus === SHADOW_STATUS.DEGRADED) {
+        warn(`[self-improvement] shadow policy evaluation degraded — degradedReason=${shadowEvalResult.degradedReason} — proceeding with soft enforcement`);
+      }
+    } catch (err) {
+      // Shadow eval is advisory — a thrown error must not block config application.
+      warn(`[self-improvement] shadow policy evaluation error (non-fatal): ${String(err?.message || err)}`);
+    }
+  }
+
   // AC1: load registry once; mode is "soft" unless explicitly set to "hard"
   const enforcementMode = config.selfImprovement?.experimentEnforcement === "hard" ? "hard" : "soft";
   let registry;
@@ -504,7 +559,13 @@ async function applyConfigSuggestions(config, suggestions) {
         oldValue,
         newValue: suggestion.suggestedValue,
         reason: suggestion.reason,
-        experimentIds
+        experimentIds,
+        shadowEval: shadowEvalResult ? {
+          delta:           shadowEvalResult.delta,
+          confidence:      shadowEvalResult.confidence,
+          sampleSize:      shadowEvalResult.sampleSize,
+          successCriteria: shadowEvalResult.successCriteria,
+        } : null,
       });
     }
   }

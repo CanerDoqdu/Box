@@ -122,7 +122,13 @@
       "src/core/policy_engine.js"
     ],
     "knowledgeMemoryEnabled": true,
-    "experimentEngineEnabled": true
+    "experimentEngineEnabled": true,
+    "shadowPolicy": {
+      "enabled": true,
+      "threshold": 0.10,
+      "cycleWindow": 20,
+      "minSampleSize": 3
+    }
   },
   "systemGuardian": {
     "enabled": true,
@@ -281,6 +287,20 @@
         "promptFile": ".github/prompts/backend-stability.prompt.md"
       }
     }
+  },
+  "slo": {
+    "enabled": true,
+    "thresholds": {
+      "decisionLatencyMs": 120000,
+      "dispatchLatencyMs": 30000,
+      "verificationCompletionMs": 3600000
+    },
+    "breachSeverity": {
+      "decisionLatencyMs": "high",
+      "dispatchLatencyMs": "high",
+      "verificationCompletionMs": "critical"
+    },
+    "degradedOnBreach": true
   },
   "selfDev": {
     "enabled": true,
