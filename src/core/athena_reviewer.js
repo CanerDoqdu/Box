@@ -426,6 +426,196 @@ export function normalizePostmortemVerdict(pm) {
   return { pass: false, schema: "unknown", reason: POSTMORTEM_PARSE_REASON.MISSING_VERDICT };
 }
 
+// ── Pre-mortem Schema ────────────────────────────────────────────────────────
+
+/**
+ * Risk threshold for pre-mortem requirement.
+ * Only HIGH-risk interventions require a pre-mortem before dispatch.
+ * Athena hardening note (T-026): task scope mentioned "medium/high" but Athena
+ * flagged dispatch pipeline gating as high blast-radius — use "high" only.
+ *
+ * @enum {string}
+ */
+export const PREMORTEM_RISK_LEVEL = Object.freeze({
+  HIGH: "high"
+});
+
+/**
+ * Status codes returned by validatePremortem.
+ *
+ * @enum {string}
+ */
+export const PREMORTEM_STATUS = Object.freeze({
+  /** All required fields present and valid. */
+  PASS:       "pass",
+  /** Pre-mortem object present but one or more fields are missing or invalid. */
+  INCOMPLETE: "incomplete",
+  /** Pre-mortem object absent, null, or riskLevel is not "high". */
+  BLOCKED:    "blocked"
+});
+
+/**
+ * Reason codes returned by validatePremortem.
+ * Distinguishes missing input from invalid input — no silent fallback.
+ *
+ * @enum {string}
+ */
+export const PREMORTEM_VALIDATION_REASON = Object.freeze({
+  OK:               "OK",
+  /** Pre-mortem object is null/undefined/not-an-object. */
+  MISSING_FIELD:    "MISSING_FIELD",
+  /** Pre-mortem present but one or more fields fail validation. */
+  INVALID_FIELD:    "INVALID_FIELD",
+  /** riskLevel field present but not "high". */
+  WRONG_RISK_LEVEL: "WRONG_RISK_LEVEL"
+});
+
+/**
+ * Canonical list of required pre-mortem fields.
+ * All fields must be present and valid for status=PASS.
+ *
+ * Field        Type       Constraint
+ * ─────────────────────────────────────────────────────────────────────
+ * scenario        string     min 20 chars  — narrative of what could go wrong
+ * failurePaths    string[]   min 1 item    — discrete failure modes enumerated
+ * mitigations     string[]   min 1 item    — per-failure mitigation strategies
+ * detectionSignals string[]  min 1 item    — observable signals of failure onset
+ * guardrails      string[]   min 1 item    — checks/gates preventing cascading failure
+ * rollbackPlan    string     min 10 chars  — safe rollback procedure
+ * riskLevel       "high"                   — must be PREMORTEM_RISK_LEVEL.HIGH
+ */
+export const PREMORTEM_REQUIRED_FIELDS = Object.freeze([
+  "scenario",
+  "failurePaths",
+  "mitigations",
+  "detectionSignals",
+  "guardrails",
+  "rollbackPlan",
+  "riskLevel"
+]);
+
+/** Minimum string lengths for pre-mortem string fields. */
+const PREMORTEM_MIN_STRLEN = Object.freeze({
+  scenario:    20,
+  rollbackPlan: 10
+});
+
+/** Minimum array lengths for pre-mortem array fields. */
+const PREMORTEM_MIN_ARRLEN = Object.freeze({
+  failurePaths:     1,
+  mitigations:      1,
+  detectionSignals: 1,
+  guardrails:       1
+});
+
+/**
+ * Validate a pre-mortem object against the canonical schema.
+ *
+ * Distinguishes:
+ *   - Missing input  (null/undefined/not-object) → BLOCKED,    reason=MISSING_FIELD
+ *   - Wrong riskLevel (not "high")               → BLOCKED,    reason=WRONG_RISK_LEVEL
+ *   - Invalid/incomplete fields                  → INCOMPLETE, reason=INVALID_FIELD
+ *   - All fields present and valid               → PASS,       reason=OK
+ *
+ * Never returns a silent fallback — callers must check `status` before trusting the result.
+ *
+ * @param {unknown} input
+ * @returns {{ status: string, reason: string, errors: string[] }}
+ */
+export function validatePremortem(input) {
+  if (!input || typeof input !== "object") {
+    return {
+      status: PREMORTEM_STATUS.BLOCKED,
+      reason: PREMORTEM_VALIDATION_REASON.MISSING_FIELD,
+      errors: ["pre-mortem must be a non-null object"]
+    };
+  }
+
+  const pm = input;
+
+  // riskLevel must be "high" — only high-risk plans require pre-mortems
+  if (!("riskLevel" in pm)) {
+    return {
+      status: PREMORTEM_STATUS.BLOCKED,
+      reason: PREMORTEM_VALIDATION_REASON.MISSING_FIELD,
+      errors: ["riskLevel is required"]
+    };
+  }
+  if (pm.riskLevel !== PREMORTEM_RISK_LEVEL.HIGH) {
+    return {
+      status: PREMORTEM_STATUS.BLOCKED,
+      reason: PREMORTEM_VALIDATION_REASON.WRONG_RISK_LEVEL,
+      errors: [`riskLevel must be "${PREMORTEM_RISK_LEVEL.HIGH}", got "${pm.riskLevel}"`]
+    };
+  }
+
+  const errors = [];
+
+  // Validate string fields with minimum length
+  for (const [field, minLen] of Object.entries(PREMORTEM_MIN_STRLEN)) {
+    if (!(field in pm)) {
+      errors.push(`${field} is required`);
+    } else if (typeof pm[field] !== "string" || pm[field].trim().length < minLen) {
+      errors.push(`${field} must be a string with at least ${minLen} characters`);
+    }
+  }
+
+  // Validate array fields with minimum length
+  for (const [field, minLen] of Object.entries(PREMORTEM_MIN_ARRLEN)) {
+    if (!(field in pm)) {
+      errors.push(`${field} is required`);
+    } else if (!Array.isArray(pm[field]) || pm[field].length < minLen) {
+      errors.push(`${field} must be an array with at least ${minLen} item(s)`);
+    }
+  }
+
+  if (errors.length > 0) {
+    return {
+      status: PREMORTEM_STATUS.INCOMPLETE,
+      reason: PREMORTEM_VALIDATION_REASON.INVALID_FIELD,
+      errors
+    };
+  }
+
+  return {
+    status: PREMORTEM_STATUS.PASS,
+    reason: PREMORTEM_VALIDATION_REASON.OK,
+    errors: []
+  };
+}
+
+/**
+ * Check all high-risk plans for valid pre-mortems.
+ * Returns an array of human-readable violation strings.
+ * An empty array means all high-risk plans have valid pre-mortems.
+ *
+ * A plan is considered high-risk when plan.riskLevel === "high".
+ * High-risk plans MUST include a `premortem` section that passes validatePremortem.
+ *
+ * @param {Array<object>} plans
+ * @returns {string[]} violations
+ */
+export function checkPlanPremortemGate(plans) {
+  const violations = [];
+  if (!Array.isArray(plans)) return violations;
+
+  for (let i = 0; i < plans.length; i++) {
+    const plan = plans[i];
+    if (!plan || typeof plan !== "object") continue;
+    if (plan.riskLevel !== PREMORTEM_RISK_LEVEL.HIGH) continue;
+
+    const validation = validatePremortem(plan.premortem);
+    if (validation.status !== PREMORTEM_STATUS.PASS) {
+      const label = plan.task || plan.role || `index ${i}`;
+      violations.push(
+        `plan[${i}] "${label}": high-risk intervention requires a valid pre-mortem — ${validation.errors.join("; ")}`
+      );
+    }
+  }
+
+  return violations;
+}
+
 // ── AI call (single-prompt, 1 request) ──────────────────────────────────────
 
 async function callCopilotAgent(command, agentSlug, contextPrompt, config, model) {
@@ -464,8 +654,32 @@ export async function runAthenaPlanReview(config, prometheusAnalysis) {
   }
 
   const plans = Array.isArray(prometheusAnalysis.plans) ? prometheusAnalysis.plans : [];
+
+  // ── Deterministic pre-mortem gate (runs before AI, always enforced) ────────
+  // High-risk plans (riskLevel="high") must include a valid pre-mortem section.
+  // This gate is never bypassed by athenaFailOpen — it is a structural requirement.
+  const preMortemViolations = checkPlanPremortemGate(plans);
+  if (preMortemViolations.length > 0) {
+    const message = `${preMortemViolations.length} high-risk plan(s) missing valid pre-mortem`;
+    await appendProgress(config, `[ATHENA] Pre-mortem gate FAILED — ${message} — blocking dispatch`);
+    chatLog(stateDir, athenaName, `Pre-mortem gate failed: ${message}`);
+    await appendAlert(config, {
+      severity: ALERT_SEVERITY.CRITICAL,
+      source: "athena_reviewer",
+      title: "High-risk plan missing pre-mortem — dispatch blocked",
+      message: `code=MISSING_PREMORTEM violations=${JSON.stringify(preMortemViolations)}`
+    });
+    return {
+      approved: false,
+      reason: { code: "MISSING_PREMORTEM", message },
+      corrections: preMortemViolations,
+      preMortemViolations
+    };
+  }
+
   const plansSummary = plans.map((p, i) => {
-    return `  ${i + 1}. role=${p.role} task="${p.task}" priority=${p.priority} wave=${p.wave}\n     verification="${p.verification || "NONE"}"`;
+    const preMortemTag = p.riskLevel === "high" ? " [HIGH-RISK:premortem=present]" : "";
+    return `  ${i + 1}. role=${p.role} task="${p.task}" priority=${p.priority} wave=${p.wave} riskLevel=${p.riskLevel || "low"}${preMortemTag}\n     verification="${p.verification || "NONE"}"`;
   }).join("\n");
 
   const contextPrompt = `TARGET REPO: ${config.env?.targetRepo || "unknown"}
@@ -481,6 +695,7 @@ For EACH plan item, check:
 3. Is the verification method concrete? (a test, a command, a check — not "verify it works")
 4. Are file paths and scope specified?
 5. Are dependencies between plans correct?
+6. For HIGH-RISK plans (riskLevel=high): does the pre-mortem cover failure paths, mitigations, and guardrails?
 
 ## PROMETHEUS PLAN TO REVIEW
 
@@ -512,6 +727,7 @@ Respond with your assessment, then:
       "successCriteriaClear": true/false,
       "verificationConcrete": true/false,
       "scopeDefined": true/false,
+      "preMortemComplete": true/false,
       "issues": ["list of problems if any"],
       "suggestion": "how to fix if rejected"
     }

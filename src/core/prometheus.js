@@ -16,6 +16,7 @@ import { getRoleRegistry } from "./role_registry.js";
 import { buildAgentArgs, parseAgentOutput, logAgentThinking } from "./agent_loader.js";
 import { chatLog } from "./logger.js";
 import { addSchemaVersion, STATE_FILE_TYPE } from "./schema_registry.js";
+import { PREMORTEM_RISK_LEVEL } from "./athena_reviewer.js";
 import {
   runInterventionOptimizer,
   buildInterventionsFromPlan,
@@ -52,6 +53,35 @@ export function normalizeRepoPath(filePath) {
     .replace(/^\//, "")
     .trim()
     .toLowerCase();
+}
+
+/**
+ * Risk threshold for pre-mortem requirement.
+ * Only plans with riskLevel matching this value require a pre-mortem section.
+ * Aligned with PREMORTEM_RISK_LEVEL.HIGH from athena_reviewer.js.
+ */
+export const PREMORTEM_RISK_THRESHOLD = PREMORTEM_RISK_LEVEL.HIGH;
+
+/**
+ * Build an empty pre-mortem scaffold for a high-risk plan.
+ * This scaffold is intended to be filled by the Prometheus AI prompt.
+ * Use as a reference structure when constructing plan prompts.
+ *
+ * @param {object} plan - Prometheus plan object
+ * @returns {object} pre-mortem scaffold
+ */
+export function buildPremortemScaffold(plan) {
+  return {
+    riskLevel: PREMORTEM_RISK_LEVEL.HIGH,
+    scenario: "",
+    failurePaths: [],
+    mitigations: [],
+    detectionSignals: [],
+    guardrails: [],
+    rollbackPlan: (plan && typeof plan === "object" && typeof plan.rollbackPlan === "string")
+      ? plan.rollbackPlan
+      : ""
+  };
 }
 
 async function collectScanTargets(repoRoot) {
@@ -480,14 +510,27 @@ Write a substantial senior-level narrative first. Then output structured JSON:
       "task": "<short task description>",
       "context": "<detailed 500-2000 word implementation checklist>",
       "verification": "<how to verify>",
+      "riskLevel": "low | medium | high",
       "dependencies": [],
-      "downstream": "<what this enables>"
+      "downstream": "<what this enables>",
+      "_premortem_note": "REQUIRED for riskLevel=high: include premortem object below",
+      "premortem": {
+        "_note": "Include ONLY when riskLevel=high. Omit for low/medium risk plans.",
+        "riskLevel": "high",
+        "scenario": "<min 20 chars — what could go wrong in this intervention>",
+        "failurePaths": ["<failure mode 1>", "<failure mode 2>"],
+        "mitigations": ["<mitigation for failure mode 1>", "<mitigation for failure mode 2>"],
+        "detectionSignals": ["<observable signal that failure is occurring>"],
+        "guardrails": ["<check or gate that prevents cascading failure>"],
+        "rollbackPlan": "<min 10 chars — how to safely undo this change>"
+      }
     }
   ]
 }
 ===END===
 
-CRITICAL: JSON must be between ===DECISION=== and ===END=== markers exactly.`;
+CRITICAL: JSON must be between ===DECISION=== and ===END=== markers exactly.
+CRITICAL: Any plan with riskLevel=high MUST include a fully-populated premortem object. Omitting it will block Athena plan review.`;
 
     chatLog(stateDir, prometheusName, `Calling AI for deep repository analysis (single-prompt), attempt ${attempt}/${maxAttempts}...`);
     const aiResult = await callCopilotAgent(command, "prometheus", contextPrompt, config, prometheusModel);

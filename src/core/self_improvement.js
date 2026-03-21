@@ -21,7 +21,7 @@ import { readJson, readJsonSafe, READ_JSON_REASON, writeJson, spawnAsync } from 
 import { appendProgress } from "./state_tracker.js";
 import { buildAgentArgs, parseAgentOutput } from "./agent_loader.js";
 import { chatLog, warn } from "./logger.js";
-import { normalizeDecisionQualityLabel, DECISION_QUALITY_LABEL } from "./athena_reviewer.js";
+import { normalizeDecisionQualityLabel, DECISION_QUALITY_LABEL, PREMORTEM_RISK_LEVEL } from "./athena_reviewer.js";
 import { extractPostmortemEntries, migrateData, STATE_FILE_TYPE } from "./schema_registry.js";
 import { loadRegistry, getRunningExperimentsForPath } from "./experiment_registry.js";
 import { getCanaryConfig, startCanary, processRunningCanaries } from "./canary_engine.js";
@@ -96,6 +96,147 @@ export const OUTCOME_DEGRADED_REASON = Object.freeze({
   EVOLUTION_INVALID:  "EVOLUTION_INVALID",
   NO_ACTIVE_DATA:     "NO_ACTIVE_DATA"
 });
+
+// ── Pre-mortem Quality Scoring ────────────────────────────────────────────────
+
+/**
+ * Explicit scoring rubric for pre-mortem quality.
+ * Each key maps to its max points and a description of the pass condition.
+ * Total max score: 10 points.
+ *
+ * Rubric:
+ *   scenario        (2 pts) — string with >= 20 chars describing what could go wrong
+ *   failurePaths    (2 pts) — array with >= 2 discrete failure modes enumerated
+ *   mitigations     (2 pts) — array with >= failurePaths.length mitigation strategies
+ *   detectionSignals (1 pt) — array with >= 1 observable failure signal
+ *   guardrails      (1 pt)  — array with >= 1 check preventing cascading failure
+ *   rollbackPlan    (2 pts) — string with >= 10 chars describing safe rollback
+ */
+export const PREMORTEM_QUALITY_RUBRIC = Object.freeze({
+  scenario:         { maxPoints: 2, description: "scenario string with >= 20 characters" },
+  failurePaths:     { maxPoints: 2, description: "failurePaths array with >= 2 items" },
+  mitigations:      { maxPoints: 2, description: "mitigations array with >= failurePaths.length items" },
+  detectionSignals: { maxPoints: 1, description: "detectionSignals array with >= 1 item" },
+  guardrails:       { maxPoints: 1, description: "guardrails array with >= 1 item" },
+  rollbackPlan:     { maxPoints: 2, description: "rollbackPlan string with >= 10 characters" }
+});
+
+/** Maximum possible pre-mortem quality score. */
+export const PREMORTEM_MAX_SCORE = 10;
+
+/**
+ * Score a pre-mortem object against the PREMORTEM_QUALITY_RUBRIC.
+ * Returns a deterministic score in [0, PREMORTEM_MAX_SCORE].
+ *
+ * Status values:
+ *   "blocked"    — input is null/undefined/not-an-object (score=0)
+ *   "inadequate" — score < 6  (fails minimum quality threshold)
+ *   "adequate"   — score >= 6 (meets minimum threshold)
+ *   "complete"   — score = 10 (all rubric criteria met)
+ *
+ * @param {unknown} premortem
+ * @returns {{ score: number, maxScore: number, scorePercent: number, status: string, details: Array }}
+ */
+export function scorePremortemQuality(premortem) {
+  if (!premortem || typeof premortem !== "object") {
+    return { score: 0, maxScore: PREMORTEM_MAX_SCORE, scorePercent: 0, status: "blocked", details: [] };
+  }
+
+  let score = 0;
+  const details = [];
+
+  // scenario: string >= 20 chars → 2 pts
+  const scenarioOk = typeof premortem.scenario === "string" && premortem.scenario.trim().length >= 20;
+  details.push({ key: "scenario", pass: scenarioOk, points: scenarioOk ? 2 : 0, maxPoints: 2 });
+  if (scenarioOk) score += 2;
+
+  // failurePaths: array >= 2 items → 2 pts
+  const fpLen = Array.isArray(premortem.failurePaths) ? premortem.failurePaths.length : 0;
+  const failurePathsOk = fpLen >= 2;
+  details.push({ key: "failurePaths", pass: failurePathsOk, points: failurePathsOk ? 2 : 0, maxPoints: 2 });
+  if (failurePathsOk) score += 2;
+
+  // mitigations: array >= max(1, failurePaths.length) → 2 pts
+  const mitLen = Array.isArray(premortem.mitigations) ? premortem.mitigations.length : 0;
+  const mitigationsOk = mitLen >= Math.max(1, fpLen);
+  details.push({ key: "mitigations", pass: mitigationsOk, points: mitigationsOk ? 2 : 0, maxPoints: 2 });
+  if (mitigationsOk) score += 2;
+
+  // detectionSignals: array >= 1 → 1 pt
+  const dsOk = Array.isArray(premortem.detectionSignals) && premortem.detectionSignals.length >= 1;
+  details.push({ key: "detectionSignals", pass: dsOk, points: dsOk ? 1 : 0, maxPoints: 1 });
+  if (dsOk) score += 1;
+
+  // guardrails: array >= 1 → 1 pt
+  const grOk = Array.isArray(premortem.guardrails) && premortem.guardrails.length >= 1;
+  details.push({ key: "guardrails", pass: grOk, points: grOk ? 1 : 0, maxPoints: 1 });
+  if (grOk) score += 1;
+
+  // rollbackPlan: string >= 10 chars → 2 pts
+  const rpOk = typeof premortem.rollbackPlan === "string" && premortem.rollbackPlan.trim().length >= 10;
+  details.push({ key: "rollbackPlan", pass: rpOk, points: rpOk ? 2 : 0, maxPoints: 2 });
+  if (rpOk) score += 2;
+
+  const status = score === PREMORTEM_MAX_SCORE ? "complete"
+    : score >= 6 ? "adequate"
+    : "inadequate";
+
+  return {
+    score,
+    maxScore: PREMORTEM_MAX_SCORE,
+    scorePercent: Math.round((score / PREMORTEM_MAX_SCORE) * 100),
+    status,
+    details
+  };
+}
+
+/**
+ * Score all high-risk plan pre-mortems from a Prometheus analysis and persist results.
+ *
+ * Reads high-risk plans (riskLevel="high") with premortem sections from prometheusAnalysis.
+ * Scores each pre-mortem using scorePremortemQuality and appends to state/premortem_scores.json.
+ *
+ * Storage schema: { scores: [...], lastScoredAt: string }
+ * Each score entry: { planIndex, taskId, score, maxScore, scorePercent, status, details, scoredAt }
+ *
+ * @param {object} config
+ * @param {object|null} prometheusAnalysis — result from prometheus_analysis.json
+ * @returns {Promise<{ scores: Array, averageScore: number|null }>}
+ */
+export async function scoreAndStorePremortemQuality(config, prometheusAnalysis) {
+  const stateDir = config.paths?.stateDir || "state";
+
+  const plans = Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans : [];
+  const highRiskPlans = plans.filter(p =>
+    p && typeof p === "object" && p.riskLevel === PREMORTEM_RISK_LEVEL.HIGH && p.premortem
+  );
+
+  if (highRiskPlans.length === 0) {
+    return { scores: [], averageScore: null };
+  }
+
+  const scores = highRiskPlans.map((plan, idx) => ({
+    planIndex: idx,
+    taskId: plan.taskId || plan.task || `plan-${idx}`,
+    ...scorePremortemQuality(plan.premortem),
+    scoredAt: new Date().toISOString()
+  }));
+
+  // Persist to state/premortem_scores.json — append-only, capped at 200
+  const scoresPath = path.join(stateDir, "premortem_scores.json");
+  const existing = await readJson(scoresPath, { scores: [], lastScoredAt: null });
+  existing.scores.push(...scores);
+  if (existing.scores.length > 200) {
+    existing.scores = existing.scores.slice(-200);
+  }
+  existing.lastScoredAt = new Date().toISOString();
+  await writeJson(scoresPath, existing);
+
+  const totalScore = scores.reduce((sum, s) => sum + s.score, 0);
+  const averageScore = scores.length > 0 ? totalScore / scores.length : null;
+
+  return { scores, averageScore };
+}
 
 // ── Knowledge Memory ─────────────────────────────────────────────────────────
 
@@ -769,6 +910,29 @@ export async function runSelfImprovementCycle(config) {
     },
     appliedChanges,
     canaryResults
+  };
+
+  // 7. Score pre-mortem quality for high-risk plans (AC5: post-cycle pre-mortem scoring)
+  // Reads prometheus_analysis.json and scores any high-risk plan pre-mortems.
+  // Results are stored in state/premortem_scores.json and summarized in the report.
+  let premortemScoring = { scores: [], averageScore: null };
+  try {
+    const prometheusResult = await readJsonSafe(path.join(stateDir, "prometheus_analysis.json"));
+    const prometheusData = prometheusResult.ok ? prometheusResult.data : null;
+    premortemScoring = await scoreAndStorePremortemQuality(config, prometheusData);
+    if (premortemScoring.scores.length > 0) {
+      await appendProgress(config,
+        `[SELF-IMPROVEMENT] Pre-mortem quality scored: ${premortemScoring.scores.length} high-risk plan(s) | averageScore=${premortemScoring.averageScore?.toFixed(1) ?? "N/A"}/${PREMORTEM_MAX_SCORE}`
+      );
+    }
+  } catch (err) {
+    // Non-fatal: pre-mortem scoring failure must not block the improvement report
+    warn(`[self-improvement] pre-mortem scoring failed: ${String(err?.message || err)}`);
+  }
+  report.premortemScoring = {
+    scoredCount: premortemScoring.scores.length,
+    averageScore: premortemScoring.averageScore,
+    maxScore: PREMORTEM_MAX_SCORE
   };
 
   // Append to reports log
