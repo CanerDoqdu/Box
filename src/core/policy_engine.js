@@ -105,6 +105,7 @@ export function validateRoleInstruction(policy, roleName, taskText) {
 
   return { ok: true };
 }
+
 export function getRolePathViolations(policy, roleName, filePaths) {
   const rolePolicy = getRolePolicy(policy, roleName);
   const files = Array.isArray(filePaths) ? filePaths : [];
