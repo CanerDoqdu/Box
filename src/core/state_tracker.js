@@ -245,6 +245,46 @@ export async function loadAlerts(config) {
   });
 }
 
+/**
+ * Persist a failure classification result to state/failure_classifications.json.
+ *
+ * AC #2: evidence and confidence are persisted alongside every classification.
+ * AC #10: write errors set ok=false with an explicit reason; never silently dropped.
+ *
+ * Storage key: state/failure_classifications.json
+ * Schema: { schemaVersion: 1, updatedAt: ISO, entries: ClassificationResult[] }
+ * Entries are trimmed to the last 500 to prevent unbounded growth.
+ *
+ * @param {object} config
+ * @param {object} classification — ClassificationResult from classifyFailure
+ * @returns {Promise<{ ok: boolean, reason?: string }>}
+ */
+export async function appendFailureClassification(config, classification) {
+  const classFile = path.join(config.paths?.stateDir || "state", "failure_classifications.json");
+  try {
+    const state = await readJson(classFile, {
+      schemaVersion: 1,
+      updatedAt: new Date().toISOString(),
+      entries: []
+    });
+
+    const entries = Array.isArray(state.entries) ? state.entries : [];
+    entries.push({ ...classification, savedAt: new Date().toISOString() });
+
+    if (entries.length > 500) {
+      state.entries = entries.slice(-500);
+    } else {
+      state.entries = entries;
+    }
+
+    state.updatedAt = new Date().toISOString();
+    await writeJson(classFile, state);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, reason: String(err?.message || err) };
+  }
+}
+
 export async function appendAlert(config, alert) {
   const alertsFile = path.join(config.paths.stateDir, "alerts.json");
   const state = await readJson(alertsFile, {

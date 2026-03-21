@@ -18,13 +18,14 @@ import fs from "node:fs/promises";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { spawnAsync } from "./fs_utils.js";
 import { getRoleRegistry } from "./role_registry.js";
-import { appendProgress } from "./state_tracker.js";
+import { appendProgress, appendFailureClassification } from "./state_tracker.js";
 import { buildAgentArgs, nameToSlug } from "./agent_loader.js";
 import { buildVerificationChecklist } from "./verification_profiles.js";
 import { parseVerificationReport, parseResponsiveMatrix, validateWorkerContract, decideRework } from "./verification_gate.js";
 import { enforceModelPolicy } from "./model_policy.js";
 import { loadPolicy, getProtectedPathMatches, getRolePathViolations } from "./policy_engine.js";
 import { appendEscalation, BLOCKING_REASON_CLASS, NEXT_ACTION } from "./escalation_queue.js";
+import { classifyFailure } from "./failure_classifier.js";
 
 // ── Premium usage tracking ──────────────────────────────────────────────────
 
@@ -448,6 +449,20 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       summary: label + ": " + errorMsg
     }).catch(() => { /* non-fatal */ });
 
+    // Classify and persist failure (non-critical — never blocks the return)
+    {
+      const cfResult = classifyFailure({
+        workerStatus: "error",
+        blockingReasonClass: BLOCKING_REASON_CLASS.WORKER_ERROR,
+        errorMessage: errorMsg,
+        logLines: result.timedOut ? ["Process timed out"] : [],
+        taskId: instruction.taskId || null,
+      });
+      if (cfResult.ok) {
+        appendFailureClassification(config, cfResult.classification).catch(() => { /* non-fatal */ });
+      }
+    }
+
     updatedHistory.push({
       from: roleName,
       content: `ERROR: ${errorMsg}`,
@@ -458,7 +473,8 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       status: "error",
       summary: errorMsg,
       updatedHistory,
-      prUrl: null
+      prUrl: null,
+      failureClassification: null
     };
   }
 
@@ -620,6 +636,36 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     `[WORKER:${roleName}] Completed status=${parsed.status}${parsed.prUrl ? ` PR=${parsed.prUrl}` : ""}`
   );
 
+  // Classify failure for error/blocked/partial statuses (non-critical)
+  let failureClassification = null;
+  if (parsed.status === "error" || parsed.status === "blocked" || parsed.status === "partial") {
+    // Derive blockingReasonClass from the escalation that was persisted (best-effort)
+    let derivedRc = null;
+    if (parsed.status === "blocked") {
+      // Check common markers in summary text
+      if (/policy violation|path policy/i.test(parsed.summary)) {
+        derivedRc = BLOCKING_REASON_CLASS.POLICY_VIOLATION;
+      } else if (/BOX_ACCESS.*blocked/i.test(parsed.fullOutput || "")) {
+        derivedRc = BLOCKING_REASON_CLASS.ACCESS_BLOCKED;
+      } else if (/rework.*exhausted|max rework/i.test(parsed.summary)) {
+        derivedRc = BLOCKING_REASON_CLASS.MAX_REWORK_EXHAUSTED;
+      } else if (/verification gate/i.test(parsed.summary)) {
+        derivedRc = BLOCKING_REASON_CLASS.VERIFICATION_GATE;
+      }
+    }
+
+    const cfResult = classifyFailure({
+      workerStatus: parsed.status,
+      blockingReasonClass: derivedRc,
+      errorMessage: parsed.summary,
+      taskId: instruction.taskId || null,
+    });
+    if (cfResult.ok) {
+      failureClassification = cfResult.classification;
+      appendFailureClassification(config, cfResult.classification).catch(() => { /* non-fatal */ });
+    }
+  }
+
   // Add worker's response to history
   updatedHistory.push({
     from: roleName,
@@ -641,6 +687,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     verificationReport: parsed.verificationReport,
     responsiveMatrix: parsed.responsiveMatrix,
     verificationEvidence: parsed.verificationEvidence || null,
-    fullOutput: parsed.fullOutput
+    fullOutput: parsed.fullOutput,
+    failureClassification
   };
 }
