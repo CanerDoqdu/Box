@@ -24,6 +24,7 @@ import { buildAgentArgs, parseAgentOutput, logAgentThinking } from "./agent_load
 import { chatLog } from "./logger.js";
 import { validateWorkerContract, decideRework } from "./verification_gate.js";
 import { isSelfDevMode, getSelfDevWorkerContext } from "./self_dev_guard.js";
+import { addSchemaVersion, STATE_FILE_TYPE } from "./schema_registry.js";
 
 async function callCopilotAgent(command, agentSlug, contextPrompt) {
   const args = buildAgentArgs({ agentSlug, prompt: contextPrompt });
@@ -263,12 +264,14 @@ async function loadSessions(stateDir) {
 async function saveSessions(stateDir, sessions) {
   // Write each worker's dedicated file in parallel
   await Promise.all(
-    Object.entries(sessions).map(([roleName, session]) =>
-      writeJson(workerFilePath(stateDir, roleName), session)
-    )
+    Object.entries(sessions)
+      .filter(([key]) => key !== "schemaVersion") // skip metadata key if present
+      .map(([roleName, session]) =>
+        writeJson(workerFilePath(stateDir, roleName), session)
+      )
   );
-  // Also maintain aggregate for dashboard
-  await writeJson(path.join(stateDir, "worker_sessions.json"), sessions);
+  // Also maintain aggregate for dashboard — stamp schemaVersion on write
+  await writeJson(path.join(stateDir, "worker_sessions.json"), addSchemaVersion(sessions, STATE_FILE_TYPE.WORKER_SESSIONS));
 }
 
 // ── Moses AI Decision ────────────────────────────────────────────────────────

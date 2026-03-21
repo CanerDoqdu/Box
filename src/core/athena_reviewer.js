@@ -20,6 +20,14 @@ import { appendProgress, appendAlert, ALERT_SEVERITY } from "./state_tracker.js"
 import { getRoleRegistry } from "./role_registry.js";
 import { buildAgentArgs, parseAgentOutput, logAgentThinking } from "./agent_loader.js";
 import { chatLog } from "./logger.js";
+import {
+  addSchemaVersion,
+  extractPostmortemEntries,
+  migrateData,
+  recordMigrationTelemetry,
+  STATE_FILE_TYPE,
+  MIGRATION_REASON
+} from "./schema_registry.js";
 
 // ── Canonical postmortem schema ──────────────────────────────────────────────
 
@@ -265,11 +273,46 @@ export async function runAthenaPostmortem(config, workerResult, originalPlan) {
   const planVerification = originalPlan?.verification || "no verification defined";
   const planContext = String(originalPlan?.context || "").slice(0, 2000);
 
-  // Load previous postmortems for learning
-  const pastPostmortems = await readJson(path.join(stateDir, "athena_postmortems.json"), []);
-  const recentLessons = Array.isArray(pastPostmortems)
-    ? pastPostmortems.slice(-5).map(p => p.lessonLearned || "").filter(Boolean).join("\n  - ")
-    : "";
+  // Load previous postmortems for learning — migrate v0→v1 on read
+  const postmortemsFilePath = path.join(stateDir, "athena_postmortems.json");
+  const rawPostmortems = await readJson(postmortemsFilePath, null);
+  let pastPostmortems;
+  if (rawPostmortems !== null) {
+    const migrated = migrateData(rawPostmortems, STATE_FILE_TYPE.ATHENA_POSTMORTEMS);
+    if (!migrated.ok) {
+      // Unknown future version or corrupt — fail closed, log telemetry, degrade gracefully
+      await recordMigrationTelemetry(stateDir, {
+        fileType: STATE_FILE_TYPE.ATHENA_POSTMORTEMS,
+        filePath: postmortemsFilePath,
+        fromVersion: migrated.fromVersion,
+        toVersion: migrated.toVersion,
+        success: false,
+        reason: migrated.reason
+      });
+      if (migrated.reason === MIGRATION_REASON.UNKNOWN_FUTURE_VERSION) {
+        await appendProgress(config,
+          `[ATHENA] WARNING: athena_postmortems.json has unknown future schemaVersion (${migrated.fromVersion}) — ignoring history to avoid data corruption`
+        );
+      }
+      pastPostmortems = [];
+    } else {
+      if (migrated.reason === MIGRATION_REASON.OK) {
+        // Record telemetry only for actual migrations (not ALREADY_CURRENT)
+        await recordMigrationTelemetry(stateDir, {
+          fileType: STATE_FILE_TYPE.ATHENA_POSTMORTEMS,
+          filePath: postmortemsFilePath,
+          fromVersion: migrated.fromVersion,
+          toVersion: migrated.toVersion,
+          success: true,
+          reason: migrated.reason
+        });
+      }
+      pastPostmortems = extractPostmortemEntries(migrated.data);
+    }
+  } else {
+    pastPostmortems = [];
+  }
+  const recentLessons = pastPostmortems.slice(-5).map(p => p.lessonLearned || "").filter(Boolean).join("\n  - ");
 
   const contextPrompt = `TARGET REPO: ${config.env?.targetRepo || "unknown"}
 
@@ -364,7 +407,7 @@ ${recentLessons ? `  - ${recentLessons}` : "  (no previous lessons)"}
   const history = Array.isArray(pastPostmortems) ? pastPostmortems : [];
   history.push(postmortem);
   if (history.length > 50) history.splice(0, history.length - 50);
-  await writeJson(path.join(stateDir, "athena_postmortems.json"), history);
+  await writeJson(postmortemsFilePath, addSchemaVersion(history, STATE_FILE_TYPE.ATHENA_POSTMORTEMS));
 
   // Also write latest for dashboard visibility
   await writeJson(path.join(stateDir, "athena_latest_postmortem.json"), postmortem);

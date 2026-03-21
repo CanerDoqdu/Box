@@ -15,6 +15,7 @@ import { appendAlert, appendProgress } from "./state_tracker.js";
 import { getRoleRegistry } from "./role_registry.js";
 import { buildAgentArgs, parseAgentOutput, logAgentThinking } from "./agent_loader.js";
 import { chatLog } from "./logger.js";
+import { addSchemaVersion, STATE_FILE_TYPE } from "./schema_registry.js";
 
 export function detectModelFallback(rawText) {
   const text = String(rawText || "");
@@ -610,7 +611,7 @@ CRITICAL: JSON must be between ===DECISION=== and ===END=== markers exactly.`;
     requestedBy
   };
 
-  await writeJson(path.join(stateDir, "prometheus_analysis.json"), analysis);
+  await writeJson(path.join(stateDir, "prometheus_analysis.json"), addSchemaVersion(analysis, STATE_FILE_TYPE.PROMETHEUS_ANALYSIS));
 
   const planCount = Array.isArray(analysis.plans) ? analysis.plans.length : 0;
   await appendProgress(config, `[PROMETHEUS] Analysis complete — ${planCount} work items | health=${analysis.projectHealth}`);

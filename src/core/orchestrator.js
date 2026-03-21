@@ -30,6 +30,13 @@ import { warn } from "./logger.js";
 import { readJson, readJsonSafe, writeJson, READ_JSON_REASON } from "./fs_utils.js";
 import { updatePipelineProgress } from "./pipeline_progress.js";
 import { loadEscalationQueue, sortEscalationQueue } from "./escalation_queue.js";
+import {
+  addSchemaVersion,
+  migrateData,
+  recordMigrationTelemetry,
+  STATE_FILE_TYPE,
+  MIGRATION_REASON
+} from "./schema_registry.js";
 
 /**
  * Orchestrator health status enum.
@@ -92,13 +99,58 @@ async function auditCriticalStateFiles(config, stateDir) {
   let prometheusAnalysis = null;
   const degradedReasons = [];
 
-  for (const [label, result, defaultFallback] of [
-    ["worker_sessions.json", sessionsResult, {}],
-    ["jesus_directive.json", jesusDirectiveResult, null],
-    ["prometheus_analysis.json", prometheusAnalysisResult, null]
+  for (const [label, result, defaultFallback, fileType] of [
+    ["worker_sessions.json",    sessionsResult,          {}, STATE_FILE_TYPE.WORKER_SESSIONS],
+    ["jesus_directive.json",    jesusDirectiveResult,    null, null],
+    ["prometheus_analysis.json", prometheusAnalysisResult, null, STATE_FILE_TYPE.PROMETHEUS_ANALYSIS]
   ]) {
     if (result.ok) {
-      // Successfully parsed
+      // Successfully parsed — run schema migration if this file type is versioned
+      if (fileType && result.data !== null) {
+        const migrated = migrateData(result.data, fileType);
+        if (!migrated.ok) {
+          // Unknown future version or structural mismatch — fail closed, log telemetry
+          await recordMigrationTelemetry(stateDir, {
+            fileType,
+            filePath: path.join(stateDir, label),
+            fromVersion: migrated.fromVersion,
+            toVersion: migrated.toVersion,
+            success: false,
+            reason: migrated.reason
+          });
+          if (migrated.reason === MIGRATION_REASON.UNKNOWN_FUTURE_VERSION) {
+            const detail = `${label}: unknown future schemaVersion (${migrated.fromVersion}) — fail-closed`;
+            degradedReasons.push(detail);
+            await appendProgress(config,
+              `[STARTUP] WARNING: ${label} has unknown future schemaVersion (${migrated.fromVersion}) — treating as degraded to avoid data corruption`
+            );
+            await appendAlert(config, {
+              severity: ALERT_SEVERITY.CRITICAL,
+              source: "orchestrator",
+              title: `Unknown future schemaVersion in ${label}`,
+              message: `reason=${migrated.reason} fromVersion=${migrated.fromVersion}`
+            });
+          }
+          // Use default fallback for this file (do not use unmigratable data)
+          if (label === "worker_sessions.json") sessions = defaultFallback;
+          if (label === "prometheus_analysis.json") prometheusAnalysis = defaultFallback;
+          continue;
+        }
+        // Record telemetry only for actual migrations performed (not ALREADY_CURRENT)
+        if (migrated.reason === MIGRATION_REASON.OK) {
+          await recordMigrationTelemetry(stateDir, {
+            fileType,
+            filePath: path.join(stateDir, label),
+            fromVersion: migrated.fromVersion,
+            toVersion: migrated.toVersion,
+            success: true,
+            reason: migrated.reason
+          });
+        }
+        if (label === "worker_sessions.json") sessions = migrated.data;
+        if (label === "prometheus_analysis.json") prometheusAnalysis = migrated.data;
+        continue;
+      }
     } else if (result.reason === READ_JSON_REASON.MISSING) {
       // Expected on first run — use fallback silently
     } else {
@@ -194,7 +246,7 @@ export async function runDaemon(config) {
     }
   }
   if (zombieReset) {
-    await writeJson(path.join(stateDir, "worker_sessions.json"), sessions);
+    await writeJson(path.join(stateDir, "worker_sessions.json"), addSchemaVersion(sessions, STATE_FILE_TYPE.WORKER_SESSIONS));
   }
 
   const activeWorkers = Object.entries(sessions)
@@ -264,7 +316,7 @@ async function recoverStaleWorkerSessions(config, stateDir, sessions) {
 
   if (recoveredRoles.length === 0) return false;
 
-  await writeJson(path.join(stateDir, "worker_sessions.json"), sessions);
+  await writeJson(path.join(stateDir, "worker_sessions.json"), addSchemaVersion(sessions, STATE_FILE_TYPE.WORKER_SESSIONS));
 
   for (const role of recoveredRoles) {
     const workerStatePath = path.join(stateDir, roleToWorkerStateFile(role));
