@@ -21,6 +21,56 @@ import { readJson, writeJson, spawnAsync } from "./fs_utils.js";
 import { appendProgress } from "./state_tracker.js";
 import { buildAgentArgs, parseAgentOutput } from "./agent_loader.js";
 import { chatLog, warn } from "./logger.js";
+import { normalizeDecisionQualityLabel, DECISION_QUALITY_LABEL } from "./athena_reviewer.js";
+import { extractPostmortemEntries, migrateData, STATE_FILE_TYPE } from "./schema_registry.js";
+
+// ── Decision Quality Weights ──────────────────────────────────────────────────
+
+/**
+ * Explicit weights for each decision quality label.
+ * Used to compute a weighted quality score from recent postmortems.
+ *
+ * correct         = 1.0  — plan succeeded exactly as expected
+ * delayed-correct = 0.6  — plan succeeded after an extra iteration
+ * incorrect       = 0.0  — plan was executed but result was rolled back
+ * inconclusive    = 0.3  — outcome was unknown (timeout, missing data)
+ */
+export const DECISION_QUALITY_WEIGHTS = Object.freeze({
+  [DECISION_QUALITY_LABEL.CORRECT]:         1.0,
+  [DECISION_QUALITY_LABEL.DELAYED_CORRECT]: 0.6,
+  [DECISION_QUALITY_LABEL.INCORRECT]:       0.0,
+  [DECISION_QUALITY_LABEL.INCONCLUSIVE]:    0.3
+});
+
+/**
+ * Compute a weighted decision quality score from an array of postmortem entries.
+ * Returns a value in [0, 1] or null if no entries with labels are present.
+ *
+ * @param {Array<object>} postmortems
+ * @returns {{ score: number|null, labelCounts: Record<string, number>, total: number }}
+ */
+export function computeWeightedDecisionScore(postmortems) {
+  if (!Array.isArray(postmortems) || postmortems.length === 0) {
+    return { score: null, labelCounts: {}, total: 0 };
+  }
+  const labelCounts = {};
+  for (const label of Object.values(DECISION_QUALITY_LABEL)) {
+    labelCounts[label] = 0;
+  }
+  let weightedSum = 0;
+  let count = 0;
+  for (const pm of postmortems) {
+    const label = normalizeDecisionQualityLabel(pm);
+    labelCounts[label] = (labelCounts[label] || 0) + 1;
+    weightedSum += DECISION_QUALITY_WEIGHTS[label] ?? DECISION_QUALITY_WEIGHTS[DECISION_QUALITY_LABEL.INCONCLUSIVE];
+    count++;
+  }
+  return {
+    score: count > 0 ? weightedSum / count : null,
+    labelCounts,
+    total: count
+  };
+}
 
 // ── Knowledge Memory ─────────────────────────────────────────────────────────
 
@@ -84,6 +134,19 @@ async function collectCycleOutcomes(config) {
     ? trumpAnalysis.executionStrategy.waves
     : [];
 
+  // Decision quality from recent postmortems — used as weighted signals in AI analysis
+  let decisionQuality = { score: null, labelCounts: {}, total: 0 };
+  try {
+    const rawPostmortems = await readJson(path.join(stateDir, "athena_postmortems.json"), null);
+    if (rawPostmortems !== null) {
+      const migrated = migrateData(rawPostmortems, STATE_FILE_TYPE.ATHENA_POSTMORTEMS);
+      if (migrated.ok) {
+        const entries = extractPostmortemEntries(migrated.data);
+        decisionQuality = computeWeightedDecisionScore(entries.slice(-20));
+      }
+    }
+  } catch { /* no postmortem data — degrade gracefully */ }
+
   return {
     totalPlans: plans.length,
     completedCount: completedTasks.length,
@@ -98,6 +161,7 @@ async function collectCycleOutcomes(config) {
     })),
     dispatches: dispatches.slice(-20),
     requestBudget: trumpAnalysis?.requestBudget || {},
+    decisionQuality,
     timestamp: new Date().toISOString()
   };
 }
@@ -128,6 +192,15 @@ automation cycle and produce actionable improvements for the next cycle.
 
 ## CYCLE OUTCOMES
 ${JSON.stringify(outcomes, null, 2)}
+
+## DECISION QUALITY SIGNALS (weighted)
+Score: ${outcomes.decisionQuality?.score !== null ? (outcomes.decisionQuality.score * 100).toFixed(1) + "%" : "N/A"}
+Label counts: ${JSON.stringify(outcomes.decisionQuality?.labelCounts || {})}
+Total postmortems analyzed: ${outcomes.decisionQuality?.total || 0}
+Weight table: correct=1.0, delayed-correct=0.6, incorrect=0.0, inconclusive=0.3
+
+Use the decision quality score as a weighted signal in your health assessment and next-cycle priorities.
+A score below 0.5 (50%) signals systematic execution problems; incorrect labels deserve root-cause analysis.
 
 ## PREVIOUS LESSONS LEARNED
 ${previousLessons}
@@ -175,7 +248,7 @@ Analyze the cycle outcomes and produce a JSON response with these fields:
 
 Respond with ONLY valid JSON. No markdown, no explanation before or after.`;
 
-  const args = buildAgentArgs({ agentSlug: "issachar", prompt });
+  const args = buildAgentArgs({ agentSlug: "issachar", prompt, allowAll: true, noAskUser: true });
   const result = await spawnAsync(command, args, { env: process.env });
   const stdout = String(result?.stdout || "");
   const stderr = String(result?.stderr || "");
@@ -362,7 +435,8 @@ export async function runSelfImprovementCycle(config) {
         timeouts: w.timeouts,
         failures: w.failures,
         hasPR: w.hasPR
-      }))
+      })),
+      decisionQuality: outcomes.decisionQuality
     },
     analysis: {
       systemHealthScore: analysis.systemHealthScore || 0,

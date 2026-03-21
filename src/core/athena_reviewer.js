@@ -44,6 +44,108 @@ export const POSTMORTEM_RECOMMENDATION = Object.freeze({
 });
 
 /**
+ * Decision quality labels for postmortem entries.
+ * Assigned deterministically from the task outcome via LABEL_OUTCOME_MAP.
+ *
+ * @enum {string}
+ */
+export const DECISION_QUALITY_LABEL = Object.freeze({
+  CORRECT:         "correct",          // outcome==merged — plan executed and merged as expected
+  DELAYED_CORRECT: "delayed-correct",  // outcome==reopen — completed after extra iteration
+  INCORRECT:       "incorrect",        // outcome==rollback — plan executed but result was rolled back
+  INCONCLUSIVE:    "inconclusive"      // outcome==timeout or unknown — result indeterminate
+});
+
+/**
+ * Reason codes returned by computeDecisionQualityLabel.
+ * Distinguishes missing input from invalid input — no silent fallback allowed.
+ *
+ * @enum {string}
+ */
+export const DECISION_QUALITY_REASON = Object.freeze({
+  OK:            "OK",
+  /** outcome field was absent from the worker result */
+  MISSING_INPUT: "MISSING_INPUT",
+  /** outcome field was present but not a known value in LABEL_OUTCOME_MAP */
+  INVALID_INPUT: "INVALID_INPUT"
+});
+
+/**
+ * Explicit label-to-outcome mapping table.
+ * Workers and tests must use this table; do not infer labels from ad-hoc string matching.
+ *
+ * outcome       → decisionQualityLabel
+ * ─────────────────────────────────────
+ * merged        → correct
+ * reopen        → delayed-correct
+ * rollback      → incorrect
+ * timeout       → inconclusive
+ *
+ * All other values → INVALID_INPUT (label=inconclusive, degraded status)
+ */
+export const LABEL_OUTCOME_MAP = Object.freeze({
+  merged:   DECISION_QUALITY_LABEL.CORRECT,
+  reopen:   DECISION_QUALITY_LABEL.DELAYED_CORRECT,
+  rollback: DECISION_QUALITY_LABEL.INCORRECT,
+  timeout:  DECISION_QUALITY_LABEL.INCONCLUSIVE
+});
+
+/** All valid outcome keys as a Set for O(1) lookup. */
+const VALID_OUTCOMES = new Set(Object.keys(LABEL_OUTCOME_MAP));
+
+/**
+ * Compute the decision quality label for a postmortem outcome.
+ *
+ * Distinguishes:
+ *   - Missing input  (outcome is null/undefined) → inconclusive, reason=MISSING_INPUT
+ *   - Invalid input  (outcome present but unknown) → inconclusive + degraded status, reason=INVALID_INPUT
+ *   - Valid input    → mapped label, reason=OK
+ *
+ * Never returns a silent fallback — callers must check `reason` before trusting `label`.
+ *
+ * @param {string|null|undefined} outcome
+ * @returns {{ label: string, reason: string, status: "ok"|"degraded" }}
+ */
+export function computeDecisionQualityLabel(outcome) {
+  if (outcome === null || outcome === undefined || outcome === "") {
+    return {
+      label: DECISION_QUALITY_LABEL.INCONCLUSIVE,
+      reason: DECISION_QUALITY_REASON.MISSING_INPUT,
+      status: "degraded"
+    };
+  }
+  const key = String(outcome).toLowerCase().trim();
+  if (!VALID_OUTCOMES.has(key)) {
+    return {
+      label: DECISION_QUALITY_LABEL.INCONCLUSIVE,
+      reason: DECISION_QUALITY_REASON.INVALID_INPUT,
+      status: "degraded"
+    };
+  }
+  return {
+    label: LABEL_OUTCOME_MAP[key],
+    reason: DECISION_QUALITY_REASON.OK,
+    status: "ok"
+  };
+}
+
+/**
+ * Normalize the decisionQualityLabel field on a postmortem entry.
+ * For legacy entries that pre-date T-012, the field will be absent — default to inconclusive.
+ * For entries written after T-012, the field must be a valid DECISION_QUALITY_LABEL value.
+ *
+ * @param {object} pm - postmortem record
+ * @returns {string} - a DECISION_QUALITY_LABEL value
+ */
+export function normalizeDecisionQualityLabel(pm) {
+  if (!pm || typeof pm !== "object") return DECISION_QUALITY_LABEL.INCONCLUSIVE;
+  const existing = pm.decisionQualityLabel;
+  if (!existing) return DECISION_QUALITY_LABEL.INCONCLUSIVE;
+  const validLabels = new Set(Object.values(DECISION_QUALITY_LABEL));
+  return validLabels.has(existing) ? existing : DECISION_QUALITY_LABEL.INCONCLUSIVE;
+}
+
+/**
  * Reason codes returned by normalizePostmortemVerdict.
  * Callers must check this field before trusting `pass`.
  *
@@ -261,6 +363,16 @@ export async function runAthenaPostmortem(config, workerResult, originalPlan) {
   const workerSummary = workerResult?.summary || workerResult?.raw?.slice(0, 2000) || "no summary";
   const filesChanged = workerResult?.filesChanged || workerResult?.filesTouched || "unknown";
 
+  // Derive task outcome for decision quality labeling.
+  // Explicit outcome values (merged, reopen, rollback, timeout) map deterministically.
+  // If workerResult.outcome is absent, infer a best-effort value from status/PR fields.
+  const rawOutcome = workerResult?.outcome
+    || (workerStatus === "done" && workerPr !== "none" ? "merged" : null)
+    || (workerStatus === "timeout" ? "timeout" : null)
+    || (workerStatus === "rollback" ? "rollback" : null)
+    || null;
+  const dql = computeDecisionQualityLabel(rawOutcome);
+
   // Evolution executor passes local verification results and pre-review context
   const verificationOutput = workerResult?.verificationOutput || null;
   const verificationPassed = workerResult?.verificationPassed;
@@ -380,6 +492,9 @@ ${recentLessons ? `  - ${recentLessons}` : "  (no previous lessons)"}
       taskCompleted: workerStatus === "done",
       recommendation: "proceed",
       lessonLearned: "",
+      decisionQualityLabel: dql.label,
+      decisionQualityLabelReason: dql.reason,
+      decisionQualityStatus: dql.status,
       reviewedAt: new Date().toISOString()
     };
   }
@@ -399,6 +514,9 @@ ${recentLessons ? `  - ${recentLessons}` : "  (no previous lessons)"}
     followUpNeeded: d.followUpNeeded === true,
     followUpTask: d.followUpTask || "",
     recommendation: d.recommendation || "proceed",
+    decisionQualityLabel: dql.label,
+    decisionQualityLabelReason: dql.reason,
+    decisionQualityStatus: dql.status,
     reviewedAt: new Date().toISOString(),
     model: athenaModel
   };
@@ -413,7 +531,7 @@ ${recentLessons ? `  - ${recentLessons}` : "  (no previous lessons)"}
   await writeJson(path.join(stateDir, "athena_latest_postmortem.json"), postmortem);
 
   await appendProgress(config,
-    `[ATHENA] Postmortem: ${workerName} — score=${postmortem.qualityScore}/10 deviation=${postmortem.deviation} recommendation=${postmortem.recommendation}`
+    `[ATHENA] Postmortem: ${workerName} — score=${postmortem.qualityScore}/10 deviation=${postmortem.deviation} recommendation=${postmortem.recommendation} decisionQualityLabel=${postmortem.decisionQualityLabel}`
   );
   chatLog(stateDir, athenaName,
     `Postmortem: ${workerName} score=${postmortem.qualityScore}/10 → ${postmortem.recommendation}`

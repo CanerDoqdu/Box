@@ -511,7 +511,7 @@ async function _buildLocalRepoSnapshot(config) {
 }
 
 async function callCopilotAgent(command, agentSlug, contextPrompt) {
-  const args = buildAgentArgs({ agentSlug, prompt: contextPrompt });
+  const args = buildAgentArgs({ agentSlug, prompt: contextPrompt, allowAll: true, noAskUser: true });
   const result = await spawnAsync(command, args, { env: process.env });
   const stdout = String(result?.stdout || "");
   const stderr = String(result?.stderr || "");
@@ -529,7 +529,7 @@ async function callCopilotAgent(command, agentSlug, contextPrompt) {
 }
 
 async function callCopilotRaw(command, agentSlug, contextPrompt) {
-  const args = buildAgentArgs({ agentSlug, prompt: contextPrompt });
+  const args = buildAgentArgs({ agentSlug, prompt: contextPrompt, allowAll: true, noAskUser: true });
   const result = await spawnAsync(command, args, { env: process.env });
   const stdout = String(result?.stdout || "");
   const stderr = String(result?.stderr || "");

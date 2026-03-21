@@ -99,6 +99,53 @@ export function isTypedEventForDomain(raw, domain) {
   return true;
 }
 
+// ── Decision Quality Trend ───────────────────────────────────────────────────
+
+/**
+ * Compute the decision quality trend from persisted postmortem entries.
+ *
+ * Returns trendData — an array of objects with shape:
+ *   { timestamp: string (ISO-8601), label: string, count: number }
+ *
+ * Each element represents one postmortem bucket grouped by (day, label).
+ * Legacy entries without decisionQualityLabel are counted as "inconclusive".
+ *
+ * @param {string} [stateDir] — optional override for STATE_DIR
+ * @returns {Promise<{ trendData: Array<{timestamp: string, label: string, count: number}>, total: number }>}
+ */
+export async function getDecisionQualityTrend(stateDir) {
+  const dir = stateDir || STATE_DIR;
+  let entries = [];
+  try {
+    const raw = JSON.parse(await fs.readFile(path.join(dir, "athena_postmortems.json"), "utf8"));
+    // Support both v0 (plain array) and v1 ({ schemaVersion, entries: [] })
+    if (Array.isArray(raw)) {
+      entries = raw;
+    } else if (raw && Array.isArray(raw.entries)) {
+      entries = raw.entries;
+    }
+  } catch { /* file absent or corrupt — return empty trend */ }
+
+  // Bucket by (date, label)
+  const VALID_LABELS = new Set(["correct", "delayed-correct", "incorrect", "inconclusive"]);
+  const buckets = {};
+  for (const pm of entries) {
+    if (!pm || typeof pm !== "object") continue;
+    const ts = pm.reviewedAt || pm.timestamp || null;
+    const dateKey = ts ? String(ts).slice(0, 10) : "unknown";
+    const rawLabel = pm.decisionQualityLabel;
+    const label = (rawLabel && VALID_LABELS.has(rawLabel)) ? rawLabel : "inconclusive";
+    const key = `${dateKey}::${label}`;
+    if (!buckets[key]) {
+      buckets[key] = { timestamp: dateKey, label, count: 0 };
+    }
+    buckets[key].count++;
+  }
+
+  const trendData = Object.values(buckets).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  return { trendData, total: entries.length };
+}
+
 function normalizeText(value) {
   return String(value || "")
     .toLowerCase()
@@ -1156,6 +1203,8 @@ async function collectDashboardData() {
     systemStatusText = completedEntry ? "System Idle (last project completed)" : "System Idle";
   }
 
+  const decisionQualityTrend = await getDecisionQualityTrend(STATE_DIR);
+
   return {
     generatedAt: new Date().toISOString(),
     monthKey: currentMonth,
@@ -1290,6 +1339,7 @@ async function collectDashboardData() {
         lastOutput: REBASE_STATE.lastOutput
       }
     },
+    decisionQualityTrend,
     logs: progressTail,
     projectCompleted: completedEntry ? {
       repo: completedEntry.repo,

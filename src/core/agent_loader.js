@@ -92,14 +92,25 @@ export function toCopilotModelSlug(name) {
 const PROMPT_FILE_THRESHOLD = 25_000;
 const STATE_DIR = path.join(__dirname, "..", "..", "state");
 
-export function buildAgentArgs({ agentSlug, prompt, model, allowAll = true }) {
+export function buildAgentArgs({
+  agentSlug,
+  prompt,
+  model,
+  allowAll = false,
+  autopilot = false,
+  noAskUser = false,
+  silent = false,
+  maxContinues = undefined,
+} = {}) {
   const args = [];
 
-  if (allowAll) {
-    args.push("--allow-all");
-    args.push("--no-ask-user");
+  if (allowAll) args.push("--allow-all");
+  if (noAskUser) args.push("--no-ask-user");
+  if (autopilot) {
     args.push("--autopilot");
+    if (maxContinues != null) args.push("--max-autopilot-continues", String(maxContinues));
   }
+  if (silent) args.push("--silent");
 
   if (agentSlug && agentFileExists(agentSlug)) {
     args.push("--agent", agentSlug);

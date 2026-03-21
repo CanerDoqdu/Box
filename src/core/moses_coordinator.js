@@ -27,7 +27,7 @@ import { isSelfDevMode, getSelfDevWorkerContext } from "./self_dev_guard.js";
 import { addSchemaVersion, STATE_FILE_TYPE } from "./schema_registry.js";
 
 async function callCopilotAgent(command, agentSlug, contextPrompt) {
-  const args = buildAgentArgs({ agentSlug, prompt: contextPrompt });
+  const args = buildAgentArgs({ agentSlug, prompt: contextPrompt, allowAll: true, noAskUser: true });
   const result = await spawnAsync(command, args, { env: process.env });
   const stdout = String(result?.stdout || "");
   const stderr = String(result?.stderr || "");

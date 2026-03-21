@@ -22,7 +22,7 @@ import { buildAgentArgs, parseAgentOutput, logAgentThinking } from "./agent_load
 import { chatLog } from "./logger.js";
 
 async function callCopilotAgent(command, agentSlug, contextPrompt) {
-  const args = buildAgentArgs({ agentSlug, prompt: contextPrompt });
+  const args = buildAgentArgs({ agentSlug, prompt: contextPrompt, allowAll: true, noAskUser: true });
   const result = await spawnAsync(command, args, { env: process.env });
   const stdout = result.stdout;
   const stderr = result.stderr;
