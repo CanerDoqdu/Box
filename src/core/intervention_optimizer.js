@@ -66,6 +66,7 @@
 
 import path from "node:path";
 import { readJson, writeJson } from "./fs_utils.js";
+import { applyClassificationToSuccessProbability } from "./failure_classifier.js";
 
 // ── Budget unit ───────────────────────────────────────────────────────────────
 
@@ -585,17 +586,30 @@ export function reconcileBudgets(ranked, budget) {
  *   1. Validate budget (missing vs invalid — explicit reason codes)
  *   2. Validate interventions array (must be non-null array)
  *   3. Validate each individual intervention against INTERVENTION_SCHEMA
- *   4. Rank interventions by descending Expected Value (with confidence penalties)
- *   5. Greedily reconcile budgets (total, by-wave, by-role simultaneously)
- *   6. Return structured result with full selection rationale
+ *   4. Apply failure classifications to successProbability (AC #5 — intervention prioritisation)
+ *   5. Rank interventions by descending Expected Value (with confidence penalties)
+ *   6. Greedily reconcile budgets (total, by-wave, by-role simultaneously)
+ *   7. Return structured result with full selection rationale
+ *
+ * AC #5 / Athena missing item #2 — failure classification integration:
+ *   When options.failureClassifications is provided as an object keyed by role name,
+ *   each intervention's successProbability is adjusted before ranking via
+ *   applyClassificationToSuccessProbability().  This is the observable behavioral
+ *   change that "feeds intervention prioritization": interventions for roles with
+ *   prior failures receive lower EV scores and are ranked lower (or rejected first
+ *   under budget pressure).
+ *
+ *   options.failureClassifications: { [role: string]: ClassificationResult }
  *
  * No silent fallbacks. All failure modes set an explicit `status` and `reasonCode`.
  *
  * @param {any[]} interventions — array of Intervention objects to evaluate
  * @param {object} budget       — Budget object (must include maxWorkerSpawns)
+ * @param {object} [options]    — optional settings
+ *   @param {object} [options.failureClassifications] — { [role]: ClassificationResult }
  * @returns {object}            — optimizer result conforming to OPTIMIZER_RESULT_SCHEMA
  */
-export function runInterventionOptimizer(interventions, budget) {
+export function runInterventionOptimizer(interventions, budget, options = {}) {
   const generatedAt = new Date().toISOString();
 
   // Validate budget first (fail fast on missing/invalid budget)
@@ -709,8 +723,26 @@ export function runInterventionOptimizer(interventions, budget) {
     }
   }
 
+  // Apply failure classifications to successProbability before ranking (AC #5)
+  // failureClassifications: { [role: string]: ClassificationResult }
+  // Observable change: adjusted interventions are ranked lower under budget pressure.
+  const failureClassifications = options?.failureClassifications;
+  let failureClassificationsApplied = 0;
+  let adjustedInterventions = interventions;
+
+  if (failureClassifications && typeof failureClassifications === "object" && !Array.isArray(failureClassifications)) {
+    adjustedInterventions = interventions.map((intervention) => {
+      const classification = failureClassifications[intervention.role];
+      if (!classification) return intervention;
+      const adjustedSP = applyClassificationToSuccessProbability(intervention.successProbability, classification);
+      if (adjustedSP === intervention.successProbability) return intervention;
+      failureClassificationsApplied += 1;
+      return { ...intervention, successProbability: adjustedSP };
+    });
+  }
+
   // Rank by descending EV (with confidence penalties applied)
-  const ranked = rankInterventions(interventions);
+  const ranked = rankInterventions(adjustedInterventions);
 
   // Reconcile all three budget constraints simultaneously
   const reconciled = reconcileBudgets(ranked, budget);
@@ -719,6 +751,7 @@ export function runInterventionOptimizer(interventions, budget) {
     schemaVersion:  OPTIMIZER_LOG_SCHEMA_VERSION,
     generatedAt,
     budgetUnit:     BUDGET_UNIT,
+    failureClassificationsApplied,
     ...reconciled,
   };
 }
