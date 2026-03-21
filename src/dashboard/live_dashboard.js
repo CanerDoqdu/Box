@@ -6,6 +6,7 @@ import { execSync, spawn } from "node:child_process";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
+import { readPipelineProgress } from "../core/pipeline_progress.js";
 
 dotenv.config();
 
@@ -25,7 +26,8 @@ const CLAUDE_RATE_LIMIT_BACKOFF_MS = Number(process.env.BOX_CLAUDE_RATE_LIMIT_BA
 const CLAUDE_COST_WINDOW_DAYS = Math.max(1, Number(process.env.BOX_CLAUDE_COST_WINDOW_DAYS || "30"));
 const CLAUDE_COST_START_AT = String(process.env.BOX_CLAUDE_COST_START_AT || "").trim();
 const CLAUDE_COST_END_AT = String(process.env.BOX_CLAUDE_COST_END_AT || "").trim();
-const GITHUB_TOKEN = process.env.GITHUB_FINEGRADED || process.env.GITHUB_TOKEN || process.env.GITHUB_TOKENPERSONAL || "";
+const GITHUB_TOKEN = process.env.GITHUB_FINEGRADED || process.env.GITHUBFINEGRADEDPERSONALINTEL || process.env.GITHUB_TOKEN || process.env.GITHUB_TOKENPERSONAL || "";
+const GITHUB_BILLING_TOKEN = process.env.GITHUBFINEGRADEDPERSONALINTEL || process.env.GITHUB_FINEGRADED || GITHUB_TOKEN;
 const GITHUB_BILLING_SUMMARY_URL = process.env.BOX_GITHUB_BILLING_SUMMARY_URL
   || `https://api.github.com/users/${COPILOT_SOURCE_ACCOUNT}/settings/billing/premium_request/usage`;
 const GITHUB_API_VERSION = process.env.BOX_GITHUB_API_VERSION || "2022-11-28";
@@ -65,8 +67,8 @@ const REBASE_STATE = {
   lastOutput: ""
 };
 
-const TRUMP_PLAN_HISTORY = [];
-const TRUMP_PLAN_HISTORY_LIMIT = 24;
+const PROMETHEUS_PLAN_HISTORY = [];
+const PROMETHEUS_PLAN_HISTORY_LIMIT = 24;
 
 function normalizeText(value) {
   return String(value || "")
@@ -100,19 +102,19 @@ function getLastWorkerMessage(session, roleName) {
   return null;
 }
 
-function computePlanStatus(plan, workerSessions, mosesCoordination) {
+function computePlanStatus(plan, workerSessions, athenaState) {
   const role = String(plan?.role || "");
   const task = String(plan?.task || "");
   const session = workerSessions?.[role] || {};
   const sessionStatus = String(session?.status || "idle").toLowerCase();
-  const completedTasks = Array.isArray(mosesCoordination?.completedTasks) ? mosesCoordination.completedTasks : [];
+  const completedTasks = Array.isArray(athenaState?.completedTasks) ? athenaState.completedTasks : [];
   const completedHit = completedTasks.some((item) => textLooksRelated(item, task));
 
   const history = Array.isArray(session?.history) ? session.history : [];
   let lastWorkerEntry = null;
   for (let i = history.length - 1; i >= 0; i -= 1) {
     const entry = history[i];
-    if (!entry || entry.from === "moses") continue;
+    if (!entry || entry.from === "orchestrator") continue;
     lastWorkerEntry = entry;
     break;
   }
@@ -122,17 +124,17 @@ function computePlanStatus(plan, workerSessions, mosesCoordination) {
 
   const lastWorkerStatus = String(lastWorkerEntry?.status || "").toLowerCase();
   const lastWorkerSummary = String(lastWorkerEntry?.content || "");
-  const benchHint = /benched|not re-dispatched|skipped this cycle/i.test(String(mosesCoordination?.summary || ""));
-  if (benchHint && role && String(mosesCoordination?.summary || "").includes(role)) return "skipped";
+  const benchHint = /benched|not re-dispatched|skipped this cycle/i.test(String(athenaState?.summary || ""));
+  if (benchHint && role && String(athenaState?.summary || "").includes(role)) return "skipped";
   if (lastWorkerStatus === "done" && textLooksRelated(lastWorkerSummary, task)) return "done";
   if ((lastWorkerStatus === "blocked" || lastWorkerStatus === "error") && textLooksRelated(lastWorkerSummary, task)) return "skipped";
   if (sessionStatus === "error" && textLooksRelated(session?.lastTask || "", task)) return "skipped";
   return "queued";
 }
 
-function buildTrumpPlanBoard(trumpAnalysis, workerSessions, mosesCoordination) {
+function buildPrometheusPlanBoard(prometheusAnalysis, workerSessions, athenaState) {
   const sessions = workerSessions || {};
-  const coord = mosesCoordination || {};
+  const coord = athenaState || {};
 
   const coordMs = coord?.coordinatedAt ? new Date(coord.coordinatedAt).getTime() : Date.now();
   const cycleItems = Object.entries(sessions)
@@ -169,18 +171,18 @@ function buildTrumpPlanBoard(trumpAnalysis, workerSessions, mosesCoordination) {
     projectHealth: String(coord?.jesusDecision || "tactical"),
     summary: String(coord?.summary || "").slice(0, 260),
     items: cycleItems,
-    source: "moses-cycle",
+    source: "athena-cycle",
     updatedAt: new Date().toISOString()
   };
 
   if (cycleItems.length > 0) {
-    const cycleIndex = TRUMP_PLAN_HISTORY.findIndex((entry) => entry.key === cycleKey);
-    if (cycleIndex >= 0) TRUMP_PLAN_HISTORY[cycleIndex] = cycleSnapshot;
-    else TRUMP_PLAN_HISTORY.unshift(cycleSnapshot);
+    const cycleIndex = PROMETHEUS_PLAN_HISTORY.findIndex((entry) => entry.key === cycleKey);
+    if (cycleIndex >= 0) PROMETHEUS_PLAN_HISTORY[cycleIndex] = cycleSnapshot;
+    else PROMETHEUS_PLAN_HISTORY.unshift(cycleSnapshot);
   }
 
-  const plans = Array.isArray(trumpAnalysis?.plans) ? trumpAnalysis.plans : [];
-  const analyzedAt = trumpAnalysis?.analyzedAt || null;
+  const plans = Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans : [];
+  const analyzedAt = prometheusAnalysis?.analyzedAt || null;
   const key = `${analyzedAt || "no-analysis"}|${plans.length}|${plans.map((p) => `${p?.role || "?"}:${normalizeText(p?.task || "")}`).join("||")}`;
 
   const items = plans.map((plan, index) => ({
@@ -189,37 +191,37 @@ function buildTrumpPlanBoard(trumpAnalysis, workerSessions, mosesCoordination) {
     priority: Number(plan?.priority || (index + 1)),
     kind: String(plan?.kind || "default"),
     task: String(plan?.task || ""),
-    status: computePlanStatus(plan, workerSessions || {}, mosesCoordination || {})
+    status: computePlanStatus(plan, workerSessions || {}, athenaState || {})
   }));
 
-  const existingIndex = TRUMP_PLAN_HISTORY.findIndex((entry) => entry.key === key);
+  const existingIndex = PROMETHEUS_PLAN_HISTORY.findIndex((entry) => entry.key === key);
   const snapshot = {
     key,
     analyzedAt,
-    projectHealth: String(trumpAnalysis?.projectHealth || "unknown"),
-    summary: String(trumpAnalysis?.analysis || "").slice(0, 260),
+    projectHealth: String(prometheusAnalysis?.projectHealth || "unknown"),
+    summary: String(prometheusAnalysis?.analysis || "").slice(0, 260),
     items,
-    source: "trump-analysis",
+    source: "prometheus-analysis",
     updatedAt: new Date().toISOString()
   };
 
   if (existingIndex >= 0) {
-    TRUMP_PLAN_HISTORY[existingIndex] = snapshot;
+    PROMETHEUS_PLAN_HISTORY[existingIndex] = snapshot;
   } else {
-    TRUMP_PLAN_HISTORY.unshift(snapshot);
+    PROMETHEUS_PLAN_HISTORY.unshift(snapshot);
   }
 
-  if (TRUMP_PLAN_HISTORY.length > TRUMP_PLAN_HISTORY_LIMIT) {
-    TRUMP_PLAN_HISTORY.length = TRUMP_PLAN_HISTORY_LIMIT;
+  if (PROMETHEUS_PLAN_HISTORY.length > PROMETHEUS_PLAN_HISTORY_LIMIT) {
+    PROMETHEUS_PLAN_HISTORY.length = PROMETHEUS_PLAN_HISTORY_LIMIT;
   }
 
-  const activeKey = coord?.hadTrumpPlans === false && cycleItems.length > 0 ? cycleKey : key;
-  const active = TRUMP_PLAN_HISTORY.find((entry) => entry.key === activeKey) || snapshot;
+  const activeKey = coord?.hadPrometheusPlans === false && cycleItems.length > 0 ? cycleKey : key;
+  const active = PROMETHEUS_PLAN_HISTORY.find((entry) => entry.key === activeKey) || snapshot;
 
   return {
     activeKey,
     active,
-    history: TRUMP_PLAN_HISTORY
+    history: PROMETHEUS_PLAN_HISTORY
   };
 }
 
@@ -420,8 +422,37 @@ function parseCopilotUsageFromSummary(payload) {
   return { quota, used: normalizedUsed, remaining };
 }
 
+/**
+ * Fetch premium request quota snapshot from copilot_internal/user endpoint.
+ * Returns { entitlement, used, remaining, percentRemaining } or null on failure.
+ */
+async function fetchCopilotInternalQuota() {
+  if (!GITHUB_BILLING_TOKEN) return null;
+  try {
+    const r = await fetch("https://api.github.com/copilot_internal/user", {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${GITHUB_BILLING_TOKEN}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": GITHUB_API_VERSION,
+        "user-agent": "BOX/1.0"
+      }
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    const snap = j?.quota_snapshots?.premium_interactions;
+    if (!snap || typeof snap.entitlement !== "number") return null;
+    const entitlement = snap.entitlement;
+    const remaining = Number(snap.quota_remaining ?? snap.remaining ?? 0);
+    const used = entitlement - remaining;
+    return { entitlement, used, remaining, percentRemaining: snap.percent_remaining ?? null };
+  } catch {
+    return null;
+  }
+}
+
 async function fetchOneTimeCopilotUsage() {
-  if (!GITHUB_TOKEN || !GITHUB_BILLING_SUMMARY_URL) {
+  if (!GITHUB_BILLING_TOKEN || !GITHUB_BILLING_SUMMARY_URL) {
     return {
       quotaRequests: null,
       usedRequests: null,
@@ -453,7 +484,7 @@ async function fetchOneTimeCopilotUsage() {
     return fetch(url.toString(), {
       method: "GET",
       headers: {
-        Authorization: `Bearer ${GITHUB_TOKEN}`,
+        Authorization: `Bearer ${GITHUB_BILLING_TOKEN}`,
         Accept: "application/vnd.github+json",
         "X-GitHub-Api-Version": apiVersion,
         "user-agent": "BOX/1.0"
@@ -492,11 +523,19 @@ async function fetchOneTimeCopilotUsage() {
       };
     }
 
+    // Prefer copilot_internal/user quota snapshot for accurate premium request tracking.
+    // The billing API grossQuantity differs from actual premium interaction units.
+    const internalQuota = await fetchCopilotInternalQuota();
+    const usedRequests = internalQuota ? internalQuota.used : parsed.used;
+    const quotaRequests = internalQuota ? internalQuota.entitlement : parsed.quota;
+    const remainingRequests = internalQuota ? internalQuota.remaining : parsed.remaining;
+
     return {
-      quotaRequests: parsed.quota,
-      usedRequests: parsed.used,
-      remainingRequests: parsed.remaining,
-      source: "github-billing-usage-summary",
+      quotaRequests,
+      usedRequests,
+      remainingRequests,
+      byModel: parsed.byModel || null,
+      source: internalQuota ? "copilot-internal-quota" : "github-billing-usage-summary",
       fetchedAt: new Date().toISOString(),
       lastError: null
     };
@@ -814,6 +853,63 @@ function getDockerSummary() {
   };
 }
 
+function getGitActivity() {
+  try {
+    const todayStr = new Date().toISOString().slice(0, 10);
+    // Commits today
+    const todayLog = execSync(
+      `git log --since="${todayStr}T00:00:00" --format="%H|%s|%ai" --no-merges`,
+      { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"], encoding: "utf8", windowsHide: true, timeout: 5000 }
+    ).trim();
+    const todayCommits = todayLog ? todayLog.split(/\r?\n/).filter(Boolean) : [];
+
+    // Lines changed today
+    let linesAdded = 0;
+    let linesDeleted = 0;
+    let filesChanged = 0;
+    try {
+      const shortstat = execSync(
+        `git diff --shortstat HEAD~${Math.max(1, todayCommits.length)} HEAD`,
+        { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"], encoding: "utf8", windowsHide: true, timeout: 5000 }
+      ).trim();
+      const filesMatch = shortstat.match(/(\d+) file/);
+      const addMatch = shortstat.match(/(\d+) insertion/);
+      const delMatch = shortstat.match(/(\d+) deletion/);
+      filesChanged = filesMatch ? Number(filesMatch[1]) : 0;
+      linesAdded = addMatch ? Number(addMatch[1]) : 0;
+      linesDeleted = delMatch ? Number(delMatch[1]) : 0;
+    } catch { /* shallow clone or no commits */ }
+
+    // Total commits on branch
+    let totalCommits = 0;
+    try {
+      totalCommits = Number(execSync(
+        "git rev-list --count HEAD",
+        { cwd: ROOT, stdio: ["ignore", "pipe", "ignore"], encoding: "utf8", windowsHide: true, timeout: 5000 }
+      ).trim()) || 0;
+    } catch { /* optional */ }
+
+    // Recent commit messages (last 5)
+    const recentMessages = todayCommits.slice(0, 5).map(line => {
+      const [hash, ...rest] = line.split("|");
+      const msg = rest.slice(0, -1).join("|") || "";
+      const time = rest[rest.length - 1] || "";
+      return { hash: (hash || "").slice(0, 7), message: msg.trim(), time: time.trim() };
+    });
+
+    return {
+      commitsToday: todayCommits.length,
+      totalCommits,
+      linesAdded,
+      linesDeleted,
+      filesChanged,
+      recentMessages
+    };
+  } catch {
+    return { commitsToday: 0, totalCommits: 0, linesAdded: 0, linesDeleted: 0, filesChanged: 0, recentMessages: [] };
+  }
+}
+
 function getMonthKey() {
   const d = new Date();
   const m = String(d.getUTCMonth() + 1).padStart(2, "0");
@@ -834,8 +930,8 @@ function deriveProjectLabel(targetRepo, packageName) {
   return String(packageName || "unknown");
 }
 
-function deriveTasks(trumpAnalysis, workerSessions) {
-  const allPlans = Array.isArray(trumpAnalysis?.plans) ? trumpAnalysis.plans : [];
+function deriveTasks(prometheusAnalysis, workerSessions) {
+  const allPlans = Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans : [];
   // Filter out Issachar/Ezra scan-only tasks (removed from active plan)
   const plans = allPlans.filter(p => !/^(Issachar|Ezra)/i.test(String(p.role || "")));
   const sessions = workerSessions || {};
@@ -942,10 +1038,11 @@ async function collectDashboardData() {
     oneTimeCost,
     copilotApiUsage,
     workerSessions,
-    mosesCoordination,
+    athenaState,
     jesusDirective,
-    trumpAnalysis,
+    prometheusAnalysis,
     alertsData,
+    suggestionsData,
     premiumUsageLog,
     completedProjects
   ] = await Promise.all([
@@ -954,15 +1051,19 @@ async function collectDashboardData() {
     getHourlyClaudeCost(),
     getHourlyCopilotUsage(),
     readJsonSafe(path.join(STATE_DIR, "worker_sessions.json"), {}),
-    readJsonSafe(path.join(STATE_DIR, "moses_coordination.json"), {}),
+    readJsonSafe(path.join(STATE_DIR, "athena_plan_review.json"), {}),
     readJsonSafe(path.join(STATE_DIR, "jesus_directive.json"), {}),
-    readJsonSafe(path.join(STATE_DIR, "trump_analysis.json"), {}),
+    readJsonSafe(path.join(STATE_DIR, "prometheus_analysis.json"), {}),
     readJsonSafe(path.join(STATE_DIR, "alerts.json"), { entries: [] }),
+    readJsonSafe(path.join(STATE_DIR, "worker_suggestions.json"), { entries: [] }),
     readJsonSafe(path.join(STATE_DIR, "premium_usage_log.json"), []),
     readJsonSafe(path.join(STATE_DIR, "completed_projects.json"), [])
   ]);
 
-  const [daemonStatus, prDeltaResult] = await Promise.all([getDaemonStatus(), getHourlyPrDeltaStats()]);
+  // Read pipeline progress authoritatively — no heuristic inference of stage.
+  const pipelineProgress = await readPipelineProgress({ paths: { stateDir: STATE_DIR } });
+
+  const [daemonStatus, prDeltaResult, gitActivity] = await Promise.all([getDaemonStatus(), getHourlyPrDeltaStats(), Promise.resolve(getGitActivity())]);
 
   // Read last thinking snippet from each worker's debug file
   const thinkingMap = {};
@@ -1002,7 +1103,7 @@ async function collectDashboardData() {
     ? apiRemaining
     : Math.max(0, copilotQuota - copilotUsedRequests);
   const copilotUsedPercent = copilotQuota > 0 ? (copilotUsedRequests / copilotQuota) * 100 : 0;
-  const trumpPlanBoard = buildTrumpPlanBoard(trumpAnalysis, workerSessions, mosesCoordination);
+  const prometheusPlanBoard = buildPrometheusPlanBoard(prometheusAnalysis, workerSessions, athenaState);
 
   // Check if current target repo is in the completion ledger
   const completedEntry = Array.isArray(completedProjects)
@@ -1021,12 +1122,9 @@ async function collectDashboardData() {
   } else if (hasWorkingWorkers) {
     systemStatus = "working";
     systemStatusText = "Workers Active";
-  } else if (completedEntry) {
-    systemStatus = "completed";
-    systemStatusText = "Project Completed";
   } else {
     systemStatus = "idle";
-    systemStatusText = "System Idle";
+    systemStatusText = completedEntry ? "System Idle (last project completed)" : "System Idle";
   }
 
   return {
@@ -1040,7 +1138,7 @@ async function collectDashboardData() {
       daemonPid: daemonStatus.pid,
       roleRegistry: {
         ceo: String(boxConfig?.roleRegistry?.ceoSupervisor?.name || "Jesus"),
-        lead: String(boxConfig?.roleRegistry?.leadWorker?.name || "Moses"),
+        lead: String(boxConfig?.roleRegistry?.qualityReviewer?.name || "Athena"),
         workers: (boxConfig?.roleRegistry?.workers && typeof boxConfig.roleRegistry.workers === "object")
           ? boxConfig.roleRegistry.workers
           : {}
@@ -1061,13 +1159,18 @@ async function collectDashboardData() {
       refreshInSec: oneTimeCost.refreshInSec
     },
     docker,
-    tasks: deriveTasks(trumpAnalysis, workerSessions),
-    trumpPlanBoard,
+    pipeline: pipelineProgress,
+    tasks: deriveTasks(prometheusAnalysis, workerSessions),
+    prometheusPlanBoard,
     taskInsights: {},
     issues: { total: 0, list: [] },
     alerts: deriveAlerts(alertsData),
+    suggestions: {
+      total: Array.isArray(suggestionsData?.entries) ? suggestionsData.entries.length : 0,
+      list: Array.isArray(suggestionsData?.entries) ? suggestionsData.entries.slice(-30).reverse() : []
+    },
     tests: {},
-    premiumRequestEstimate: derivePremiumEstimate(trumpAnalysis, copilotUsedRequests, copilotQuota),
+    premiumRequestEstimate: derivePremiumEstimate(prometheusAnalysis, copilotUsedRequests, copilotQuota),
     usage: {
       copilot: {
         totalEntries: 0,
@@ -1096,16 +1199,36 @@ async function collectDashboardData() {
       projectLinesDeleted: (prDeltaResult && prDeltaResult.prCount > 0) ? prDeltaResult.deletions : 0,
       source: (prDeltaResult && prDeltaResult.prCount > 0) ? prDeltaResult.source : "no-data"
     },
+    activityPulse: {
+      git: gitActivity,
+      requestsSpent: {
+        premium: Array.isArray(premiumUsageLog) ? premiumUsageLog.length : 0,
+        copilotUsedPct: Number(copilotUsedPercent.toFixed(2)),
+        copilotUsed: copilotUsedRequests,
+        copilotQuota: Number(copilotQuota),
+        copilotRemaining: copilotRemainingRequests,
+        copilotByModel: Array.isArray(copilotApiUsage?.byModel)
+          ? copilotApiUsage.byModel.map(m => ({ model: m.model, qty: m.grossQuantity }))
+          : []
+      },
+      workersActive: Object.entries(workerSessions || {}).filter(([, s]) => s?.status === "working").map(([name, s]) => ({
+        name,
+        task: String(s.lastTask || "").slice(0, 80),
+        since: s.lastActiveAt || null
+      })),
+      daemonPid: daemonStatus.pid,
+      daemonRunning: daemonStatus.running
+    },
     premiumUsageByWorker: derivePremiumUsageByWorker(premiumUsageLog),
     workerActivity: (function() {
       const sessions = workerSessions || {};
       const cleaned = {};
       for (const [role, s] of Object.entries(sessions)) {
-        // Cross-check: if status is "working" but last non-Moses history says "done",
+        // Cross-check: if status is "working" but last non-orchestrator history says "done",
         // the worker actually finished — session file is stale
         let effectiveStatus = s.status || "idle";
         if (effectiveStatus === "working" && Array.isArray(s.history) && s.history.length > 0) {
-          const lastEntry = s.history.filter(h => h && h.role !== "Moses").pop();
+          const lastEntry = s.history.filter(h => h && h.role !== "Athena").pop();
           if (lastEntry && ["done", "partial", "blocked"].includes(String(lastEntry.status || "").toLowerCase())) {
             effectiveStatus = "idle";
           }
@@ -1122,9 +1245,9 @@ async function collectDashboardData() {
       return cleaned;
     })(),
     leadership: {
-      moses: mosesCoordination,
+      athena: athenaState,
       jesus: jesusDirective,
-      trump: trumpAnalysis
+      prometheus: prometheusAnalysis
     },
     guardian: {
       report: {},
@@ -1632,6 +1755,228 @@ function renderHtml() {
       user-select: none;
     }
     .details-panel > summary::-webkit-details-marker { display: none; }
+
+    /* ── Leadership Pipeline ───────────────────────────────────── */
+    .lp-panel { margin-bottom: 12px; position: relative; overflow: hidden; }
+    .lp-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+    .lp-header h2 { margin: 0; font-size: 13px; text-transform: uppercase; font-family: "IBM Plex Mono", Consolas, monospace; }
+    .lp-progress { display: flex; align-items: center; gap: 10px; }
+    .lp-pct-ring {
+      width: 52px; height: 52px; position: relative;
+    }
+    .lp-pct-ring svg { width: 52px; height: 52px; transform: rotate(-90deg); }
+    .lp-pct-ring .ring-bg { fill: none; stroke: rgba(80,103,121,0.15); stroke-width: 5; }
+    .lp-pct-ring .ring-fg { fill: none; stroke: #22c27e; stroke-width: 5; stroke-linecap: round; transition: stroke-dashoffset 0.8s ease, stroke 0.4s; }
+    .lp-pct-text {
+      position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+      font-family: "IBM Plex Mono", Consolas, monospace; font-size: 13px; font-weight: 700; color: var(--ink);
+    }
+    .lp-chain {
+      display: flex; align-items: center; justify-content: center;
+      gap: 0; padding: 18px 10px 14px; flex-wrap: wrap;
+    }
+    .lp-node {
+      flex: 0 1 180px; border-radius: 12px; border: 2px solid var(--line);
+      background: var(--card); padding: 10px 12px; text-align: center;
+      transition: border-color 0.4s, box-shadow 0.4s, transform 0.3s;
+      position: relative; z-index: 1;
+    }
+    .lp-node.active { border-color: rgba(34,194,126,0.7); box-shadow: 0 0 18px rgba(34,194,126,0.25); }
+    .lp-node.flash { animation: nodeFlash 0.6s ease; }
+    .lp-node-emoji { font-size: 26px; margin-bottom: 2px; }
+    .lp-node-name {
+      font-family: "IBM Plex Mono", Consolas, monospace; font-size: 12px;
+      font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+    }
+    .lp-node-role { font-size: 10px; color: var(--muted); margin-top: 1px; }
+    .lp-node-status {
+      margin-top: 4px; font-size: 11px; font-family: "IBM Plex Mono", Consolas, monospace;
+      color: var(--muted); min-height: 15px;
+    }
+    @keyframes nodeFlash {
+      0% { transform: scale(1); box-shadow: 0 0 0 rgba(34,194,126,0); }
+      30% { transform: scale(1.06); box-shadow: 0 0 28px rgba(34,194,126,0.5); }
+      100% { transform: scale(1); box-shadow: 0 0 18px rgba(34,194,126,0.25); }
+    }
+    .lp-arrow {
+      flex: 0 0 60px; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; position: relative;
+      height: 50px;
+    }
+    .lp-arrow-line {
+      width: 40px; height: 3px; background: rgba(120,140,160,0.25);
+      border-radius: 2px; position: relative; overflow: hidden;
+    }
+    .lp-arrow-line::after {
+      content: ""; position: absolute; inset: 0;
+      background: linear-gradient(90deg, transparent, #22c27e, transparent);
+      transform: translateX(-110%); transition: none;
+    }
+    .lp-arrow.active .lp-arrow-line { background: rgba(34,194,126,0.35); }
+    .lp-arrow.active .lp-arrow-line::after { animation: arrowTravel 1.2s ease-in-out; }
+    .lp-arrow-tip {
+      font-size: 16px; color: rgba(120,140,160,0.4); line-height: 1;
+      transition: color 0.3s;
+    }
+    .lp-arrow.active .lp-arrow-tip { color: #22c27e; }
+    .lp-arrow-label {
+      font-size: 9px; color: var(--muted); font-family: "IBM Plex Mono", Consolas, monospace;
+      text-align: center; margin-top: 2px; max-width: 70px; line-height: 1.1;
+    }
+    @keyframes arrowTravel {
+      0% { transform: translateX(-110%); }
+      100% { transform: translateX(110%); }
+    }
+
+    /* ── Message Feed ──────────────────────────────────────────── */
+    .lp-feed {
+      padding: 8px 14px 12px; max-height: 180px; overflow-y: auto;
+      display: flex; flex-direction: column; gap: 5px;
+    }
+    .lp-msg {
+      display: flex; align-items: flex-start; gap: 8px;
+      font-size: 11px; font-family: "IBM Plex Mono", Consolas, monospace;
+      padding: 5px 8px; border-radius: 8px;
+      background: rgba(222, 237, 247, 0.5); border: 1px solid rgba(89,124,148,0.15);
+      animation: msgSlideIn 0.4s ease;
+    }
+    .lp-msg-icon { font-size: 14px; flex-shrink: 0; margin-top: 1px; }
+    .lp-msg-from { font-weight: 700; white-space: nowrap; }
+    .lp-msg-text { color: var(--muted); line-height: 1.35; }
+    .lp-msg-time { margin-left: auto; white-space: nowrap; color: rgba(80,103,121,0.5); font-size: 10px; }
+    .lp-msg.new { background: rgba(34,194,126,0.12); border-color: rgba(34,194,126,0.3); }
+    @keyframes msgSlideIn {
+      0% { opacity: 0; transform: translateX(-12px); }
+      100% { opacity: 1; transform: translateX(0); }
+    }
+
+    /* ── Request Flash Overlay ─────────────────────────────────── */
+    .req-flash-container {
+      position: fixed; top: 0; left: 0; right: 0;
+      pointer-events: none; z-index: 9999;
+      display: flex; flex-direction: column; align-items: center;
+      padding-top: 80px; gap: 8px;
+    }
+    .req-flash {
+      pointer-events: none;
+      background: linear-gradient(135deg, rgba(0,30,60,0.95), rgba(0,70,140,0.92));
+      border: 2px solid #00d4ff;
+      border-radius: 16px; padding: 18px 32px;
+      color: #fff; text-align: center;
+      box-shadow: 0 0 60px rgba(0,212,255,0.4), 0 20px 40px rgba(0,0,0,0.3);
+      animation: reqFlashIn 0.4s ease, reqFlashOut 0.5s ease 2.5s forwards;
+    }
+    .req-flash-emoji { font-size: 40px; margin-bottom: 4px; }
+    .req-flash-title {
+      font-family: "IBM Plex Mono", Consolas, monospace;
+      font-size: 16px; font-weight: 800; letter-spacing: 0.08em;
+      text-transform: uppercase; color: #00d4ff;
+    }
+    .req-flash-detail {
+      font-family: "IBM Plex Mono", Consolas, monospace;
+      font-size: 12px; color: rgba(200,230,255,0.8); margin-top: 4px;
+    }
+    .req-flash-model {
+      font-family: "IBM Plex Mono", Consolas, monospace;
+      font-size: 11px; color: rgba(180,220,255,0.6); margin-top: 2px;
+    }
+    @keyframes reqFlashIn {
+      0% { opacity: 0; transform: scale(0.7) translateY(-20px); }
+      60% { opacity: 1; transform: scale(1.05) translateY(0); }
+      100% { transform: scale(1); }
+    }
+    @keyframes reqFlashOut {
+      0% { opacity: 1; transform: scale(1); }
+      100% { opacity: 0; transform: scale(0.9) translateY(-10px); }
+    }
+
+    /* ── Worker card flash on request ──────────────────────────── */
+    .ws-card.req-pulse {
+      animation: wsReqPulse 1.5s ease;
+    }
+    @keyframes wsReqPulse {
+      0% { box-shadow: 0 0 0 rgba(0,212,255,0); }
+      20% { box-shadow: 0 0 30px rgba(0,212,255,0.6), inset 0 0 20px rgba(0,212,255,0.15); }
+      100% { box-shadow: 0 0 0 rgba(0,212,255,0); }
+    }
+
+    @media (max-width: 720px) {
+      .lp-chain { flex-direction: column; align-items: center; }
+      .lp-arrow { flex: 0 0 30px; height: 30px; }
+      .lp-arrow-line { width: 3px; height: 20px; }
+      .lp-arrow-tip { transform: rotate(90deg); }
+    }
+
+    /* ── Activity Pulse ────────────────────────────────────────── */
+    .pulse-panel { margin-bottom: 12px; overflow: hidden; }
+    .pulse-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 14px; border-bottom: 1px solid var(--line);
+    }
+    .pulse-header h2 {
+      margin: 0; font-size: 13px; text-transform: uppercase;
+      font-family: "IBM Plex Mono", Consolas, monospace;
+    }
+    .pulse-header .pulse-live-dot {
+      width: 8px; height: 8px; border-radius: 50%; background: #22c27e;
+      animation: pulseDot 1.6s ease-in-out infinite; margin-right: 6px; display: inline-block;
+    }
+    @keyframes pulseDot { 0%,100% { opacity: .5; transform: scale(.85); } 50% { opacity: 1; transform: scale(1.15); } }
+    .pulse-grid {
+      display: grid; gap: 0;
+      grid-template-columns: repeat(5, 1fr);
+      padding: 0;
+    }
+    @media (max-width: 900px) { .pulse-grid { grid-template-columns: repeat(3, 1fr); } }
+    @media (max-width: 560px) { .pulse-grid { grid-template-columns: 1fr 1fr; } }
+    .pulse-cell {
+      padding: 14px 16px; border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line); position: relative;
+    }
+    .pulse-cell:last-child { border-right: none; }
+    .pulse-cell-label {
+      font-family: "IBM Plex Mono", Consolas, monospace;
+      font-size: 10px; text-transform: uppercase; color: var(--muted);
+      letter-spacing: 0.06em; margin-bottom: 4px;
+    }
+    .pulse-cell-value {
+      font-size: 28px; font-weight: 800; line-height: 1.1;
+      font-family: "Space Grotesk", sans-serif; color: var(--ink);
+    }
+    .pulse-cell-value .plus { color: #1e8a5f; }
+    .pulse-cell-value .minus { color: #b34040; }
+    .pulse-cell-value .dim { font-size: 14px; font-weight: 500; color: var(--muted); }
+    .pulse-cell-sub {
+      margin-top: 3px; font-size: 10px; color: var(--muted);
+      font-family: "IBM Plex Mono", Consolas, monospace; line-height: 1.3;
+    }
+    .pulse-workers {
+      padding: 10px 14px; border-top: 1px solid var(--line);
+      display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    }
+    .pulse-worker-chip {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 4px 10px; border-radius: 999px; font-size: 11px;
+      font-family: "IBM Plex Mono", Consolas, monospace;
+      background: rgba(34,194,126,0.12); border: 1px solid rgba(34,194,126,0.3); color: #1a6b47;
+    }
+    .pulse-worker-chip .pw-dot {
+      width: 6px; height: 6px; border-radius: 50%; background: #22c27e;
+      animation: pulseDot 1.6s ease-in-out infinite;
+    }
+    .pulse-worker-chip.idle { background: rgba(120,140,160,0.1); border-color: rgba(120,140,160,0.25); color: var(--muted); }
+    .pulse-worker-chip.idle .pw-dot { background: #8a9daa; animation: none; }
+    .pulse-commits {
+      padding: 8px 14px 10px; border-top: 1px solid var(--line);
+      display: flex; flex-wrap: wrap; gap: 6px;
+    }
+    .pulse-commit {
+      font-size: 10px; font-family: "IBM Plex Mono", Consolas, monospace;
+      color: var(--muted); background: rgba(222,237,247,0.6);
+      padding: 3px 8px; border-radius: 6px; border: 1px solid rgba(89,124,148,0.12);
+      max-width: 300px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .pulse-commit strong { color: var(--ink); font-weight: 600; }
   </style>
 </head>
 <body>
@@ -1647,6 +1992,43 @@ function renderHtml() {
         <span id="daemon-status-text" class="muted" style="font-size:12px"></span>
       </div>
       <p id="meta">Connecting...</p>
+    </section>
+
+    <!-- Activity Pulse — Real-time simplified view -->
+    <section class="panel pulse-panel" id="pulse-panel">
+      <div class="pulse-header">
+        <h2><span class="pulse-live-dot"></span> Activity Pulse</h2>
+        <span style="font-size:10px;color:var(--muted);font-family:'IBM Plex Mono',monospace" id="pulse-updated">—</span>
+      </div>
+      <div class="pulse-grid">
+        <div class="pulse-cell">
+          <div class="pulse-cell-label">Commits Today</div>
+          <div class="pulse-cell-value" id="pulse-commits">0</div>
+          <div class="pulse-cell-sub" id="pulse-commits-sub">total: 0</div>
+        </div>
+        <div class="pulse-cell">
+          <div class="pulse-cell-label">Lines Written</div>
+          <div class="pulse-cell-value" id="pulse-lines"><span class="plus">+0</span> <span class="dim">/</span> <span class="minus">-0</span></div>
+          <div class="pulse-cell-sub" id="pulse-files-sub">0 files changed</div>
+        </div>
+        <div class="pulse-cell">
+          <div class="pulse-cell-label">Premium Requests</div>
+          <div class="pulse-cell-value" id="pulse-premium">0</div>
+          <div class="pulse-cell-sub" id="pulse-premium-sub">this month</div>
+        </div>
+        <div class="pulse-cell">
+          <div class="pulse-cell-label">Copilot Used</div>
+          <div class="pulse-cell-value" id="pulse-copilot">0 <span class="dim">/ 1500</span></div>
+          <div class="pulse-cell-sub" id="pulse-copilot-sub">loading...</div>
+        </div>
+        <div class="pulse-cell">
+          <div class="pulse-cell-label">Workers</div>
+          <div class="pulse-cell-value" id="pulse-workers-count">0 <span class="dim">active</span></div>
+          <div class="pulse-cell-sub" id="pulse-workers-sub">idle</div>
+        </div>
+      </div>
+      <div class="pulse-workers" id="pulse-workers-list"></div>
+      <div class="pulse-commits" id="pulse-recent-commits"></div>
     </section>
 
     <!-- Celebration Banner (hidden until all tasks pass) -->
@@ -1679,34 +2061,81 @@ function renderHtml() {
       <article class="card"><div class="k">Alerts</div><div class="v" id="m-alerts">0</div><div class="sub" id="m-alerts-sub">no alerts</div></article>
     </section>
 
-    <!-- Leadership Flow: Jesus → Moses -->
-    <section class="panel lf-panel">
-      <h2>Leadership Communication</h2>
-      <div class="lf-row">
-        <div class="lf-card jesus">
-          <div class="lf-name">⚡ Jesus</div>
-          <div class="lf-status" id="lf-jesus-status">—</div>
-          <div class="lf-detail" id="lf-jesus-detail">—</div>
-          <details style="margin-top:6px">
-            <summary style="cursor:pointer;font-size:11px;color:var(--muted);font-family:'IBM Plex Mono',monospace">Reasoning ▾</summary>
-            <div id="lf-jesus-reasoning" class="lf-reasoning">Awaiting Jesus analysis...</div>
-          </details>
-        </div>
-        <div class="lf-arrow-wrap" id="lf-arrow">
-          <span class="lf-arrow-sym">⟹</span>
-          <div class="lf-arrow-label" id="lf-arrow-label">no directive yet</div>
-        </div>
-        <div class="lf-card moses">
-          <div class="lf-name">📋 Moses</div>
-          <div class="lf-status" id="lf-moses-status">—</div>
-          <div class="lf-detail" id="lf-moses-detail">—</div>
-          <details style="margin-top:6px">
-            <summary style="cursor:pointer;font-size:11px;color:var(--muted);font-family:'IBM Plex Mono',monospace">Report ▾</summary>
-            <div id="lf-moses-report" class="lf-reasoning">Awaiting Moses coordination...</div>
-          </details>
+    <!-- Leadership Pipeline: Jesus → Trump → Moses → Workers -->
+    <section class="panel lp-panel" id="lp-panel">
+      <div class="lp-header">
+        <h2>Leadership Pipeline</h2>
+        <div class="lp-progress">
+          <div class="lp-pct-ring" id="lp-pct-ring">
+            <svg viewBox="0 0 52 52">
+              <circle class="ring-bg" cx="26" cy="26" r="22"/>
+              <circle class="ring-fg" id="lp-ring-fg" cx="26" cy="26" r="22"
+                stroke-dasharray="138.23" stroke-dashoffset="138.23"/>
+            </svg>
+            <div class="lp-pct-text" id="lp-pct-text">0%</div>
+          </div>
+          <span style="font-size:11px;color:var(--muted);font-family:'IBM Plex Mono',monospace" id="lp-pct-label">0 / 0 tasks</span>
         </div>
       </div>
+      <div class="lp-chain" id="lp-chain">
+        <!-- Jesus -->
+        <div class="lp-node" id="lp-node-jesus" data-entity="jesus">
+          <div class="lp-node-emoji">⚡</div>
+          <div class="lp-node-name">Jesus</div>
+          <div class="lp-node-role">CEO Supervisor</div>
+          <div class="lp-node-status" id="lp-jesus-status">—</div>
+        </div>
+        <div class="lp-arrow" id="lp-arrow-jt">
+          <div style="display:flex;align-items:center;gap:2px">
+            <div class="lp-arrow-line"></div>
+            <span class="lp-arrow-tip">▸</span>
+          </div>
+          <div class="lp-arrow-label" id="lp-arrow-jt-label">—</div>
+        </div>
+        <!-- Trump -->
+        <div class="lp-node" id="lp-node-trump" data-entity="trump">
+          <div class="lp-node-emoji">📊</div>
+          <div class="lp-node-name">Trump</div>
+          <div class="lp-node-role">Deep Planner</div>
+          <div class="lp-node-status" id="lp-trump-status">—</div>
+        </div>
+        <div class="lp-arrow" id="lp-arrow-tm">
+          <div style="display:flex;align-items:center;gap:2px">
+            <div class="lp-arrow-line"></div>
+            <span class="lp-arrow-tip">▸</span>
+          </div>
+          <div class="lp-arrow-label" id="lp-arrow-tm-label">—</div>
+        </div>
+        <!-- Moses -->
+        <div class="lp-node" id="lp-node-moses" data-entity="moses">
+          <div class="lp-node-emoji">📋</div>
+          <div class="lp-node-name">Moses</div>
+          <div class="lp-node-role">Lead Manager</div>
+          <div class="lp-node-status" id="lp-moses-status">—</div>
+        </div>
+        <div class="lp-arrow" id="lp-arrow-mw">
+          <div style="display:flex;align-items:center;gap:2px">
+            <div class="lp-arrow-line"></div>
+            <span class="lp-arrow-tip">▸</span>
+          </div>
+          <div class="lp-arrow-label" id="lp-arrow-mw-label">—</div>
+        </div>
+        <!-- Workers -->
+        <div class="lp-node" id="lp-node-workers" data-entity="workers">
+          <div class="lp-node-emoji">👷</div>
+          <div class="lp-node-name">Workers</div>
+          <div class="lp-node-role">Execution Team</div>
+          <div class="lp-node-status" id="lp-workers-status">—</div>
+        </div>
+      </div>
+      <!-- Message Feed -->
+      <div class="lp-feed" id="lp-feed">
+        <div class="muted" style="font-size:11px;text-align:center">Waiting for leadership activity...</div>
+      </div>
     </section>
+
+    <!-- Request Flash Container (fixed overlay) -->
+    <div class="req-flash-container" id="req-flash-container"></div>
 
     <!-- Workers Live Grid -->
     <section class="panel workers-live">
@@ -1872,6 +2301,13 @@ function renderHtml() {
           </table>
         </div>
         <div class="panel" style="box-shadow:none">
+          <h2>Worker Optimization Suggestions</h2>
+          <table>
+            <thead><tr><th>When</th><th>Worker</th><th>Suggestion</th><th>PR/Branch</th></tr></thead>
+            <tbody id="suggestions-body"><tr><td colspan="4" class="muted">No suggestions</td></tr></tbody>
+          </table>
+        </div>
+        <div class="panel" style="box-shadow:none">
           <h2>Copilot Live Detail</h2>
           <pre id="copilot-live-detail">Worker detayi yukleniyor...</pre>
         </div>
@@ -1890,6 +2326,16 @@ function renderHtml() {
     let selectedTrumpPlanKey = null;
     let trumpPlanUserSelected = false;
     let trumpPlanFingerprint = '';
+
+    // ── Change detection state ────────────────────────────────
+    var prevJesusDecidedAt = null;
+    var prevTrumpAnalyzedAt = null;
+    var prevMosesCoordinatedAt = null;
+    var prevTotalPremiumReqs = 0;
+    var prevWorkerStatuses = {};
+    var prevPremiumByWorker = {};
+    var leadershipMessages = [];
+    var LP_MSG_LIMIT = 25;
 
     function esc(v) {
       var value = (v === null || v === undefined) ? "" : v;
@@ -2226,56 +2672,280 @@ function renderHtml() {
       return Math.floor(mins / 60) + 'h ago';
     }
 
-    function renderLeadershipFlow(data) {
-      var jesus = (data && data.leadership && data.leadership.jesus) ? data.leadership.jesus : {};
-      var moses = (data && data.leadership && data.leadership.moses) ? data.leadership.moses : {};
+    // ── Leadership Pipeline + Change Detection ─────────────────────────
+    function detectLeadershipChanges(data) {
+      var changes = { jesusNew: false, trumpNew: false, mosesNew: false, newWorkers: [], reqFlashes: [], newMessages: [] };
+      var jesus = (data && data.leadership && data.leadership.jesus) || {};
+      var trump = (data && data.leadership && data.leadership.trump) || {};
+      var moses = (data && data.leadership && data.leadership.moses) || {};
+      var wa = data && data.workerActivity ? data.workerActivity : {};
+      var puBw = (data && data.premiumUsageByWorker && data.premiumUsageByWorker.byWorker) || {};
 
-      // Jesus card
+      // Jesus decided
+      if (jesus.decidedAt && jesus.decidedAt !== prevJesusDecidedAt) {
+        changes.jesusNew = true;
+        if (prevJesusDecidedAt) {
+          var newMsg = {
+            icon: '⚡', from: 'Jesus', to: jesus.callTrump ? 'Trump' : 'Moses',
+            text: jesus.callTrump
+              ? 'Activate Trump for deep analysis: ' + String(jesus.trumpReason || jesus.briefForMoses || '').slice(0, 100)
+              : 'Directive to Moses: ' + String(jesus.briefForMoses || jesus.decision || '').slice(0, 100),
+            time: jesus.decidedAt, isNew: true
+          };
+          leadershipMessages.unshift(newMsg);
+          changes.newMessages.push(newMsg);
+        }
+        prevJesusDecidedAt = jesus.decidedAt;
+      }
+
+      // Trump analyzed
+      if (trump.analyzedAt && trump.analyzedAt !== prevTrumpAnalyzedAt) {
+        changes.trumpNew = true;
+        if (prevTrumpAnalyzedAt) {
+          var planCount = Array.isArray(trump.plans) ? trump.plans.length : 0;
+          var newMsg = {
+            icon: '📊', from: 'Trump', to: 'Moses',
+            text: planCount + ' plans created, health: ' + String(trump.projectHealth || '?') + ' — ' + String(trump.analysis || '').slice(0, 80),
+            time: trump.analyzedAt, isNew: true
+          };
+          leadershipMessages.unshift(newMsg);
+          changes.newMessages.push(newMsg);
+        }
+        prevTrumpAnalyzedAt = trump.analyzedAt;
+      }
+
+      // Moses coordinated
+      if (moses.coordinatedAt && moses.coordinatedAt !== prevMosesCoordinatedAt) {
+        changes.mosesNew = true;
+        if (prevMosesCoordinatedAt) {
+          var activeSess = Number(moses.activeSessions || 0);
+          var newMsg = {
+            icon: '📋', from: 'Moses', to: 'Workers',
+            text: 'Dispatched ' + activeSess + ' workers: ' + String(moses.summary || moses.statusReport || '').slice(0, 100),
+            time: moses.coordinatedAt, isNew: true
+          };
+          leadershipMessages.unshift(newMsg);
+          changes.newMessages.push(newMsg);
+        }
+        prevMosesCoordinatedAt = moses.coordinatedAt;
+      }
+
+      // Workers changed status (became working)
+      Object.keys(wa).forEach(function(name) {
+        var st = String((wa[name] || {}).status || '').toLowerCase();
+        var prevSt = prevWorkerStatuses[name] || 'idle';
+        if (st === 'working' && prevSt !== 'working') {
+          changes.newWorkers.push(name);
+          var newMsg = {
+            icon: '👷', from: 'Moses', to: name,
+            text: 'Task assigned: ' + String((wa[name] || {}).lastTask || '').slice(0, 100),
+            time: (wa[name] || {}).lastActiveAt || new Date().toISOString(), isNew: true
+          };
+          leadershipMessages.unshift(newMsg);
+          changes.newMessages.push(newMsg);
+        }
+        prevWorkerStatuses[name] = st;
+      });
+
+      // Premium request consumed
+      Object.keys(puBw).forEach(function(name) {
+        var w = puBw[name] || {};
+        var prevCount = prevPremiumByWorker[name] || 0;
+        var nowCount = Number(w.count || 0);
+        if (nowCount > prevCount && prevCount > 0) {
+          var diff = nowCount - prevCount;
+          var lastEntry = (w.entries && w.entries.length) ? w.entries[w.entries.length - 1] : {};
+          for (var ri = 0; ri < diff; ri++) {
+            changes.reqFlashes.push({
+              worker: name,
+              model: String(lastEntry.model || '?'),
+              taskKind: String(lastEntry.taskKind || ''),
+              count: nowCount
+            });
+          }
+        }
+        prevPremiumByWorker[name] = nowCount;
+      });
+
+      // Trim old messages
+      while (leadershipMessages.length > LP_MSG_LIMIT) leadershipMessages.pop();
+      // Clear isNew flag after 6 seconds
+      var cutoff = Date.now() - 6000;
+      leadershipMessages.forEach(function(m) {
+        if (m.isNew && m.time && new Date(m.time).getTime() < cutoff) m.isNew = false;
+      });
+
+      return changes;
+    }
+
+    function showRequestFlash(flash) {
+      var container = document.getElementById('req-flash-container');
+      if (!container) return;
+      var emojis = {
+        'King David': '👑', 'Esther': '💎', 'Aaron': '🔌', 'Joseph': '🔗',
+        'Samuel': '🧪', 'Isaiah': '🔍', 'Noah': '🚢', 'Elijah': '🛡️',
+        'Issachar': '📊', 'Ezra': '📝'
+      };
+      var emoji = emojis[flash.worker] || '🤖';
+      var el = document.createElement('div');
+      el.className = 'req-flash';
+      el.innerHTML =
+        '<div class="req-flash-emoji">💎</div>' +
+        '<div class="req-flash-title">PREMIUM REQUEST</div>' +
+        '<div class="req-flash-detail">' + emoji + ' ' + esc(flash.worker) + ' — #' + esc(flash.count) + '</div>' +
+        '<div class="req-flash-model">model: ' + esc(flash.model) + (flash.taskKind ? ' | ' + esc(flash.taskKind) : '') + '</div>';
+      container.appendChild(el);
+      // Also pulse the worker card
+      var wsCard = document.querySelector('.ws-card[data-worker="' + flash.worker.replace(/"/g, '\\"') + '"]');
+      if (wsCard) {
+        wsCard.classList.remove('req-pulse');
+        void wsCard.offsetWidth;
+        wsCard.classList.add('req-pulse');
+      }
+      // Remove flash after animation ends
+      setTimeout(function() { if (el.parentNode) el.parentNode.removeChild(el); }, 3200);
+    }
+
+    function renderLeadershipPipeline(data, changes) {
+      var jesus = (data && data.leadership && data.leadership.jesus) || {};
+      var trump = (data && data.leadership && data.leadership.trump) || {};
+      var moses = (data && data.leadership && data.leadership.moses) || {};
+      var wa = data && data.workerActivity ? data.workerActivity : {};
+
+      // Progress ring
+      var tasks = data && data.tasks ? data.tasks : {};
+      var total = Math.max(1, Number(tasks.total || 0));
+      var passed = Number((tasks.totals || {}).passed || 0);
+      var pct = tasks.total > 0 ? Math.round((passed / total) * 100) : 0;
+      var circumference = 2 * Math.PI * 22; // r=22
+      var offset = circumference - (pct / 100) * circumference;
+      var ringFg = document.getElementById('lp-ring-fg');
+      var pctText = document.getElementById('lp-pct-text');
+      var pctLabel = document.getElementById('lp-pct-label');
+      if (ringFg) {
+        ringFg.style.strokeDasharray = String(circumference);
+        ringFg.style.strokeDashoffset = String(offset);
+        ringFg.style.stroke = pct >= 100 ? '#00ff88' : pct >= 50 ? '#22c27e' : pct >= 25 ? '#d4a017' : '#7dc4ff';
+      }
+      if (pctText) pctText.textContent = pct + '%';
+      if (pctLabel) pctLabel.textContent = passed + ' / ' + (tasks.total || 0) + ' tasks';
+
+      // Jesus node
       var health = String(jesus.systemHealth || 'unknown');
       var healthIcon = health === 'healthy' ? '🟢' : health === 'critical' ? '🔴' : '🟡';
-      var lfJesusStatus = document.getElementById('lf-jesus-status');
-      if (lfJesusStatus) {
-        lfJesusStatus.textContent = healthIcon + ' ' + health.toUpperCase() + ' | ' + String(jesus.decision || 'waiting');
-      }
-      var lfJesusDetail = document.getElementById('lf-jesus-detail');
-      if (lfJesusDetail) {
-        lfJesusDetail.textContent = jesus.briefForMoses
-          ? String(jesus.briefForMoses).slice(0, 130)
-          : 'No directive yet';
-      }
-      var lfJesusReasoning = document.getElementById('lf-jesus-reasoning');
-      if (lfJesusReasoning) {
-        lfJesusReasoning.textContent = String(jesus.thinking || jesus.reasoning || 'Awaiting Jesus analysis...');
-        lfJesusReasoning.title = 'Decided: ' + String(jesus.decidedAt || '') + ' | Model: ' + String(jesus.model || '');
+      var jesusStatusEl = document.getElementById('lp-jesus-status');
+      if (jesusStatusEl) jesusStatusEl.textContent = healthIcon + ' ' + String(jesus.decision || 'waiting');
+      var jesusNode = document.getElementById('lp-node-jesus');
+      if (jesusNode) {
+        jesusNode.classList.toggle('active', !!jesus.decidedAt);
+        if (changes.jesusNew) { jesusNode.classList.remove('flash'); void jesusNode.offsetWidth; jesusNode.classList.add('flash'); }
       }
 
-      // Arrow — active when Jesus sent directive within the last 90 seconds
-      var arrowEl = document.getElementById('lf-arrow');
-      var arrowLabel = document.getElementById('lf-arrow-label');
-      var decidedAt = jesus.decidedAt ? new Date(jesus.decidedAt).getTime() : 0;
-      var arrowActive = decidedAt > 0 && (Date.now() - decidedAt) < 90000;
-      if (arrowEl) {
-        arrowEl.classList.toggle('active', arrowActive);
-      }
-      if (arrowLabel) {
-        arrowLabel.textContent = decidedAt ? ('sent ' + relativeTime(jesus.decidedAt)) : 'no directive yet';
+      // Jesus → Trump arrow
+      var arrowJT = document.getElementById('lp-arrow-jt');
+      var arrowJTLabel = document.getElementById('lp-arrow-jt-label');
+      if (arrowJT) arrowJT.classList.toggle('active', changes.jesusNew);
+      if (arrowJTLabel) arrowJTLabel.textContent = jesus.callTrump ? 'analyze' : (jesus.decidedAt ? 'directive' : '—');
+
+      // Trump node
+      var trumpStatusEl = document.getElementById('lp-trump-status');
+      var planCount = Array.isArray(trump.plans) ? trump.plans.length : 0;
+      if (trumpStatusEl) trumpStatusEl.textContent = planCount > 0 ? (planCount + ' plans | ' + String(trump.projectHealth || '?')) : 'waiting';
+      var trumpNode = document.getElementById('lp-node-trump');
+      if (trumpNode) {
+        trumpNode.classList.toggle('active', planCount > 0);
+        if (changes.trumpNew) { trumpNode.classList.remove('flash'); void trumpNode.offsetWidth; trumpNode.classList.add('flash'); }
       }
 
-      // Moses card
-      var lfMosesStatus = document.getElementById('lf-moses-status');
-      if (lfMosesStatus) {
-        lfMosesStatus.textContent = String(moses.statusReport || 'Awaiting coordination...');
+      // Trump → Moses arrow
+      var arrowTM = document.getElementById('lp-arrow-tm');
+      var arrowTMLabel = document.getElementById('lp-arrow-tm-label');
+      if (arrowTM) arrowTM.classList.toggle('active', changes.trumpNew);
+      if (arrowTMLabel) arrowTMLabel.textContent = planCount > 0 ? (planCount + ' plans') : '—';
+
+      // Moses node
+      var mosesStatusEl = document.getElementById('lp-moses-status');
+      var activeSessions = Number(moses.activeSessions || 0);
+      var completedCount = Array.isArray(moses.completedTasks) ? moses.completedTasks.length : 0;
+      if (mosesStatusEl) mosesStatusEl.textContent = activeSessions + ' active | ' + completedCount + ' done';
+      var mosesNode = document.getElementById('lp-node-moses');
+      if (mosesNode) {
+        mosesNode.classList.toggle('active', !!moses.coordinatedAt);
+        if (changes.mosesNew) { mosesNode.classList.remove('flash'); void mosesNode.offsetWidth; mosesNode.classList.add('flash'); }
       }
-      var lfMosesDetail = document.getElementById('lf-moses-detail');
-      if (lfMosesDetail) {
-        var activeSessions = Number(moses.activeSessions || 0);
-        var completed = Array.isArray(moses.completedTasks) ? moses.completedTasks.length : 0;
-        lfMosesDetail.textContent = activeSessions + ' active | ' + completed + ' completed';
+
+      // Moses → Workers arrow
+      var arrowMW = document.getElementById('lp-arrow-mw');
+      var arrowMWLabel = document.getElementById('lp-arrow-mw-label');
+      if (arrowMW) arrowMW.classList.toggle('active', changes.mosesNew || changes.newWorkers.length > 0);
+      if (arrowMWLabel) arrowMWLabel.textContent = activeSessions > 0 ? ('dispatch ' + activeSessions) : '—';
+
+      // Workers node
+      var workingNames = Object.keys(wa).filter(function(n) { return String((wa[n] || {}).status || '').toLowerCase() === 'working'; });
+      var workersStatusEl = document.getElementById('lp-workers-status');
+      if (workersStatusEl) workersStatusEl.textContent = workingNames.length > 0 ? (workingNames.length + ' working') : 'idle';
+      var workersNode = document.getElementById('lp-node-workers');
+      if (workersNode) {
+        workersNode.classList.toggle('active', workingNames.length > 0);
+        if (changes.newWorkers.length > 0) { workersNode.classList.remove('flash'); void workersNode.offsetWidth; workersNode.classList.add('flash'); }
       }
-      var lfMosesReport = document.getElementById('lf-moses-report');
-      if (lfMosesReport) {
-        lfMosesReport.textContent = String(moses.summary || 'Awaiting Moses coordination...');
+
+      // Message feed — append-only (no full re-render)
+      var feedEl = document.getElementById('lp-feed');
+      if (feedEl) {
+        // Remove 'new' class from any old messages after rendering
+        if (changes.newMessages && changes.newMessages.length > 0) {
+          // Only render new messages once, then just toggle classes
+          changes.newMessages.forEach(function(msg, idx) {
+            var div = document.createElement('div');
+            div.className = 'lp-msg new';
+            div.innerHTML =
+              '<span class="lp-msg-icon">' + esc(msg.icon) + '</span>' +
+              '<span class="lp-msg-from">' + esc(msg.from) + ' → ' + esc(msg.to) + '</span>' +
+              '<span class="lp-msg-text">' + esc(msg.text) + '</span>' +
+              '<span class="lp-msg-time">' + esc(relativeTime(msg.time)) + '</span>';
+            // Prepend (oldest messages at bottom)
+            if (feedEl.firstChild) {
+              feedEl.insertBefore(div, feedEl.firstChild);
+            } else {
+              feedEl.appendChild(div);
+            }
+          });
+        }
+        // Remove 'new' class from any old messages
+        var msgEls = feedEl.querySelectorAll('.lp-msg.new');
+        msgEls.forEach(function(el) {
+          if (!el.classList.contains('keep-new')) {
+            el.classList.remove('new');
+          }
+        });
+        // Clear 'keep-new' marker after 6 seconds
+        msgEls.forEach(function(el) {
+          if (el.classList.contains('keep-new')) {
+            setTimeout(function() {
+              el.classList.remove('keep-new');
+              el.classList.remove('new');
+            }, 6000);
+          }
+        });
+      } else if (feedEl && feedEl.children.length === 0) {
+        // Only show empty state if no messages ever existed
+        if (!feedEl.hasAttribute('data-had-messages')) {
+          feedEl.innerHTML = '<div class="muted" style="font-size:11px;text-align:center">Waiting for leadership activity...</div>';
+        }
       }
+
+      // Request flashes
+      if (changes.reqFlashes.length > 0) {
+        changes.reqFlashes.forEach(function(flash) {
+          showRequestFlash(flash);
+        });
+      }
+    }
+
+    // Keep old renderLeadershipFlow as a no-op since applyState still calls it
+    function renderLeadershipFlow(data) {
+      // Replaced by renderLeadershipPipeline — called separately
     }
 
     function renderWorkerGrid(data) {
@@ -2345,6 +3015,15 @@ function renderHtml() {
     function renderCelebration(data) {
       var banner = document.getElementById('celebration-banner');
       if (!banner) return;
+
+      // Only show completion/celebration banner in true completed mode.
+      // While daemon is running (working/idle), keep monitoring UI focused on live state.
+      var runtimeStatus = String((data && data.runtime && data.runtime.systemStatus) || 'offline').toLowerCase();
+      if (runtimeStatus !== 'completed') {
+        banner.style.display = 'none';
+        celebrationAnimated = false;
+        return;
+      }
 
       // Project completion from ledger takes priority
       var pc = data.projectCompleted;
@@ -2755,6 +3434,112 @@ function renderHtml() {
         })();
     }
 
+    function renderActivityPulse(data) {
+      var pulse = (data && data.activityPulse) || {};
+      var git = pulse.git || {};
+      var reqs = pulse.requestsSpent || {};
+      var workers = Array.isArray(pulse.workersActive) ? pulse.workersActive : [];
+
+      // Update timestamp
+      var updEl = document.getElementById('pulse-updated');
+      if (updEl) updEl.textContent = 'live · ' + new Date().toLocaleTimeString();
+
+      // Commits today
+      var commitsEl = document.getElementById('pulse-commits');
+      if (commitsEl) commitsEl.textContent = String(git.commitsToday || 0);
+      var commitsSub = document.getElementById('pulse-commits-sub');
+      if (commitsSub) commitsSub.textContent = 'total: ' + String(git.totalCommits || 0);
+
+      // Lines written
+      var linesEl = document.getElementById('pulse-lines');
+      if (linesEl) {
+        linesEl.innerHTML =
+          '<span class="plus">+' + String(git.linesAdded || 0) + '</span>' +
+          ' <span class="dim">/</span> ' +
+          '<span class="minus">-' + String(git.linesDeleted || 0) + '</span>';
+      }
+      var filesSub = document.getElementById('pulse-files-sub');
+      if (filesSub) filesSub.textContent = String(git.filesChanged || 0) + ' files changed';
+
+      // Premium requests
+      var premEl = document.getElementById('pulse-premium');
+      if (premEl) premEl.textContent = String(reqs.premium || 0);
+      var premSub = document.getElementById('pulse-premium-sub');
+      if (premSub) premSub.textContent = 'this month';
+
+      // Copilot used / quota
+      var copilotEl = document.getElementById('pulse-copilot');
+      if (copilotEl) {
+        var used = Math.round(Number(reqs.copilotUsed || 0));
+        var quota = Number(reqs.copilotQuota || 1500);
+        copilotEl.innerHTML = String(used) + ' <span class="dim">/ ' + formatRequestCount(quota) + '</span>';
+      }
+      var copilotSub = document.getElementById('pulse-copilot-sub');
+      if (copilotSub) {
+        var pct = Number(reqs.copilotUsedPct || 0).toFixed(1);
+        var models = reqs.copilotByModel || [];
+        if (models.length > 0) {
+          var top3 = models.slice().sort(function(a,b){ return (b.qty||0)-(a.qty||0); }).slice(0,3);
+          copilotSub.textContent = pct + '% — ' + top3.map(function(m){ return (m.model||'').replace(/^Auto:\\s*/,'').split(' ').slice(-2).join(' ') + ': ' + Math.round(m.qty); }).join(', ');
+        } else {
+          copilotSub.textContent = pct + '% used';
+        }
+      }
+
+      // Workers active count
+      var wcountEl = document.getElementById('pulse-workers-count');
+      if (wcountEl) {
+        wcountEl.innerHTML = String(workers.length) + ' <span class="dim">active</span>';
+      }
+      var wsub = document.getElementById('pulse-workers-sub');
+      if (wsub) {
+        wsub.textContent = workers.length > 0
+          ? workers.map(function(w) { return w.name; }).join(', ')
+          : 'all idle';
+      }
+
+      // Worker chips
+      var wListEl = document.getElementById('pulse-workers-list');
+      if (wListEl) {
+        var wa = data && data.workerActivity ? data.workerActivity : {};
+        var emojis = {
+          'King David': '👑', 'Esther': '💎', 'Aaron': '🔌', 'Joseph': '🔗',
+          'Samuel': '🧪', 'Isaiah': '🔍', 'Noah': '🚢', 'Elijah': '🛡️',
+          'Issachar': '📊', 'Ezra': '📝'
+        };
+        var chipHtml = '';
+        var allNames = Object.keys(wa);
+        if (allNames.length > 0) {
+          chipHtml = allNames.map(function(name) {
+            var st = String((wa[name] || {}).status || 'idle').toLowerCase();
+            var isActive = st === 'working';
+            var chipClass = isActive ? '' : ' idle';
+            var task = String((wa[name] || {}).lastTask || '').slice(0, 50);
+            var emoji = emojis[name] || '🤖';
+            return '<span class="pulse-worker-chip' + chipClass + '" title="' + esc(task) + '">' +
+              '<span class="pw-dot"></span>' + emoji + ' ' + esc(name) +
+              (isActive ? ' — ' + esc(task) : '') + '</span>';
+          }).join('');
+        } else {
+          chipHtml = '<span style="font-size:11px;color:var(--muted)">No workers registered</span>';
+        }
+        wListEl.innerHTML = chipHtml;
+      }
+
+      // Recent commits
+      var rcEl = document.getElementById('pulse-recent-commits');
+      if (rcEl) {
+        var msgs = Array.isArray(git.recentMessages) ? git.recentMessages : [];
+        if (msgs.length > 0) {
+          rcEl.innerHTML = msgs.map(function(c) {
+            return '<span class="pulse-commit"><strong>' + esc(c.hash) + '</strong> ' + esc(c.message) + '</span>';
+          }).join('');
+        } else {
+          rcEl.innerHTML = '<span style="font-size:10px;color:var(--muted)">No commits today</span>';
+        }
+      }
+    }
+
     function applyState(data) {
       latestState = data;
 
@@ -2937,13 +3722,26 @@ function renderHtml() {
       });
       document.getElementById("alerts-body").innerHTML = renderRows(alertRows, 3);
 
+      const suggestionRows = (data.suggestions && data.suggestions.list ? data.suggestions.list : []).map((s) => {
+        const link = s.prUrl
+          ? ('<a href="' + esc(s.prUrl) + '" target="_blank" rel="noopener noreferrer">PR</a>')
+          : esc(s.branch || '-');
+        return '<tr><td>' + esc(s.timestamp || '-') + '</td><td>' + esc(s.worker || '-') + '</td><td>' + esc(s.message || '-') + '</td><td>' + link + '</td></tr>';
+      });
+      document.getElementById("suggestions-body").innerHTML = renderRows(suggestionRows, 4);
+
       renderWorkerActivity(data.workerActivity || {}, data.taskInsights || {}, roleLayerMap);
       renderLeadershipPanel(data);
-      renderLeadershipFlow(data);
+
+      // ── Leadership pipeline with change detection ──
+      var changes = detectLeadershipChanges(data);
+      renderLeadershipPipeline(data, changes);
+
       renderTrumpPlanBoard(data);
       renderWorkerGrid(data);
       renderPremiumUsagePanel(data);
       renderCelebration(data);
+      renderActivityPulse(data);
       renderTaskDetail();
 
       var recoveryText = data.guardian && data.guardian.lastRecovery
