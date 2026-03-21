@@ -310,6 +310,11 @@
       }
     }
   },
+  "athenaCalibration": {
+    "fixturesDir": "tests/fixtures/calibration",
+    "maxDeviationScore": 0.25,
+    "stateFile": "state/athena_calibration_run.json"
+  },
   "selfDev": {
     "enabled": true,
     "recoveryTag": "box/recovery-v0.1.0-pre-selfdev",

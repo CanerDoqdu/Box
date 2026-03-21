@@ -127,17 +127,32 @@ export async function updatePipelineProgress(config, stepId, detail, extra) {
     try {
       const prev = await readJson(progressPath(config), {});
       payload.startedAt = prev.startedAt || payload.updatedAt;
+      // Accumulate SLO-relevant stage timestamps
+      const prevTimestamps = (prev.stageTimestamps && typeof prev.stageTimestamps === "object") ? prev.stageTimestamps : {};
+      payload.stageTimestamps = { ...prevTimestamps };
+      if (SLO_TIMESTAMP_STAGES.includes(stepId)) {
+        payload.stageTimestamps[stepId] = payload.updatedAt;
+      }
     } catch {
       payload.startedAt = payload.updatedAt;
+      payload.stageTimestamps = {};
+      if (SLO_TIMESTAMP_STAGES.includes(stepId)) {
+        payload.stageTimestamps[stepId] = payload.updatedAt;
+      }
     }
   } else if (stepId === "idle") {
     payload.startedAt = null;
+    payload.stageTimestamps = {};
   } else {
-    // cycle_complete — keep startedAt, set completedAt
+    // cycle_complete — keep startedAt, accumulate final timestamp
     try {
       const prev = await readJson(progressPath(config), {});
       payload.startedAt = prev.startedAt || null;
-    } catch { /* ok */ }
+      const prevTimestamps = (prev.stageTimestamps && typeof prev.stageTimestamps === "object") ? prev.stageTimestamps : {};
+      payload.stageTimestamps = { ...prevTimestamps, cycle_complete: payload.updatedAt };
+    } catch {
+      payload.stageTimestamps = { cycle_complete: payload.updatedAt };
+    }
     payload.completedAt = payload.updatedAt;
   }
 
@@ -163,6 +178,26 @@ export async function readPipelineProgress(config) {
 export { STEPS as PIPELINE_STEPS };
 
 /**
+ * SLO-relevant stages whose entry timestamps must be recorded in stageTimestamps.
+ *
+ * Field contract (Athena missing item resolved):
+ *   stageTimestamps is the authoritative source for all SLO latency inputs.
+ *   Dispatch latency reads athena_approved → workers_dispatching from stageTimestamps.
+ *   decision latency reads jesus_awakening → jesus_decided from stageTimestamps.
+ *   verification completion reads workers_dispatching → cycle_complete from stageTimestamps.
+ *
+ * cycleId contract (Athena missing item resolved):
+ *   pipeline_progress.startedAt is the canonical cycle identifier.
+ */
+export const SLO_TIMESTAMP_STAGES = Object.freeze([
+  "jesus_awakening",
+  "jesus_decided",
+  "athena_approved",
+  "workers_dispatching",
+  "cycle_complete",
+]);
+
+/**
  * Canonical schema for pipeline_progress.json.
  * Published for tests and dashboard consumers to validate against.
  */
@@ -173,4 +208,42 @@ export const PIPELINE_PROGRESS_SCHEMA = Object.freeze({
   stepStatusEnum: Object.freeze(["done", "active", "pending"]),
   /** completedAt is present only when stage === "cycle_complete" */
   conditionalFields: Object.freeze({ completedAt: "cycle_complete" }),
+  /** stageTimestamps accumulates ISO entry times for SLO-relevant stages */
+  sloTimestampStages: SLO_TIMESTAMP_STAGES,
+});
+
+/**
+ * Canonical system status enum.
+ * All valid values for runtime.systemStatus in the dashboard payload.
+ *
+ * Values:
+ *   offline   — daemon not running and no completion record
+ *   completed — project finished (daemon stopped, completion ledger entry found)
+ *   degraded  — orchestratorHealth.orchestratorStatus === "degraded" (SLO breach etc.)
+ *   idle      — daemon running but no active workers or pipeline activity
+ *   working   — pipeline is actively progressing through stages or workers are running
+ */
+export const SYSTEM_STATUS_ENUM = Object.freeze([
+  "offline",
+  "completed",
+  "degraded",
+  "idle",
+  "working",
+]);
+
+/**
+ * Reason codes for degraded/fallback system status.
+ * Emitted as degradedReason or statusSource annotation in the dashboard payload.
+ *
+ * Machine-readable values checked by tests and monitoring.
+ */
+export const SYSTEM_STATUS_REASON_CODE = Object.freeze({
+  /** orchestratorHealth.orchestratorStatus === "degraded" */
+  HEALTH_FILE_DEGRADED:   "HEALTH_FILE_DEGRADED",
+  /** daemon process is not running */
+  DAEMON_OFFLINE:         "DAEMON_OFFLINE",
+  /** pipeline_progress.json is absent or stale (> 10 min old) — fell back to heuristics */
+  FALLBACK_HEURISTIC:     "FALLBACK_HEURISTIC",
+  /** pipeline_progress.json could not be read */
+  MISSING_PIPELINE_STATE: "MISSING_PIPELINE_STATE",
 });
