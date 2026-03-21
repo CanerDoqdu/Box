@@ -122,13 +122,7 @@
       "src/core/policy_engine.js"
     ],
     "knowledgeMemoryEnabled": true,
-    "experimentEngineEnabled": true,
-    "shadowPolicy": {
-      "enabled": true,
-      "threshold": 0.10,
-      "cycleWindow": 20,
-      "minSampleSize": 3
-    }
+    "experimentEngineEnabled": true
   },
   "systemGuardian": {
     "enabled": true,
@@ -288,19 +282,10 @@
       }
     }
   },
-  "slo": {
-    "enabled": true,
-    "thresholds": {
-      "decisionLatencyMs": 120000,
-      "dispatchLatencyMs": 30000,
-      "verificationCompletionMs": 3600000
-    },
-    "breachSeverity": {
-      "decisionLatencyMs": "high",
-      "dispatchLatencyMs": "high",
-      "verificationCompletionMs": "critical"
-    },
-    "degradedOnBreach": true
+  "athenaCalibration": {
+    "fixturesDir": "tests/fixtures/calibration",
+    "maxDeviationScore": 0.25,
+    "stateFile": "state/athena_calibration_run.json"
   },
   "selfDev": {
     "enabled": true,
