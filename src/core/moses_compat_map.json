@@ -1,0 +1,81 @@
+{
+  "$schema": "box:moses-compat-map:v1",
+  "description": "Maps deprecated Moses state artifacts to their Athena-gated replacements. Used by the self-improvement outcome collector as a legacy adapter reference.",
+  "generatedAt": "T-013",
+  "adapterModes": ["legacy-merge", "absent"],
+  "requiredFields": ["$schema", "description", "generatedAt", "adapterModes", "mappings"],
+  "mappings": [
+    {
+      "mosesFile": "state/moses_coordination.json",
+      "mosesField": "completedTasks",
+      "mosesFieldType": "string[]",
+      "replacedBy": "state/evolution_progress.json",
+      "replacedByField": "tasks[*][status=completed|done]",
+      "replacedByFieldType": "string[]",
+      "status": "deprecated",
+      "since": "T-013",
+      "adapterMode": "legacy-merge",
+      "notes": "When moses_coordination.json is present, its completedTasks are merged with evolution_progress-derived IDs via Set deduplication."
+    },
+    {
+      "mosesFile": "state/moses_coordination.json",
+      "mosesField": "dispatchLog",
+      "mosesFieldType": "object[]",
+      "replacedBy": "state/worker_${role}.json",
+      "replacedByField": "activityLog[]",
+      "replacedByFieldType": "object[]",
+      "status": "deprecated",
+      "since": "T-013",
+      "adapterMode": "legacy-merge",
+      "notes": "Worker activityLog entries are tagged with {role} and used as the dispatch log. Legacy dispatchLog is appended when present."
+    },
+    {
+      "mosesFile": "state/trump_analysis.json",
+      "mosesField": "plans",
+      "mosesFieldType": "object[]",
+      "replacedBy": "state/prometheus_analysis.json",
+      "replacedByField": "plans",
+      "replacedByFieldType": "object[]",
+      "status": "deprecated",
+      "since": "T-013",
+      "adapterMode": "absent",
+      "notes": "trump_analysis.json is not read by self_improvement.js. prometheus_analysis.json is the canonical source."
+    },
+    {
+      "mosesFile": "state/trump_analysis.json",
+      "mosesField": "projectHealth",
+      "mosesFieldType": "enum:good|needs-work|critical|unknown",
+      "replacedBy": "state/prometheus_analysis.json",
+      "replacedByField": "projectHealth",
+      "replacedByFieldType": "enum:good|needs-work|critical|unknown",
+      "status": "deprecated",
+      "since": "T-013",
+      "adapterMode": "absent",
+      "notes": "projectHealth is read from prometheus_analysis.json. Defaults to 'unknown' when absent."
+    },
+    {
+      "mosesFile": "state/trump_analysis.json",
+      "mosesField": "requestBudget",
+      "mosesFieldType": "object",
+      "replacedBy": "state/prometheus_analysis.json",
+      "replacedByField": "requestBudget",
+      "replacedByFieldType": "object",
+      "status": "deprecated",
+      "since": "T-013",
+      "adapterMode": "absent",
+      "notes": "requestBudget is read from prometheus_analysis.json. Defaults to {} when absent."
+    },
+    {
+      "mosesFile": "state/trump_analysis.json",
+      "mosesField": "executionStrategy.waves",
+      "mosesFieldType": "object[]",
+      "replacedBy": "state/prometheus_analysis.json",
+      "replacedByField": "executionStrategy.waves",
+      "replacedByFieldType": "object[]",
+      "status": "deprecated",
+      "since": "T-013",
+      "adapterMode": "absent",
+      "notes": "executionStrategy.waves is read from prometheus_analysis.json. Defaults to [] when absent."
+    }
+  ]
+}
