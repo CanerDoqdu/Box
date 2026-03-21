@@ -17,7 +17,7 @@
 
 import path from "node:path";
 import fs from "node:fs/promises";
-import { readJson, writeJson, spawnAsync } from "./fs_utils.js";
+import { readJson, readJsonSafe, READ_JSON_REASON, writeJson, spawnAsync } from "./fs_utils.js";
 import { appendProgress } from "./state_tracker.js";
 import { buildAgentArgs, parseAgentOutput } from "./agent_loader.js";
 import { chatLog, warn } from "./logger.js";
@@ -72,6 +72,28 @@ export function computeWeightedDecisionScore(postmortems) {
   };
 }
 
+// ── Outcome Degraded Reason Codes ────────────────────────────────────────────
+
+/**
+ * Machine-readable reason codes for degraded outcome collection.
+ * Returned in the `degradedReason` field of collectCycleOutcomes when `degraded: true`.
+ *
+ * Distinguishes missing input (ABSENT) from invalid input (INVALID).
+ *
+ *   PROMETHEUS_ABSENT   — prometheus_analysis.json not found (ENOENT)
+ *   PROMETHEUS_INVALID  — prometheus_analysis.json found but fails structure validation
+ *   EVOLUTION_ABSENT    — evolution_progress.json not found (ENOENT)
+ *   EVOLUTION_INVALID   — evolution_progress.json found but fails structure validation
+ *   NO_ACTIVE_DATA      — both prometheus plans and evolution progress are empty
+ */
+export const OUTCOME_DEGRADED_REASON = Object.freeze({
+  PROMETHEUS_ABSENT:  "PROMETHEUS_ABSENT",
+  PROMETHEUS_INVALID: "PROMETHEUS_INVALID",
+  EVOLUTION_ABSENT:   "EVOLUTION_ABSENT",
+  EVOLUTION_INVALID:  "EVOLUTION_INVALID",
+  NO_ACTIVE_DATA:     "NO_ACTIVE_DATA"
+});
+
 // ── Knowledge Memory ─────────────────────────────────────────────────────────
 
 async function loadKnowledgeMemory(stateDir) {
@@ -90,51 +112,156 @@ async function saveKnowledgeMemory(stateDir, memory) {
 
 // ── Cycle Outcome Collector ──────────────────────────────────────────────────
 
-async function collectCycleOutcomes(config) {
+/**
+ * Normalized outcome collector — Athena-gated architecture.
+ *
+ * Primary state sources (replaces stale Moses artifacts):
+ *   prometheus_analysis.json  — plans, projectHealth, requestBudget, waves
+ *                               (replaces trump_analysis.json)
+ *   evolution_progress.json   — completed task IDs
+ *                               (replaces moses_coordination.completedTasks)
+ *   worker_sessions.json      — per-worker status (unchanged)
+ *   worker_${role}.json       — per-worker activityLog → dispatches
+ *                               (replaces moses_coordination.dispatchLog)
+ *
+ * Legacy adapter:
+ *   moses_coordination.json   — read and merged when present; absent on Athena-gated runs.
+ *   Rollback: re-enable adapter-only mode by removing the prometheus/evolution reads above.
+ *
+ * Return contract:
+ *   { totalPlans, completedCount, projectHealth, workerOutcomes, waves, dispatches,
+ *     requestBudget, decisionQuality, timestamp, metricsSource, degraded, degradedReason }
+ *
+ *   degraded:      true when a critical source file is absent or invalid.
+ *   degradedReason: OUTCOME_DEGRADED_REASON code or null.
+ *   metricsSource: pipe-joined list of files that contributed data.
+ *
+ * @param {object} config
+ * @returns {Promise<object>}
+ */
+export async function collectCycleOutcomes(config) {
   const stateDir = config.paths?.stateDir || "state";
-  const trumpAnalysis = await readJson(path.join(stateDir, "trump_analysis.json"), null);
-  const mosesState = await readJson(path.join(stateDir, "moses_coordination.json"), {});
+
+  // ── Primary state sources (Athena-gated architecture) ────────────────────
+  // Use readJsonSafe to distinguish MISSING (ENOENT) from INVALID (parse error).
+  const [prometheusResult, evolutionResult] = await Promise.all([
+    readJsonSafe(path.join(stateDir, "prometheus_analysis.json")),
+    readJsonSafe(path.join(stateDir, "evolution_progress.json"))
+  ]);
   const workerSessions = await readJson(path.join(stateDir, "worker_sessions.json"), {});
 
-  const plans = Array.isArray(trumpAnalysis?.plans) ? trumpAnalysis.plans : [];
-  const completedTasks = Array.isArray(mosesState?.completedTasks) ? mosesState.completedTasks : [];
-  const dispatches = Array.isArray(mosesState?.dispatchLog) ? mosesState.dispatchLog : [];
+  // ── Legacy adapter: moses_coordination.json ──────────────────────────────
+  // Merged when present for backward-compatibility; absent on Athena-gated runs.
+  const mosesState = await readJson(path.join(stateDir, "moses_coordination.json"), null);
 
-  // Per-worker outcome analysis
+  // ── Input validation — distinguish missing vs invalid ─────────────────────
+  let degraded = false;
+  let degradedReason = null;
+
+  let plans = [];
+  let projectHealth = "unknown";
+  let requestBudget = {};
+  let waves = [];
+
+  if (!prometheusResult.ok) {
+    degraded = true;
+    degradedReason = prometheusResult.reason === READ_JSON_REASON.MISSING
+      ? OUTCOME_DEGRADED_REASON.PROMETHEUS_ABSENT
+      : OUTCOME_DEGRADED_REASON.PROMETHEUS_INVALID;
+  } else if (!Array.isArray(prometheusResult.data?.plans)) {
+    // File present but missing required `plans` array — treat as invalid structure.
+    degraded = true;
+    degradedReason = OUTCOME_DEGRADED_REASON.PROMETHEUS_INVALID;
+  } else {
+    plans = prometheusResult.data.plans;
+    projectHealth = prometheusResult.data.projectHealth || "unknown";
+    requestBudget = prometheusResult.data.requestBudget || {};
+    waves = Array.isArray(prometheusResult.data.executionStrategy?.waves)
+      ? prometheusResult.data.executionStrategy.waves
+      : [];
+  }
+
+  // Derive completed task IDs from evolution_progress.tasks.
+  let completedFromEvolution = [];
+  if (!evolutionResult.ok) {
+    if (!degraded) {
+      degraded = true;
+      degradedReason = evolutionResult.reason === READ_JSON_REASON.MISSING
+        ? OUTCOME_DEGRADED_REASON.EVOLUTION_ABSENT
+        : OUTCOME_DEGRADED_REASON.EVOLUTION_INVALID;
+    }
+  } else if (evolutionResult.data?.tasks !== null && typeof evolutionResult.data?.tasks !== "object") {
+    if (!degraded) {
+      degraded = true;
+      degradedReason = OUTCOME_DEGRADED_REASON.EVOLUTION_INVALID;
+    }
+  } else {
+    const taskMap = evolutionResult.data?.tasks || {};
+    completedFromEvolution = Object.entries(taskMap)
+      .filter(([, t]) => t.status === "completed" || t.status === "done")
+      .map(([id]) => id);
+  }
+
+  // Legacy adapter: merge Moses completedTasks when file is present.
+  const legacyCompleted = Array.isArray(mosesState?.completedTasks)
+    ? mosesState.completedTasks
+    : [];
+  const completedTasks = legacyCompleted.length > 0
+    ? [...new Set([...completedFromEvolution, ...legacyCompleted])]
+    : completedFromEvolution;
+
+  // ── Determine metrics source ──────────────────────────────────────────────
+  const sourceFiles = ["worker_sessions"];
+  if (prometheusResult.ok) sourceFiles.unshift("prometheus_analysis");
+  if (evolutionResult.ok)  sourceFiles.push("evolution_progress");
+  if (mosesState !== null)  sourceFiles.push("moses_coordination(legacy)");
+  const metricsSource = sourceFiles.join("+");
+
+  // ── Per-worker outcome analysis ───────────────────────────────────────────
   const workerOutcomes = [];
+  const workerActivityByRole = {};
+
   for (const [role, session] of Object.entries(workerSessions)) {
     const workerFile = await readJson(
       path.join(stateDir, `worker_${role.replace(/\s+/g, "_")}.json`),
       null
     );
     const activityLog = Array.isArray(workerFile?.activityLog) ? workerFile.activityLog : [];
-    const lastEntry = activityLog[activityLog.length - 1];
+    workerActivityByRole[role] = activityLog;
 
-    const timeouts = activityLog.filter(e => e.status === "timeout").length;
-    const failures = activityLog.filter(e => e.status === "error" || e.status === "failed").length;
+    const lastEntry = activityLog[activityLog.length - 1];
+    const timeouts  = activityLog.filter(e => e.status === "timeout").length;
+    const failures  = activityLog.filter(e => e.status === "error" || e.status === "failed").length;
     const successes = activityLog.filter(e => e.status === "done").length;
     const totalDispatches = activityLog.length;
     const hasPR = Boolean(lastEntry?.pr);
 
     workerOutcomes.push({
       role,
-      status: String(session?.status || lastEntry?.status || "unknown"),
+      status:          String(session?.status || lastEntry?.status || "unknown"),
       totalDispatches,
       timeouts,
       failures,
       successes,
       hasPR,
-      pr: lastEntry?.pr || null,
+      pr:        lastEntry?.pr || null,
       lastError: activityLog.filter(e => e.error).pop()?.error || null
     });
   }
 
-  // Wave analysis
-  const waves = Array.isArray(trumpAnalysis?.executionStrategy?.waves)
-    ? trumpAnalysis.executionStrategy.waves
-    : [];
+  // ── Build dispatch log from worker activityLog entries ───────────────────
+  // Replaces moses_coordination.dispatchLog — each worker's activityLog is the source.
+  const allActivityEntries = [];
+  for (const [role, activityLog] of Object.entries(workerActivityByRole)) {
+    for (const entry of activityLog) {
+      allActivityEntries.push({ role, ...entry });
+    }
+  }
+  // Legacy adapter: merge Moses dispatchLog when present.
+  const legacyDispatches = Array.isArray(mosesState?.dispatchLog) ? mosesState.dispatchLog : [];
+  const dispatches = [...allActivityEntries, ...legacyDispatches].slice(-20);
 
-  // Decision quality from recent postmortems — used as weighted signals in AI analysis
+  // ── Decision quality from recent postmortems ──────────────────────────────
   let decisionQuality = { score: null, labelCounts: {}, total: 0 };
   try {
     const rawPostmortems = await readJson(path.join(stateDir, "athena_postmortems.json"), null);
@@ -148,9 +275,9 @@ async function collectCycleOutcomes(config) {
   } catch { /* no postmortem data — degrade gracefully */ }
 
   return {
-    totalPlans: plans.length,
-    completedCount: completedTasks.length,
-    projectHealth: trumpAnalysis?.projectHealth || "unknown",
+    totalPlans:      plans.length,
+    completedCount:  completedTasks.length,
+    projectHealth,
     workerOutcomes,
     waves: waves.map(w => ({
       id: w.id,
@@ -159,10 +286,14 @@ async function collectCycleOutcomes(config) {
         String(t).toLowerCase().includes(String(w.id).toLowerCase())
       )
     })),
-    dispatches: dispatches.slice(-20),
-    requestBudget: trumpAnalysis?.requestBudget || {},
+    dispatches,
+    requestBudget,
     decisionQuality,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    // Athena-gated metadata fields
+    metricsSource,
+    degraded,
+    degradedReason
   };
 }
 
@@ -349,8 +480,17 @@ export async function runSelfImprovementCycle(config) {
 
   // 1. Collect cycle outcomes
   const outcomes = await collectCycleOutcomes(config);
-  if (outcomes.totalPlans === 0) {
-    await appendProgress(config, "[SELF-IMPROVEMENT] No plans found — skipping analysis");
+
+  // Log degraded state explicitly — no silent fallback for critical state.
+  if (outcomes.degraded) {
+    warn(`[self-improvement] outcome collection degraded: ${outcomes.degradedReason} — source=${outcomes.metricsSource}`);
+    await appendProgress(config,
+      `[SELF-IMPROVEMENT] Degraded outcome collection: reason=${outcomes.degradedReason} source=${outcomes.metricsSource}`
+    );
+  }
+
+  if (outcomes.totalPlans === 0 && outcomes.completedCount === 0) {
+    await appendProgress(config, "[SELF-IMPROVEMENT] No plans or progress found — skipping analysis");
     return null;
   }
 
@@ -436,7 +576,10 @@ export async function runSelfImprovementCycle(config) {
         failures: w.failures,
         hasPR: w.hasPR
       })),
-      decisionQuality: outcomes.decisionQuality
+      decisionQuality: outcomes.decisionQuality,
+      metricsSource: outcomes.metricsSource,
+      degraded: outcomes.degraded,
+      degradedReason: outcomes.degradedReason
     },
     analysis: {
       systemHealthScore: analysis.systemHealthScore || 0,
