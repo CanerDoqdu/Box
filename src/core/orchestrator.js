@@ -1,26 +1,29 @@
 /**
- * BOX Orchestrator — Resume-From-Checkpoint Architecture
+ * BOX Orchestrator — Athena-Gated Loop Architecture
+ *
+ * Flow per cycle:
+ *   Jesus (orchestrator/state analyzer) → Prometheus (full scan + plan)
+ *   → Athena (validate plan) → Worker(s) → Athena (postmortem)
+ *   → back to Prometheus for next iteration
+ *
+ * Each agent uses exactly 1 premium request per invocation (single-prompt).
+ * No autopilot. No Moses — Jesus orchestrates, Prometheus plans, Athena gates.
  *
  * Startup:
- *   1. Read last checkpoint (moses_coordination.json + worker_sessions.json)
- *   2. If workers are active → resume monitoring them, ZERO AI calls
- *   3. If no checkpoint exists → first-ever run → Jesus activates ONCE
- *   4. If Moses reports a systemic error → escalate to Jesus
- *
- * Ongoing loop (worker monitoring):
- *   - Workers active → wait for them to finish (no AI cost)
- *   - Workers finished + remaining plans → Moses dispatches next batch
- *   - All plans done → system sleeps (no Jesus re-trigger)
- *   - Only Moses escalation (jesus_escalation.json) can wake Jesus mid-run
+ *   1. Read last checkpoint (worker_sessions.json + prometheus_analysis.json)
+ *   2. If workers are active → resume monitoring, ZERO AI calls
+ *   3. If no checkpoint → first run → Jesus analyzes state
+ *   4. If project interrupted → Jesus decides: continue or re-plan
  */
 
 import path from "node:path";
-import { appendProgress } from "./state_tracker.js";
+import { appendProgress, appendAlert, ALERT_SEVERITY } from "./state_tracker.js";
 import { readStopRequest, writeDaemonPid, clearDaemonPid, clearStopRequest, readReloadRequest, clearReloadRequest } from "./daemon_control.js";
 import { loadConfig } from "../config.js";
 import { runJesusCycle } from "./jesus_supervisor.js";
-import { runTrumpAnalysis } from "./trump.js";
-import { runMosesCycle } from "./moses_coordinator.js";
+import { runPrometheusAnalysis } from "./prometheus.js";
+import { runAthenaPlanReview, runAthenaPostmortem } from "./athena_reviewer.js";
+import { runWorkerConversation } from "./worker_runner.js";
 import { runSelfImprovementCycle } from "./self_improvement.js";
 import { capturePreWorkBaseline, runProjectCompletion, isProjectAlreadyCompleted } from "./project_lifecycle.js";
 import { warn } from "./logger.js";
@@ -63,12 +66,10 @@ export async function runDaemon(config) {
 
   // ── Checkpoint-based startup: resume from where we left off ──
   const sessions = await readJson(path.join(stateDir, "worker_sessions.json"), {});
-  const mosesState = await readJson(path.join(stateDir, "moses_coordination.json"), {});
   const jesusDirective = await readJson(path.join(stateDir, "jesus_directive.json"), null);
+  const prometheusAnalysis = await readJson(path.join(stateDir, "prometheus_analysis.json"), null);
 
-  // Reset zombie workers that were "working" when daemon died (stale > 2× timeout)
-  // Must check BOTH aggregate (worker_sessions.json) AND per-worker files (worker_*.json)
-  // because Moses loadSessions overlays per-worker files on top of aggregate.
+  // Reset zombie workers (stale > 2× timeout)
   const workerTimeoutMs = Number(liveConfig.runtime?.workerTimeoutMinutes || 30) * 60 * 1000;
   const staleThresholdMs = workerTimeoutMs * 2;
   const now = Date.now();
@@ -100,38 +101,32 @@ export async function runDaemon(config) {
     .filter(([, s]) => s?.status === "working")
     .map(([name]) => name);
 
-  const hasCheckpoint = mosesState?.coordinatedAt || (jesusDirective && jesusDirective.decidedAt);
+  const hasCheckpoint = prometheusAnalysis?.analyzedAt || (jesusDirective && jesusDirective.decidedAt);
 
   if (activeWorkers.length > 0) {
-    // Workers still running from last session — just monitor them, zero AI cost
     await appendProgress(liveConfig,
-      `[STARTUP] Resuming from checkpoint — ${activeWorkers.length} workers active (${activeWorkers.join(", ")}). No AI calls.`
+      `[STARTUP] Resuming — ${activeWorkers.length} workers active (${activeWorkers.join(", ")}). Waiting for them.`
     );
-  } else if (hasCheckpoint) {
-    // Checkpoint exists but no active workers — continue from last coordination state
-    await appendProgress(liveConfig, "[STARTUP] Resuming from checkpoint — no active workers, entering main loop");
-  } else {
-    // No checkpoint at all — first ever run, Jesus must initialize
+  } else if (!hasCheckpoint) {
     await appendProgress(liveConfig, "[STARTUP] No checkpoint found — first run, Jesus activating");
-    // Capture pre-work baseline tag before any changes (non-fatal)
     await capturePreWorkBaseline(liveConfig);
-    await runStartupCycle(liveConfig);
+  } else {
+    await appendProgress(liveConfig, "[STARTUP] Resuming from checkpoint — entering main loop");
   }
 
   await mainLoop(liveConfig);
 }
 
 export async function runOnce(config) {
-  await runStartupCycle(config);
+  await runSingleCycle(config);
 }
 
 export async function runRebase(_config, _opts = {}) {
-  return { triggered: false, reason: "not applicable in conversation-based architecture" };
+  return { triggered: false, reason: "not applicable in athena-gated architecture" };
 }
 
 // ── Loop intervals ────────────────────────────────────────────────────────────
-const _ESCALATION_POLL_MS = 30 * 1000;   // 30 sec — only checks stop+escalation, no AI
-const WORKERS_DONE_POLL_MS = 30 * 1000; // 30 sec — wait for all workers to finish
+const WORKERS_DONE_POLL_MS = 30 * 1000;
 
 function roleToWorkerStateFile(role) {
   const slug = String(role || "")
@@ -145,7 +140,7 @@ function getLastWorkerReportedStatus(session, role) {
   const history = Array.isArray(session?.history) ? session.history : [];
   for (let i = history.length - 1; i >= 0; i -= 1) {
     const entry = history[i];
-    if (!entry || entry.from === "moses") continue;
+    if (!entry) continue;
     if (role && entry.from && entry.from !== role) continue;
     const status = String(entry.status || "").toLowerCase();
     if (status) return status;
@@ -165,8 +160,6 @@ async function recoverStaleWorkerSessions(config, stateDir, sessions) {
       recoveredRoles.push(role);
       continue;
     }
-
-    // No time-based recovery: long-running workers are allowed to run indefinitely.
   }
 
   if (recoveredRoles.length === 0) return false;
@@ -199,18 +192,13 @@ async function hasActiveWorkersAsync(config) {
   } catch { return false; }
 }
 
-// Wait until all workers are done (or timeout), then call Moses once for final report
-async function waitForWorkersAndFinalize(config) {
+async function waitForWorkersToFinish(config) {
   while (true) {
     const stopReq = await readStopRequest(config);
     if (stopReq?.requestedAt) {
-      await appendProgress(
-        config,
-        `[LOOP] Stop requested while waiting workers: reason=${stopReq.reason || "unknown"}`
-      );
-      return false; // stop requested — bail
+      await appendProgress(config, `[LOOP] Stop requested while waiting workers: reason=${stopReq.reason || "unknown"}`);
+      return false;
     }
-
     const stillActive = await hasActiveWorkersAsync(config);
     if (!stillActive) {
       await appendProgress(config, "[LOOP] All workers done — cycle complete");
@@ -236,7 +224,6 @@ async function postCompletionCleanup(config) {
   const base = `https://api.github.com/repos/${repo}`;
 
   try {
-    // 1. Close duplicate/stale open PRs created by BOX workers
     const prsRes = await fetch(`${base}/pulls?state=open&per_page=50`, { headers });
     if (prsRes.ok) {
       const openPrs = await prsRes.json();
@@ -248,14 +235,17 @@ async function postCompletionCleanup(config) {
 
       for (const pr of openPrs) {
         const title = String(pr.title || "").toLowerCase().trim();
-        const isDuplicate = mergedTitles.some(mt => mt === title || (title.includes("wave") && mt.includes("wave") && title.slice(0, 30) === mt.slice(0, 30)));
+        const branch = String(pr.head?.ref || "");
+        // Only auto-close BOX-owned PRs with an exact title match against a merged PR.
+        // Fuzzy/prefix matching is intentionally removed to prevent collateral closures.
+        const isBoxBranch = ["box/", "wave", "pr-", "qa/", "scan/"].some(p => branch.startsWith(p));
+        const isDuplicate = isBoxBranch && mergedTitles.some(mt => mt === title);
         if (isDuplicate) {
           await fetch(`${base}/pulls/${pr.number}`, {
             method: "PATCH",
             headers: { ...headers, "Content-Type": "application/json" },
             body: JSON.stringify({ state: "closed" })
           });
-          // Add close comment
           await fetch(`${base}/issues/${pr.number}/comments`, {
             method: "POST",
             headers: { ...headers, "Content-Type": "application/json" },
@@ -266,13 +256,9 @@ async function postCompletionCleanup(config) {
       }
     }
 
-    // 2. Delete remote branches created by BOX that have no open PR
-    //    Squash merges create different commit hashes, so compare-based checks
-    //    miss them. Instead: if it's a BOX branch with no open PR, it's stale.
     const branchesRes = await fetch(`${base}/branches?per_page=100`, { headers });
     if (branchesRes.ok) {
       const branches = await branchesRes.json();
-      // Collect branches that still have an open PR
       const openPrBranches = new Set();
       const openPrsRes = await fetch(`${base}/pulls?state=open&per_page=100`, { headers });
       if (openPrsRes.ok) {
@@ -287,7 +273,7 @@ async function postCompletionCleanup(config) {
         const name = branch.name;
         if (name === "main" || name === "master" || name === "develop") continue;
         if (!boxPrefixes.some(p => name.startsWith(p))) continue;
-        if (openPrBranches.has(name)) continue; // still used by an open PR
+        if (openPrBranches.has(name)) continue;
 
         try {
           const deleteRes = await fetch(`${base}/git/refs/heads/${encodeURIComponent(name)}`, {
@@ -301,7 +287,6 @@ async function postCompletionCleanup(config) {
       }
     }
 
-    // 3. Enable auto-delete head branches on merge (idempotent)
     await fetch(base, {
       method: "PATCH",
       headers: { ...headers, "Content-Type": "application/json" },
@@ -312,57 +297,193 @@ async function postCompletionCleanup(config) {
   }
 }
 
-// ── Startup cycle: Jesus → Trump? → Moses (only called on first-ever run or escalation) ──
-async function runStartupCycle(config) {
+// ── Dispatch a single worker from a Prometheus plan item ───────────────────
+
+async function dispatchWorker(config, plan) {
+  const roleName = plan.role;
+  const task = plan.task;
+  const context = plan.context || "";
+  const verification = plan.verification || "";
+
+  await appendProgress(config, `[DISPATCH] Sending task to ${roleName}: ${task}`);
+
+  const result = await runWorkerConversation(config, roleName, {
+    task,
+    context,
+    verification,
+    taskKind: plan.kind || "implementation"
+  });
+
+  return {
+    roleName,
+    status: result?.status || "unknown",
+    pr: result?.pr || result?.prUrl || null,
+    summary: result?.summary || "",
+    filesChanged: result?.filesTouched || "",
+    raw: String(result?.raw || "").slice(0, 3000),
+    verificationEvidence: result?.verificationEvidence || null
+  };
+}
+
+// ── Count completed plans from worker state files ─────────────────────────
+
+async function countCompletedPlans(config, plans) {
+  const stateDir = config.paths?.stateDir || "state";
+  const completed = [];
+  const pending = [];
+
+  for (const plan of plans) {
+    const role = String(plan.role || "").toLowerCase().replace(/\s+/g, "_");
+    const workerFile = path.join(stateDir, `worker_${role}.json`);
+    const ws = await readJson(workerFile, null);
+    if (!ws) {
+      pending.push(plan);
+      continue;
+    }
+    const lastLog = Array.isArray(ws.activityLog) ? ws.activityLog[ws.activityLog.length - 1] : null;
+    if (lastLog?.status === "done") {
+      completed.push({ plan, workerState: ws, lastLog });
+    } else {
+      pending.push(plan);
+    }
+  }
+
+  return { completed, pending };
+}
+
+// ── Single full cycle: Jesus → Prometheus → Athena → Workers → Athena ──────
+
+async function runSingleCycle(config) {
+  const stateDir = config.paths?.stateDir || "state";
+
+  // Step 1: Jesus analyzes state and decides what to do (1 request)
+  await appendProgress(config, "[CYCLE] ── Step 1: Jesus analyzing system state ──");
+  let jesusDecision;
   try {
-    await appendProgress(config, "[STARTUP] ── Jesus strategic cycle starting ──");
+    jesusDecision = await runJesusCycle(config);
+  } catch (err) {
+    await appendProgress(config, `[CYCLE] Jesus failed: ${String(err?.message || err)}`);
+    warn(`[orchestrator] Jesus cycle error: ${String(err?.message || err)}`);
+    return;
+  }
 
-    const jesusDecision = await runJesusCycle(config);
+  if (!jesusDecision || jesusDecision.wait === true) {
+    await appendProgress(config, "[CYCLE] Jesus says: wait — nothing to do");
+    return;
+  }
 
-    if (!jesusDecision || jesusDecision.wait === true) {
-      await appendProgress(config, "[STARTUP] Jesus says: wait — nothing to do");
+  // Step 2: Prometheus plans (single-prompt, no autopilot)
+  await appendProgress(config, "[CYCLE] ── Step 2: Prometheus scanning & planning ──");
+  let prometheusAnalysis;
+  try {
+    prometheusAnalysis = await runPrometheusAnalysis(config, {
+      prompt: jesusDecision.briefForPrometheus || jesusDecision.briefForMoses || jesusDecision.thinking || "Full repository analysis",
+      requestedBy: "Jesus"
+    });
+  } catch (err) {
+    await appendProgress(config, `[CYCLE] Prometheus failed: ${String(err?.message || err)}`);
+    warn(`[orchestrator] Prometheus analysis error: ${String(err?.message || err)}`);
+    return;
+  }
+
+  if (!prometheusAnalysis || !Array.isArray(prometheusAnalysis.plans) || prometheusAnalysis.plans.length === 0) {
+    await appendProgress(config, "[CYCLE] Prometheus produced no plans — cycle complete");
+    return;
+  }
+
+  // Step 3: Athena validates the plan (1 request)
+  await appendProgress(config, "[CYCLE] ── Step 3: Athena reviewing plan ──");
+  let planReview;
+  try {
+    planReview = await runAthenaPlanReview(config, prometheusAnalysis);
+  } catch (err) {
+    const msg = String(err?.message || err).slice(0, 200);
+    await appendProgress(config, `[CYCLE] Athena plan review threw exception: ${msg} — blocking cycle (fail-closed)`);
+    warn(`[orchestrator] Athena plan review exception: ${msg}`);
+
+    // Rollback: if runtime.athenaFailOpen is enabled, restore legacy permissive behavior.
+    if (config.runtime?.athenaFailOpen === true) {
+      planReview = { approved: true, reason: { code: "REVIEW_EXCEPTION_FAILOPEN", message: msg }, corrections: [] };
+    } else {
+      // Fail-closed: exception must block the cycle and record a deterministic blocked state.
+      const reason = { code: "REVIEW_EXCEPTION", message: msg };
+      await appendAlert(config, {
+        severity: ALERT_SEVERITY.CRITICAL,
+        source: "orchestrator",
+        title: "Athena plan review exception — cycle blocked",
+        message: `code=${reason.code} message=${reason.message}`
+      });
+      await writeJson(path.join(stateDir, "athena_plan_rejection.json"), {
+        rejectedAt: new Date().toISOString(),
+        reason,
+        corrections: [],
+        summary: `Plan review exception: ${msg}`
+      });
+      planReview = { approved: false, reason, corrections: [] };
+    }
+  }
+
+  if (!planReview.approved) {
+    const rejectionReason = planReview.reason || { code: "PLAN_REJECTED", message: planReview.summary || "Rejected by Athena" };
+    const correctionsList = planReview.corrections || [];
+    await appendProgress(config, `[CYCLE] Athena REJECTED plan — code=${typeof rejectionReason === "object" ? rejectionReason.code : rejectionReason} corrections: ${correctionsList.join("; ")}`);
+    // Save rejection for Prometheus to read on next cycle
+    await writeJson(path.join(stateDir, "athena_plan_rejection.json"), {
+      rejectedAt: new Date().toISOString(),
+      reason: rejectionReason,
+      corrections: correctionsList,
+      summary: planReview.summary || ""
+    });
+    return;
+  }
+
+  // Step 4: Dispatch workers sequentially (1 request per worker)
+  const plans = prometheusAnalysis.plans;
+  await appendProgress(config, `[CYCLE] ── Step 4: Dispatching ${plans.length} workers ──`);
+
+  for (const plan of plans) {
+    // Check for stop request between each worker
+    const stopReq = await readStopRequest(config);
+    if (stopReq?.requestedAt) {
+      await appendProgress(config, `[CYCLE] Stop requested — halting dispatch`);
       return;
     }
 
-    let trumpPlans = null;
-    if (jesusDecision.callTrump === true) {
-      await appendProgress(config, "[STARTUP] Trump activated for deep project analysis");
-      // Retry Trump once if it fails
-      trumpPlans = await runTrumpAnalysis(config, jesusDecision);
-      if (!trumpPlans) {
-        await appendProgress(config, "[STARTUP] Trump analysis failed — retrying once");
-        trumpPlans = await runTrumpAnalysis(config, jesusDecision);
-        if (!trumpPlans) {
-          await appendProgress(config, "[STARTUP] Trump analysis failed twice — proceeding without Trump plans");
-        }
-      }
+    let workerResult;
+    try {
+      workerResult = await dispatchWorker(config, plan);
+    } catch (err) {
+      const msg = String(err?.message || err).slice(0, 200);
+      await appendProgress(config, `[CYCLE] Worker ${plan.role} failed: ${msg}`);
+      warn(`[orchestrator] worker dispatch error: ${msg}`);
+      workerResult = { roleName: plan.role, status: "error", summary: msg };
     }
 
-    if (jesusDecision.wakeMoses !== false) {
-      await runMosesCycle(config, jesusDecision, trumpPlans);
+    // Step 5: Athena postmortem for each worker (1 request per worker)
+    await appendProgress(config, `[CYCLE] ── Step 5: Athena postmortem for ${plan.role} ──`);
+    try {
+      await runAthenaPostmortem(config, workerResult, plan);
+    } catch (err) {
+      await appendProgress(config, `[CYCLE] Athena postmortem failed for ${plan.role}: ${String(err?.message || err)}`);
     }
 
-    await appendProgress(config, "[STARTUP] ── Jesus strategic cycle complete ──");
-  } catch (err) {
-    await appendProgress(config, `[STARTUP] Error: ${String(err?.message || err)}`);
-    warn(`[orchestrator] startup cycle error: ${String(err?.message || err)}`);
+    // Wait for worker to fully finish (PR created, etc.)
+    await waitForWorkersToFinish(config);
   }
+
+  await appendProgress(config, "[CYCLE] ── All workers dispatched and reviewed — cycle complete ──");
 }
 
-// ── Main loop: checkpoint-based ──────────────────────────────
+// ── Main loop: Jesus → Prometheus → Athena → Worker → Athena → repeat ──────
+
 async function mainLoop(config) {
   const stateDir = config.paths?.stateDir || "state";
   const RE_EVAL_SLEEP_MS = 2 * 60 * 1000;
-  const STALLED_WAVE_CYCLES_THRESHOLD = Math.max(2, Number(config?.planner?.stalledWaveEscalationCycles || 3));
-  const STALLED_WAVE_ESCALATION_COOLDOWN_MS = Math.max(60000, Number(config?.planner?.stalledWaveEscalationCooldownMs || (5 * 60 * 1000)));
-  let previousCompletedCount = null;
-  let stalledCycles = 0;
-  let lastAutoEscalationAtMs = 0;
 
-  // Phase 1: wait for any active workers to finish
-  await waitForWorkersAndFinalize(config);
+  // Phase 1: wait for any active workers from previous session
+  await waitForWorkersToFinish(config);
 
-  // Phase 2: continuation loop
+  // Phase 2: main cycle loop
   while (true) {
     const stopReq = await readStopRequest(config);
     if (stopReq?.requestedAt) {
@@ -372,7 +493,7 @@ async function mainLoop(config) {
       break;
     }
 
-    // Hot-reload
+    // Hot-reload config
     try {
       const reloadReq = await readReloadRequest(config);
       if (reloadReq?.requestedAt) {
@@ -387,107 +508,38 @@ async function mainLoop(config) {
       warn(`[orchestrator] reload error: ${String(err?.message || err)}`);
     }
 
-    // Moses escalation → Jesus (systemic problems ONLY)
+    // Check escalation (workers can still escalate to Jesus)
     try {
       const escalation = await readJson(path.join(stateDir, "jesus_escalation.json"), null);
       if (escalation?.requestedAt) {
-        await appendProgress(config, `[LOOP] Moses escalated to Jesus: ${escalation.reason || "(no reason)"} — running Jesus cycle`);
-        await import("./fs_utils.js").then(m => m.writeJson(path.join(stateDir, "jesus_escalation.json"), {}));
-        await runStartupCycle(config);
-        await waitForWorkersAndFinalize(config);
+        await appendProgress(config, `[LOOP] Escalation to Jesus: ${escalation.reason || "(no reason)"}`);
+        await writeJson(path.join(stateDir, "jesus_escalation.json"), {});
+        // Escalation triggers a fresh full cycle
+        await runSingleCycle(config);
         continue;
       }
     } catch { /* escalation file may not exist */ }
 
-    // Check remaining work
-    const trumpAnalysis = await readJson(path.join(stateDir, "trump_analysis.json"), null);
-    const jesusDirective = await readJson(path.join(stateDir, "jesus_directive.json"), {});
-    const mosesState = await readJson(path.join(stateDir, "moses_coordination.json"), {});
-    const completedTasks = Array.isArray(mosesState?.completedTasks) ? mosesState.completedTasks : [];
-    const totalPlans = Array.isArray(trumpAnalysis?.plans) ? trumpAnalysis.plans.length : 0;
-    // Count completed plans by matching Trump plan roles in completedTasks text.
-    // Moses adds duplicate/verbose entries — deduplicate by actual plan role.
-    const planRoles = (trumpAnalysis?.plans || []).map(p => String(p.role || "").toLowerCase());
-    const completedRoles = new Set();
-    for (const task of completedTasks) {
-      const taskLower = String(task).toLowerCase();
-      for (const role of planRoles) {
-        if (role && taskLower.includes(role)) completedRoles.add(role);
-      }
-    }
-    // Fallback: also check per-worker session files for "done" evidence.
-    // Workers that completed across retries may not be in completedTasks if Moses
-    // failed to persist the wave-level completion (e.g. dependency chain broke).
-    for (const role of planRoles) {
-      if (completedRoles.has(role)) continue;
-      try {
-        const wf = path.join(stateDir, `worker_${role.replace(/\s+/g, "_")}.json`);
-        const ws = await readJson(wf, null);
-        if (!ws) continue;
-        const lastLog = Array.isArray(ws.activityLog) ? ws.activityLog[ws.activityLog.length - 1] : null;
-        if (lastLog?.status === "done" && lastLog.pr) completedRoles.add(role);
-      } catch { /* ignore */ }
-    }
-    const dedupedCompletedCount = completedRoles.size;
-    const totalWaves = Array.isArray(trumpAnalysis?.executionStrategy?.waves)
-      ? trumpAnalysis.executionStrategy.waves.length
-      : 0;
+    // Check if there's remaining work from a previous Prometheus plan
+    const prometheusAnalysis = await readJson(path.join(stateDir, "prometheus_analysis.json"), null);
+    const totalPlans = Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans.length : 0;
 
-    // Trump plans are "active" if they exist and have plans, regardless of callTrump flag.
-    // callTrump only controls whether to RE-RUN Trump, not whether existing plans are valid.
-    const trumpActive = trumpAnalysis && totalPlans > 0;
-    const hasRemainingWork = trumpActive && dedupedCompletedCount < totalPlans;
+    if (totalPlans > 0) {
+      const { completed, pending } = await countCompletedPlans(config, prometheusAnalysis.plans);
 
-    if (hasRemainingWork && totalWaves > 0) {
-      if (previousCompletedCount !== null && dedupedCompletedCount <= previousCompletedCount) {
-        stalledCycles += 1;
-      } else {
-        stalledCycles = 0;
-      }
-      previousCompletedCount = dedupedCompletedCount;
-
-      const nowMs = Date.now();
-      const escalationCooldownPassed = (nowMs - lastAutoEscalationAtMs) >= STALLED_WAVE_ESCALATION_COOLDOWN_MS;
-      if (stalledCycles >= STALLED_WAVE_CYCLES_THRESHOLD && escalationCooldownPassed) {
-        await appendProgress(config,
-          `[LOOP][WATCHDOG] Wave progress stalled (${completedTasks.length}/${totalWaves} waves across ${stalledCycles} cycles) — escalating to Jesus`
-        );
-        await writeJson(path.join(stateDir, "jesus_escalation.json"), {
-          requestedAt: new Date().toISOString(),
-          reason: `auto-watchdog: no wave progress for ${stalledCycles} cycles`
-        });
-        lastAutoEscalationAtMs = nowMs;
-        stalledCycles = 0;
-        continue;
-      }
-    } else {
-      previousCompletedCount = null;
-      stalledCycles = 0;
-    }
-
-    if (hasRemainingWork) {
-      await appendProgress(config, `[LOOP] Moses continuation — ${dedupedCompletedCount}/${totalPlans} plans done`);
-      try {
-        await runMosesCycle(config, jesusDirective, trumpAnalysis);
-        await waitForWorkersAndFinalize(config);
-      } catch (err) {
-        const msg = String(err?.message || err).slice(0, 200);
-        warn(`[orchestrator] Moses continuation error: ${msg}`);
-        await appendProgress(config, `[LOOP][ERROR] Moses continuation failed: ${msg}`);
-      }
-      await sleep(RE_EVAL_SLEEP_MS);
-    } else {
-      // Workers still busy → just wait, zero cost
-      const workersStillBusy = await hasActiveWorkersAsync(config);
-      if (workersStillBusy) {
-        await sleep(WORKERS_DONE_POLL_MS);
+      if (pending.length > 0) {
+        // There's remaining work — run a new full cycle
+        // Jesus will see the current state and decide appropriately
+        await appendProgress(config, `[LOOP] ${completed.length}/${totalPlans} plans done, ${pending.length} remaining — starting new cycle`);
+        await runSingleCycle(config);
+        await sleep(RE_EVAL_SLEEP_MS);
         continue;
       }
 
-      // All work done — run post-completion cleanup, project completion, and self-improvement.
+      // All plans done — cleanup, project completion, self-improvement
+      await appendProgress(config, `[LOOP] All ${totalPlans} plans complete — running post-completion`);
       await postCompletionCleanup(config);
 
-      // Project completion: tag, release, and record (runs once per project)
       const alreadyCompleted = await isProjectAlreadyCompleted(config);
       if (!alreadyCompleted) {
         try {
@@ -497,16 +549,20 @@ async function mainLoop(config) {
         }
       }
 
-      // Run self-improvement analysis (AI-driven, reads cycle outcomes)
       try {
         await runSelfImprovementCycle(config);
       } catch (err) {
         warn(`[orchestrator] self-improvement error: ${String(err?.message || err)}`);
       }
 
-      await appendProgress(config, `[LOOP] All work complete (${dedupedCompletedCount}/${totalPlans}). System idle — waiting for stop request or escalation.`);
-      await sleep(RE_EVAL_SLEEP_MS);
+      // Start a new Prometheus cycle to find new work
+      await appendProgress(config, "[LOOP] Post-completion done — running Prometheus for next iteration");
+      await runSingleCycle(config);
+    } else {
+      // No plans at all — first run or fresh start
+      await runSingleCycle(config);
     }
+
+    await sleep(RE_EVAL_SLEEP_MS);
   }
 }
-

@@ -2,26 +2,28 @@
  * Worker Runner — Single-Prompt Worker Sessions
  *
  * Each worker (King David, Esther, Aaron, etc.) has a conversation thread.
- * Moses calls runWorkerConversation() to send a task and get a response.
+ * The orchestrator dispatches tasks via runWorkerConversation().
  *
  * The conversation history is passed as context on every call,
  * making it feel like a persistent session even though Copilot CLI is stateless.
  *
- * Workers use single-prompt mode (--model + -p):
- *   - 1 worker call = 1 premium request (no autopilot/tool calls)
- *   - Worker outputs file changes as <<<FILE:path>>>...<<<END_FILE>>> blocks
- *   - Git operations (branch, commit, push, PR) are handled by the runner
+ * Workers use single-prompt mode (--agent only, no autopilot/allow-all):
+ *   - 1 worker call = 1 premium request, tool calls within session are FREE
+ *   - Worker uses tools to read/edit files, run commands, create PRs
+ *   - Session management and status tracking are handled by the runner
  */
 
 import path from "node:path";
+import fs from "node:fs/promises";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { spawnAsync } from "./fs_utils.js";
 import { getRoleRegistry } from "./role_registry.js";
 import { appendProgress } from "./state_tracker.js";
-import { buildWorkerPromptArgs, nameToSlug } from "./agent_loader.js";
+import { buildAgentArgs, nameToSlug } from "./agent_loader.js";
 import { buildVerificationChecklist } from "./verification_profiles.js";
-import { parseVerificationReport, parseResponsiveMatrix } from "./verification_gate.js";
+import { parseVerificationReport, parseResponsiveMatrix, validateWorkerContract, decideRework } from "./verification_gate.js";
 import { enforceModelPolicy } from "./model_policy.js";
+import { loadPolicy, getProtectedPathMatches, getRolePathViolations } from "./policy_engine.js";
 
 // ── Premium usage tracking ──────────────────────────────────────────────────
 
@@ -52,6 +54,17 @@ function logPremiumUsage(config, roleName, model, taskKind, durationMs) {
 function truncate(text, max) {
   const s = String(text || "");
   return s.length > max ? `${s.slice(0, max)}...` : s;
+}
+
+function getLiveLogPath(config, roleName) {
+  const stateDir = config.paths?.stateDir || "state";
+  const safeRole = String(roleName || "worker").replace(/[^a-z0-9_-]+/gi, "_");
+  return path.join(stateDir, `live_worker_${safeRole}.log`);
+}
+
+async function appendLiveWorkerLog(logPath, text) {
+  await fs.mkdir(path.dirname(logPath), { recursive: true });
+  await fs.appendFile(logPath, text, "utf8");
 }
 
 // ── Find worker config by role name ─────────────────────────────────────────
@@ -162,7 +175,7 @@ function buildConversationContext(history, instruction, sessionState = {}, confi
   } catch { /* knowledge memory not available yet — no-op */ }
 
   // Loop detection — inject a visible warning before history if the worker is stuck
-  const myMessages = history.filter(m => m.from !== "moses");
+  const myMessages = history.filter(m => m.from !== "moses" && m.from !== "prometheus");
   const recentOwn = myMessages.slice(-3);
   const allFailed = recentOwn.length >= 2 && recentOwn.every(m =>
     m.status === "error" || m.status === "blocked" ||
@@ -197,8 +210,8 @@ function buildConversationContext(history, instruction, sessionState = {}, confi
     parts.push("## CONVERSATION HISTORY");
     const recentHistory = history.slice(-12);
     for (const msg of recentHistory) {
-      if (msg.from === "moses") {
-        parts.push(`\nMOSES: ${truncate(msg.content, 600)}`);
+      if (msg.from === "moses" || msg.from === "prometheus") {
+        parts.push(`\nINSTRUCTION: ${truncate(msg.content, 600)}`);
       } else {
         parts.push(`\nYOU (${msg.from}): ${truncate(msg.content, 800)}`);
       }
@@ -206,8 +219,8 @@ function buildConversationContext(history, instruction, sessionState = {}, confi
     parts.push("");
   }
 
-  parts.push("## NEW INSTRUCTION FROM MOSES");
-  parts.push("Treat Moses's instruction as an execution brief: objective, constraints, and success criteria.");
+  parts.push("## NEW INSTRUCTION");
+  parts.push("Treat this instruction as an execution brief: objective, constraints, and success criteria.");
   parts.push("You own the method. If a better implementation order or safer approach exists, use it and explain why in your summary.");
   parts.push("Do not follow literal step ordering if repository reality suggests a stronger senior-level approach.");
   parts.push("\n## EXECUTION INTEGRITY PROTOCOL");
@@ -216,7 +229,7 @@ function buildConversationContext(history, instruction, sessionState = {}, confi
   parts.push("3) If anything is inaccessible, do not improvise. Report the exact blocker with evidence.");
   parts.push("4) If you choose an alternative path, include impact analysis: correctness risk, scope impact, rollback, and whether it is a permanent fix or temporary workaround.");
   parts.push("5) Prefer permanent deterministic fixes over temporary bypasses.");
-  parts.push("6) PR ownership is yours end-to-end: create/update your PR for your task, monitor GitHub checks, fix failures you see, and when checks are green merge it yourself without waiting for Moses approval.");
+  parts.push("6) PR ownership is yours end-to-end: create/update your PR for your task, monitor GitHub checks, fix failures you see, and when checks are green merge it yourself.");
   parts.push("7) If checks remain pending, keep watching until green or report the exact failing/pending checks.");
 
   parts.push("\n## INDEPENDENT THINKING — VERIFY YOUR ORDERS");
@@ -235,13 +248,14 @@ function buildConversationContext(history, instruction, sessionState = {}, confi
   parts.push("   - Remove functionality that's currently working");
   parts.push("   - Add unnecessary complexity for the project type");
   parts.push("   - Introduce security vulnerabilities");
-  parts.push("You own the quality of YOUR output. Moses gives you direction; you decide HOW to execute it at a senior level.");
+  parts.push("You own the quality of YOUR output. Execute at a senior engineering level — methodology is yours.");
   parts.push("\n## WORK QUALITY MANDATE");
-  parts.push("Each premium request costs real money. You MUST deliver substantial, production-quality work in this single request.");
-  parts.push("- Write hundreds to thousands of lines of code per task, not 10-line patches.");
+  parts.push("Each premium request costs real money. You MUST deliver complete, correct, production-quality work in this single request.");
+  parts.push("- Write exactly as much code as the task requires — no more, no less.");
+  parts.push("- Prefer focused, targeted changes that solve the problem cleanly over large rewrites.");
   parts.push("- Complete your ENTIRE assigned task in one shot — do not leave partial work for a follow-up request.");
   parts.push("- If your task involves multiple files, fix ALL of them before reporting done.");
-  parts.push("- Senior production standard: proper error handling, edge cases, tests where relevant, clean architecture.");
+  parts.push("- Senior production standard: correct logic, proper error handling, edge cases handled, tests where relevant.");
 
   // Role-based verification — inject requirements specific to this worker's kind
   if (workerKind) {
@@ -307,7 +321,7 @@ export function parseWorkerResponse(stdout, stderr) {
   const hasBlockedAccess = accessHeader ? /\bblocked\b/i.test(accessHeader) : false;
 
   // Guardrail: if access protocol reports blocked but status is not blocked,
-  // force status to blocked so Moses can safely route a deterministic follow-up.
+  // force status to blocked for safe deterministic follow-up routing.
   let normalizedStatus = ["done", "partial", "blocked", "error"].includes(status) ? status : "done";
   if (hasBlockedAccess && normalizedStatus !== "blocked") {
     normalizedStatus = "blocked";
@@ -362,16 +376,36 @@ export async function runWorkerConversation(config, roleName, instruction, histo
 
   const updatedHistory = [
     ...history,
-    { from: "moses", content: instruction.task, timestamp: new Date().toISOString() }
+    { from: "prometheus", content: instruction.task, timestamp: new Date().toISOString() }
   ];
 
-  // Single-prompt mode: worker gets ONE request with persona embedded.
-  // No --autopilot, no --allow-all, no tool calls. 1 worker = 1 premium request.
-  const args = buildWorkerPromptArgs({ agentSlug, prompt: conversationContext, model });
+  // Single-prompt mode: no autopilot continuations.
+  const allowAllTools = String(roleName || "").toLowerCase() === "evolution-worker";
+  const args = buildAgentArgs({
+    agentSlug,
+    prompt: conversationContext,
+    model,
+    allowAll: allowAllTools,
+    noAskUser: allowAllTools,
+    maxContinues: undefined
+  });
 
   // Compute timeout: config.runtime.workerTimeoutMinutes → ms, fallback to spawnAsync default (45min)
   const workerTimeoutMinutes = Number(config?.runtime?.workerTimeoutMinutes || 0);
   const workerTimeoutMs = workerTimeoutMinutes > 0 ? workerTimeoutMinutes * 60 * 1000 : undefined;
+  const liveLogPath = getLiveLogPath(config, roleName);
+
+  await appendLiveWorkerLog(
+    liveLogPath,
+    [
+      "",
+      `${"=".repeat(80)}`,
+      `[${new Date().toISOString()}] START role=${roleName} model=${model}`,
+      `TASK: ${instruction.task}`,
+      `${"-".repeat(80)}`,
+      ""
+    ].join("\n")
+  );
 
   const startMs = Date.now();
   const result = await spawnAsync(command, args, {
@@ -382,7 +416,13 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       TARGET_REPO: config.env?.targetRepo || "",
       TARGET_BASE_BRANCH: config.env?.targetBaseBranch || "main"
     },
-    timeoutMs: workerTimeoutMs
+    timeoutMs: workerTimeoutMs,
+    onStdout: (chunk) => {
+      appendLiveWorkerLog(liveLogPath, String(chunk)).catch(() => {});
+    },
+    onStderr: (chunk) => {
+      appendLiveWorkerLog(liveLogPath, `[stderr] ${String(chunk)}`).catch(() => {});
+    }
   });
 
   const stdout = String(result?.stdout || "");
@@ -390,6 +430,10 @@ export async function runWorkerConversation(config, roleName, instruction, histo
 
   if (result.status !== 0) {
     const label = result.timedOut ? `Timeout` : `Error exit=${result.status}`;
+    await appendLiveWorkerLog(
+      liveLogPath,
+      `\n[${new Date().toISOString()}] END status=error exit=${result.status}${result.timedOut ? " timeout=true" : ""}\n`
+    );
     await appendProgress(config, `[WORKER:${roleName}] ${label}`);
     const errorMsg = truncate(stderr || stdout || "unknown error", 300);
     updatedHistory.push({
@@ -417,8 +461,114 @@ export async function runWorkerConversation(config, roleName, instruction, histo
 
   const parsed = parseWorkerResponse(stdout, stderr);
 
-  // Track premium request usage per worker
+  // Policy gate: protected path changes require reviewer approval,
+  // so workers cannot auto-finish these changes as fully done.
+  try {
+    const policy = await loadPolicy(config);
+    if (policy?.requireReviewerApprovalForProtectedPaths) {
+      const protectedTouched = getProtectedPathMatches(policy, parsed.filesTouched);
+      if (protectedTouched.length > 0 && parsed.status === "done") {
+        parsed.status = "partial";
+        parsed.summary = `Reviewer approval required for protected paths: ${protectedTouched.join(", ")}\n${parsed.summary}`;
+      }
+    }
+
+    const pathViolations = getRolePathViolations(policy, roleName, parsed.filesTouched);
+    if (pathViolations.hasViolation) {
+      const deniedPreview = pathViolations.deniedMatches.slice(0, 3).join(", ");
+      const outsidePreview = pathViolations.outsideAllowed.slice(0, 3).join(", ");
+      const violationSummary = [
+        pathViolations.deniedMatches.length > 0 ? `denied paths: ${deniedPreview}${pathViolations.deniedMatches.length > 3 ? " ..." : ""}` : "",
+        pathViolations.outsideAllowed.length > 0 ? `outside allowed paths: ${outsidePreview}${pathViolations.outsideAllowed.length > 3 ? " ..." : ""}` : ""
+      ].filter(Boolean).join(" | ");
+
+      parsed.status = "blocked";
+      parsed.summary = `Role path policy violation for ${roleName}: ${violationSummary}\n${parsed.summary}`;
+    }
+  } catch {
+    // Non-fatal: if policy cannot be read, keep existing worker result.
+  }
+
+  // Track premium request usage per worker (always log, even for failed verification attempts)
   logPremiumUsage(config, roleName, model, instruction.taskKind, Date.now() - startMs);
+
+  // ── Verification gate — evidence-based done acceptance ──────────────────────
+  // Feature-flagged via config.runtime.requireTaskContract (default: true).
+  // Rework threshold: config.runtime.maxReworkAttempts (default: 2, per Athena AC#2 concern).
+  // Evidence snapshot schema includes profile, report fields, gaps, attempt, and timestamp (AC#4).
+  const requireTaskContract = config?.runtime?.requireTaskContract !== false;
+  if (requireTaskContract && parsed.status === "done" && workerKind) {
+    const maxReworkAttempts = Number(config?.runtime?.maxReworkAttempts ?? 2);
+    // reworkAttempt is set by buildReworkInstruction on re-dispatches; 0 on the first call
+    const currentAttempt = Number(instruction.reworkAttempt || 0);
+
+    const validationResult = validateWorkerContract(workerKind, {
+      status: parsed.status,
+      fullOutput: parsed.fullOutput,
+      summary: parsed.summary
+    });
+
+    // Evidence snapshot for audit (AC#4 defined schema)
+    const verificationEvidence = {
+      profile: validationResult.evidence?.profile || workerKind,
+      hasReport: validationResult.evidence?.hasReport || false,
+      report: validationResult.evidence?.report || {},
+      responsiveMatrix: validationResult.evidence?.responsiveMatrix || {},
+      prUrl: validationResult.evidence?.prUrl || null,
+      gaps: validationResult.gaps,
+      passed: validationResult.passed,
+      attempt: currentAttempt,
+      validatedAt: new Date().toISOString(),
+      roleName,
+      taskSnippet: String(instruction.task || "").slice(0, 100)
+    };
+
+    // Persist evidence snapshot for audit trail (non-critical, keep last 200 entries)
+    try {
+      const auditPath = path.join(config.paths?.stateDir || "state", "verification_audit.json");
+      let audit = [];
+      try {
+        if (existsSync(auditPath)) {
+          audit = JSON.parse(readFileSync(auditPath, "utf8"));
+          if (!Array.isArray(audit)) audit = [];
+        }
+      } catch { audit = []; }
+      audit.push(verificationEvidence);
+      if (audit.length > 200) audit = audit.slice(-200);
+      writeFileSync(auditPath, JSON.stringify(audit, null, 2), "utf8");
+    } catch { /* non-critical */ }
+
+    const reworkDecision = decideRework(validationResult, instruction.task, currentAttempt, maxReworkAttempts);
+
+    if (reworkDecision.shouldEscalate) {
+      // Max rework attempts exhausted — block the task instead of looping
+      parsed.status = "blocked";
+      parsed.summary = `[VERIFICATION GATE] Escalated after ${currentAttempt} failed attempt(s). ${reworkDecision.escalationReason}\n${parsed.summary}`;
+    } else if (reworkDecision.shouldRework) {
+      // Push the failed attempt into history so the worker sees context on rework
+      updatedHistory.push({
+        from: roleName,
+        content: `[VERIFICATION FAILED — attempt ${currentAttempt + 1}/${maxReworkAttempts}] ${truncate(parsed.summary, 400)}`,
+        fullOutput: parsed.fullOutput,
+        prUrl: parsed.prUrl,
+        timestamp: new Date().toISOString(),
+        status: "verification_failed",
+        verificationEvidence
+      });
+      await appendProgress(config,
+        `[WORKER:${roleName}] Verification failed (attempt ${currentAttempt + 1}/${maxReworkAttempts}) — gaps: ${validationResult.gaps.slice(0, 2).join("; ")}`
+      );
+      // Re-dispatch with rework instruction; recursive depth is bounded by maxReworkAttempts
+      return runWorkerConversation(config, roleName, reworkDecision.instruction, updatedHistory, sessionState);
+    }
+
+    parsed.verificationEvidence = verificationEvidence;
+  }
+
+  await appendLiveWorkerLog(
+    liveLogPath,
+    `\n[${new Date().toISOString()}] END status=${parsed.status}${parsed.prUrl ? ` pr=${parsed.prUrl}` : ""}\n`
+  );
 
   await appendProgress(config,
     `[WORKER:${roleName}] Completed status=${parsed.status}${parsed.prUrl ? ` PR=${parsed.prUrl}` : ""}`
@@ -444,6 +594,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     workerKind,
     verificationReport: parsed.verificationReport,
     responsiveMatrix: parsed.responsiveMatrix,
+    verificationEvidence: parsed.verificationEvidence || null,
     fullOutput: parsed.fullOutput
   };
 }

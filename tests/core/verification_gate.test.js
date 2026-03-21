@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  buildReworkInstruction,
   decideRework,
   parseResponsiveMatrix,
   parseVerificationReport,
@@ -128,5 +129,108 @@ describe("verification_gate rework decisioning", () => {
     assert.equal(decision.shouldRework, false);
     assert.equal(decision.shouldEscalate, true);
     assert.ok(String(decision.escalationReason || "").includes("failed verification"));
+  });
+
+  it("passes through immediately when validation already passed", () => {
+    const decision = decideRework(
+      { passed: true, gaps: [] },
+      "Fix tests",
+      0,
+      2
+    );
+    assert.equal(decision.shouldRework, false);
+    assert.equal(decision.shouldEscalate, false);
+    assert.equal(decision.instruction, null);
+  });
+});
+
+describe("verification_gate buildReworkInstruction — gap list and attempt metadata (AC#3)", () => {
+  it("includes all gap descriptions in rework task text", () => {
+    const gaps = ["BUILD is required but was missing", "TESTS reported as FAIL"];
+    const instruction = buildReworkInstruction("Implement feature X", gaps, 1, 2);
+    assert.ok(
+      instruction.task.includes("BUILD is required but was missing"),
+      "gap 1 must appear in task text"
+    );
+    assert.ok(
+      instruction.task.includes("TESTS reported as FAIL"),
+      "gap 2 must appear in task text"
+    );
+  });
+
+  it("includes numbered gap list in rework task text", () => {
+    const gaps = ["EDGE_CASES is required but was missing"];
+    const instruction = buildReworkInstruction("Fix edge cases", gaps, 1, 2);
+    assert.match(instruction.task, /1\.\s+EDGE_CASES is required/);
+  });
+
+  it("includes attempt metadata in rework instruction object", () => {
+    const instruction = buildReworkInstruction("Do work", ["BUILD missing"], 1, 2);
+    assert.equal(instruction.reworkAttempt, 1, "reworkAttempt must equal the current attempt");
+    assert.equal(instruction.maxReworkAttempts, 2, "maxReworkAttempts must be preserved");
+    assert.equal(instruction.isRework, true);
+    assert.equal(instruction.taskKind, "rework");
+  });
+
+  it("includes attempt counter in task header string", () => {
+    const instruction = buildReworkInstruction("task", ["gap"], 2, 2);
+    assert.match(instruction.task, /attempt 2\/2/i);
+  });
+
+  it("includes final-attempt warning when attempt equals max", () => {
+    const instruction = buildReworkInstruction("task", ["gap"], 2, 2);
+    assert.match(instruction.task, /FINAL ATTEMPT/i);
+  });
+
+  it("does not include final-attempt warning on intermediate attempts", () => {
+    const instruction = buildReworkInstruction("task", ["gap"], 1, 2);
+    assert.ok(!instruction.task.includes("FINAL ATTEMPT"));
+  });
+
+  it("includes original task text for worker reference", () => {
+    const instruction = buildReworkInstruction("Implement OAuth login", ["BUILD missing"], 1, 2);
+    assert.ok(instruction.task.includes("Implement OAuth login"), "original task must be included");
+  });
+
+  it("sets isFollowUp=true so conversation context is built correctly", () => {
+    const instruction = buildReworkInstruction("task", ["gap"], 1, 2);
+    assert.equal(instruction.isFollowUp, true);
+  });
+
+  it("includes gap summary in instruction context field", () => {
+    const gaps = ["TESTS fail", "BUILD missing"];
+    const instruction = buildReworkInstruction("task", gaps, 1, 2);
+    assert.ok(instruction.context.includes("TESTS fail"), "context must include gap list");
+    assert.ok(instruction.context.includes("BUILD missing"));
+  });
+});
+
+describe("verification_gate validateWorkerContract — skipped and non-done statuses", () => {
+  it("skipped status passes without evidence (pre-existing pass-through)", () => {
+    const result = validateWorkerContract("backend", { status: "skipped", fullOutput: "" });
+    assert.equal(result.passed, true);
+    assert.equal(result.gaps.length, 0);
+  });
+
+  it("partial status bypasses verification (non-done)", () => {
+    const result = validateWorkerContract("backend", { status: "partial", fullOutput: "" });
+    assert.equal(result.passed, true);
+    assert.equal(result.gaps.length, 0);
+  });
+
+  it("blocked status bypasses verification (non-done)", () => {
+    const result = validateWorkerContract("backend", { status: "blocked", fullOutput: "Cannot access repo" });
+    assert.equal(result.passed, true);
+    assert.equal(result.gaps.length, 0);
+  });
+
+  it("scan role (scanA) is fully exempt from verification", () => {
+    const result = validateWorkerContract("scanA", {
+      status: "done",
+      fullOutput: "Scanned 42 files, no report needed"
+    });
+    assert.equal(result.passed, true);
+    assert.equal(result.gaps.length, 0);
+    assert.match(result.reason, /exempt/i);
   });
 });
