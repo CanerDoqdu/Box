@@ -29,6 +29,7 @@ import { capturePreWorkBaseline, runProjectCompletion, isProjectAlreadyCompleted
 import { warn } from "./logger.js";
 import { readJson, readJsonSafe, writeJson, READ_JSON_REASON } from "./fs_utils.js";
 import { updatePipelineProgress } from "./pipeline_progress.js";
+import { loadEscalationQueue, sortEscalationQueue } from "./escalation_queue.js";
 
 /**
  * Orchestrator health status enum.
@@ -667,6 +668,29 @@ async function mainLoop(config) {
     // Check if there's remaining work from a previous Prometheus plan
     const prometheusAnalysis = await readJson(path.join(stateDir, "prometheus_analysis.json"), null);
     const totalPlans = Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans.length : 0;
+
+    // Read and prioritise escalation queue before starting any new planning cycle.
+    // Alerts leadership when blocked tasks require attention; does not gate planning.
+    try {
+      const escalationEntries = await loadEscalationQueue(config);
+      const prioritisedEscalations = sortEscalationQueue(escalationEntries);
+      if (prioritisedEscalations.length > 0) {
+        const top = prioritisedEscalations[0];
+        await appendProgress(config,
+          `[LOOP] Escalation queue: ${prioritisedEscalations.length} unresolved — top: role=${top.role} class=${top.blockingReasonClass} attempts=${top.attempts}`
+        );
+        await appendAlert(config, {
+          severity: ALERT_SEVERITY.HIGH,
+          source: "orchestrator",
+          title: `Escalation queue: ${prioritisedEscalations.length} unresolved task(s)`,
+          message: prioritisedEscalations.slice(0, 3)
+            .map(e => `[${e.blockingReasonClass}] ${e.role}: ${e.taskSnippet}`)
+            .join(" | ")
+        });
+      }
+    } catch (err) {
+      warn(`[orchestrator] escalation queue read error (non-fatal): ${String(err?.message || err)}`);
+    }
 
     if (totalPlans > 0) {
       const { completed, pending } = await countCompletedPlans(config, prometheusAnalysis.plans);

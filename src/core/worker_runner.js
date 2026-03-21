@@ -24,6 +24,7 @@ import { buildVerificationChecklist } from "./verification_profiles.js";
 import { parseVerificationReport, parseResponsiveMatrix, validateWorkerContract, decideRework } from "./verification_gate.js";
 import { enforceModelPolicy } from "./model_policy.js";
 import { loadPolicy, getProtectedPathMatches, getRolePathViolations } from "./policy_engine.js";
+import { appendEscalation, BLOCKING_REASON_CLASS, NEXT_ACTION } from "./escalation_queue.js";
 
 // ── Premium usage tracking ──────────────────────────────────────────────────
 
@@ -436,6 +437,17 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     );
     await appendProgress(config, `[WORKER:${roleName}] ${label}`);
     const errorMsg = truncate(stderr || stdout || "unknown error", 300);
+
+    // Persist structured escalation for worker errors/timeouts (non-critical write)
+    appendEscalation(config, {
+      role: roleName,
+      task: instruction.task,
+      blockingReasonClass: BLOCKING_REASON_CLASS.WORKER_ERROR,
+      attempts: Number(instruction.reworkAttempt || 0),
+      nextAction: NEXT_ACTION.RETRY,
+      summary: label + ": " + errorMsg
+    }).catch(() => { /* non-fatal */ });
+
     updatedHistory.push({
       from: roleName,
       content: `ERROR: ${errorMsg}`,
@@ -461,6 +473,18 @@ export async function runWorkerConversation(config, roleName, instruction, histo
 
   const parsed = parseWorkerResponse(stdout, stderr);
 
+  // If access was reported as blocked, persist a structured escalation (non-critical)
+  if (parsed.status === "blocked" && /BOX_ACCESS=[^\n]*blocked/i.test(stdout)) {
+    appendEscalation(config, {
+      role: roleName,
+      task: instruction.task,
+      blockingReasonClass: BLOCKING_REASON_CLASS.ACCESS_BLOCKED,
+      attempts: Number(instruction.reworkAttempt || 0),
+      nextAction: NEXT_ACTION.RETRY,
+      summary: "Worker reported BOX_ACCESS blocked"
+    }).catch(() => { /* non-fatal */ });
+  }
+
   // Policy gate: protected path changes require reviewer approval,
   // so workers cannot auto-finish these changes as fully done.
   try {
@@ -484,6 +508,17 @@ export async function runWorkerConversation(config, roleName, instruction, histo
 
       parsed.status = "blocked";
       parsed.summary = `Role path policy violation for ${roleName}: ${violationSummary}\n${parsed.summary}`;
+
+      // Persist structured escalation for policy violations (non-critical)
+      appendEscalation(config, {
+        role: roleName,
+        task: instruction.task,
+        blockingReasonClass: BLOCKING_REASON_CLASS.POLICY_VIOLATION,
+        attempts: Number(instruction.reworkAttempt || 0),
+        nextAction: NEXT_ACTION.ESCALATE_TO_HUMAN,
+        summary: `Role path policy violation: ${violationSummary}`,
+        prUrl: parsed.prUrl
+      }).catch(() => { /* non-fatal */ });
     }
   } catch {
     // Non-fatal: if policy cannot be read, keep existing worker result.
@@ -544,6 +579,17 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       // Max rework attempts exhausted — block the task instead of looping
       parsed.status = "blocked";
       parsed.summary = `[VERIFICATION GATE] Escalated after ${currentAttempt} failed attempt(s). ${reworkDecision.escalationReason}\n${parsed.summary}`;
+
+      // Persist structured escalation payload (non-critical write)
+      appendEscalation(config, {
+        role: roleName,
+        task: instruction.task,
+        blockingReasonClass: BLOCKING_REASON_CLASS.MAX_REWORK_EXHAUSTED,
+        attempts: currentAttempt,
+        nextAction: NEXT_ACTION.ESCALATE_TO_HUMAN,
+        summary: reworkDecision.escalationReason || validationResult.gaps.slice(0, 3).join("; "),
+        prUrl: parsed.prUrl
+      }).catch(() => { /* non-fatal */ });
     } else if (reworkDecision.shouldRework) {
       // Push the failed attempt into history so the worker sees context on rework
       updatedHistory.push({

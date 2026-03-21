@@ -3962,6 +3962,42 @@ async function serve(req, res) {
     return;
   }
 
+  if (url.pathname === "/api/escalations") {
+    // Expose unresolved escalation count and age for dashboard consumers.
+    // File: state/escalation_queue.json  Age unit: milliseconds since oldest unresolved createdAt.
+    try {
+      const { readJson: readJsonCore } = await import("../core/fs_utils.js");
+      const { sortEscalationQueue } = await import("../core/escalation_queue.js");
+      const raw = await readJsonCore(path.join(STATE_DIR, "escalation_queue.json"), { entries: [] });
+      const entries = Array.isArray(raw?.entries) ? raw.entries : [];
+      const unresolved = entries.filter(e => !e.resolved);
+      const prioritised = sortEscalationQueue(unresolved);
+      const oldest = [...unresolved].sort(
+        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
+      )[0];
+      const oldestAgeMs = oldest ? Math.floor(Date.now() - new Date(oldest.createdAt).getTime()) : null;
+      res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({
+        unresolvedCount: unresolved.length,
+        oldestUnresolvedAgeMs: oldestAgeMs,
+        oldestUnresolvedCreatedAt: oldest ? oldest.createdAt : null,
+        top: prioritised.slice(0, 5).map(e => ({
+          role: e.role,
+          taskSnippet: e.taskSnippet,
+          blockingReasonClass: e.blockingReasonClass,
+          nextAction: e.nextAction,
+          attempts: e.attempts,
+          createdAt: e.createdAt
+        })),
+        generatedAt: new Date().toISOString()
+      }));
+    } catch (err) {
+      res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: String(err?.message || err) }));
+    }
+    return;
+  }
+
   if (url.pathname === "/api/daemon-start") {
     if (req.method !== "POST") {
       res.writeHead(405, { "content-type": "application/json; charset=utf-8" });
