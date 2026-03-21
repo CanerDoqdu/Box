@@ -1,5 +1,5 @@
 /**
- * Agent Loader — Integrates .github/agents/*.agent.md with Copilot CLI
+ * Agent Loader ÔÇö Integrates .github/agents/*.agent.md with Copilot CLI
  *
  * Each AI role has a dedicated .agent.md file in .github/agents/.
  * These are standard VS Code Copilot custom agent files with YAML frontmatter.
@@ -8,7 +8,7 @@
  * persona, tools, and model preferences from that file.
  * The runtime data (GitHub state, sessions, etc.) is passed via -p <context>.
  *
- * Edit an agent's behavior by editing their .agent.md file — no code changes needed.
+ * Edit an agent's behavior by editing their .agent.md file ÔÇö no code changes needed.
  */
 
 import { existsSync, readFileSync, appendFileSync, writeFileSync } from "node:fs";
@@ -28,20 +28,20 @@ function logBannedModelAttempt(model, reason) {
   } catch { /* non-critical */ }
 }
 
-// ── Convert agent name to .agent.md file slug ────────────────────────────────
-// "King David" → "king-david", "Trump" → "trump"
+// ÔöÇÔöÇ Convert agent name to .agent.md file slug ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
+// "King David" ÔåÆ "king-david", "Trump" ÔåÆ "trump"
 
 export function nameToSlug(name) {
   return String(name || "").trim().toLowerCase().replace(/\s+/g, "-");
 }
 
-// ── Check if .agent.md file exists for a slug ────────────────────────────────
+// ÔöÇÔöÇ Check if .agent.md file exists for a slug ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 export function agentFileExists(slug) {
   return existsSync(path.join(AGENTS_DIR, `${slug}.agent.md`));
 }
 
-// ── Map model name to Copilot CLI model slug ──────────────────────────────────
+// ÔöÇÔöÇ Map model name to Copilot CLI model slug ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 export function toCopilotModelSlug(name) {
   const map = {
@@ -50,7 +50,7 @@ export function toCopilotModelSlug(name) {
     "claude sonnet 4": "claude-sonnet-4",
     "claude haiku 4.5": "claude-haiku-4.5",
     "claude opus 4.6": "claude-opus-4.6",
-    // claude-opus-4.6-fast is BANNED — 30x rate, never use
+    // claude-opus-4.6-fast is BANNED ÔÇö 30x rate, never use
     "claude opus 4.5": "claude-opus-4.5",
     "gemini 3 pro preview": "gemini-3-pro-preview",
     "gpt-5.4": "gpt-5.4",
@@ -77,7 +77,7 @@ export function toCopilotModelSlug(name) {
     .replace(/^-|-$/g, "");
 }
 
-// ── Build CLI args array for a Copilot agent call ────────────────────────────
+// ÔöÇÔöÇ Build CLI args array for a Copilot agent call ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 //
 // Usage:
 //   const args = buildAgentArgs({ agentSlug: "jesus", prompt: contextText, model: "claude-sonnet-4.6" });
@@ -115,7 +115,7 @@ export function buildAgentArgs({
   if (agentSlug && agentFileExists(agentSlug)) {
     args.push("--agent", agentSlug);
   } else if (model) {
-    // No agent file — fall back to explicit model
+    // No agent file ÔÇö fall back to explicit model
     const banCheck = isModelBanned(model);
     if (banCheck.banned) {
       // HARD BLOCK: never pass a banned model to Copilot CLI
@@ -138,7 +138,7 @@ export function buildAgentArgs({
   return args;
 }
 
-// ── Read agent persona text from .agent.md (strips YAML frontmatter) ─────────
+// ÔöÇÔöÇ Read agent persona text from .agent.md (strips YAML frontmatter) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 export function readAgentPersona(slug) {
   const filePath = path.join(AGENTS_DIR, `${slug}.agent.md`);
@@ -149,7 +149,7 @@ export function readAgentPersona(slug) {
   return stripped.trim();
 }
 
-// ── Build CLI args for single-prompt worker calls (no autopilot/tools) ───────
+// ÔöÇÔöÇ Build CLI args for single-prompt worker calls (no autopilot/tools) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 //
 // Workers get ONE request: --model + -p with persona embedded in prompt.
 // No --agent, no --autopilot, no --allow-all, no tool calls.
@@ -187,7 +187,7 @@ export function buildWorkerPromptArgs({ agentSlug, prompt, model }) {
 // cleanupPromptFile is kept as no-op for backward compat (callers still import it)
 export function cleanupPromptFile(_filePath) { /* no-op */ }
 
-// ── Parse agent output: extract thinking + structured JSON ───────────────────
+// ÔöÇÔöÇ Parse agent output: extract thinking + structured JSON ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 //
 // Agents write freely, then end with one of two marker formats:
 //
@@ -213,7 +213,7 @@ export function parseAgentOutput(raw) {
     return { thinking, parsed, ok: !!parsed };
   }
 
-  // Try ===KARAR=== / ===SON=== markers (legacy Turkish format — backward compat)
+  // Try ===KARAR=== / ===SON=== markers (legacy Turkish format ÔÇö backward compat)
   const kararMatch = text.match(/===KARAR===\s*([\s\S]*?)===SON===/);
   if (kararMatch) {
     const splitIdx = text.indexOf("===KARAR===");
@@ -239,7 +239,7 @@ export function parseAgentOutput(raw) {
   return { thinking, parsed, ok: !!parsed };
 }
 
-// ── Internal JSON parser (handles raw, fenced, deep-nested) ──────────────────
+// ÔöÇÔöÇ Internal JSON parser (handles raw, fenced, deep-nested) ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 function tryParseJson(text) {
   const s = String(text || "");
@@ -291,13 +291,13 @@ function tryParseJson(text) {
   return null;
 }
 
-// ── Log agent thinking to a visible file ─────────────────────────────────────
+// ÔöÇÔöÇ Log agent thinking to a visible file ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 
 export function logAgentThinking(stateDir, agentName, thinking) {
   if (!thinking || thinking.length < 10) return;
   try {
     const ts = new Date().toISOString().replace("T", " ").slice(0, 19);
-    const separator = `\n${"─".repeat(60)}\n[${ts}] ${agentName} — DÜŞÜNCE\n${"─".repeat(60)}\n`;
+    const separator = `\n${"ÔöÇ".repeat(60)}\n[${ts}] ${agentName} ÔÇö D├£┼Ş├£NCE\n${"ÔöÇ".repeat(60)}\n`;
     appendFileSync(
       path.join(stateDir, "leadership_thinking.txt"),
       `${separator}${thinking}\n`,

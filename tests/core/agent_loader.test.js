@@ -4,7 +4,7 @@ import { buildAgentArgs } from "../../src/core/agent_loader.js";
 
 describe("buildAgentArgs", () => {
   it("keeps existing leadership behavior by default", () => {
-    // Leadership calls: no autopilot, no allow-all by default — single-prompt mode
+    // Leadership calls: no autopilot, no allow-all by default ÔÇö single-prompt mode
     const args = buildAgentArgs({
       agentSlug: "prometheus",
       prompt: "scan the repo",
