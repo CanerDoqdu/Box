@@ -122,7 +122,20 @@
       "src/core/policy_engine.js"
     ],
     "knowledgeMemoryEnabled": true,
-    "experimentEngineEnabled": true
+    "experimentEngineEnabled": true,
+    "experimentEnforcement": "soft",
+    "scheduler": {
+      "maxTotalActiveExperiments": 3,
+      "highImpactScoreThreshold": 0.7,
+      "maxActiveExperimentsPerTier": {
+        "critical": 1,
+        "high": 1,
+        "medium": 2,
+        "low": 3
+      },
+      "baselineMetricsPath": "state/hypothesis_baselines.json",
+      "rationaleOutputPath": "state/scheduler_rationale.json"
+    }
   },
   "systemGuardian": {
     "enabled": true,
