@@ -137,6 +137,21 @@
       "rationaleOutputPath": "state/scheduler_rationale.json"
     }
   },
+  "canary": {
+    "enabled": true,
+    "defaultRatio": 0.2,
+    "minCyclesToObserve": 2,
+    "promotion": {
+      "minTaskSuccessRate": 0.8,
+      "maxErrorRate": 0.1
+    },
+    "rollback": {
+      "triggerErrorRate": 0.25,
+      "triggerTaskSuccessRateLow": 0.5
+    },
+    "auditLogPath": "state/canary_audit.jsonl",
+    "ledgerPath": "state/canary_ledger.json"
+  },
   "systemGuardian": {
     "enabled": true,
     "cooldownMinutes": 30,
