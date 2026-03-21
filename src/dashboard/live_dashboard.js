@@ -6,6 +6,7 @@ import { execSync, spawn } from "node:child_process";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
+import { readPipelineProgress } from "../core/pipeline_progress.js";
 
 dotenv.config();
 
@@ -66,8 +67,8 @@ const REBASE_STATE = {
   lastOutput: ""
 };
 
-const TRUMP_PLAN_HISTORY = [];
-const TRUMP_PLAN_HISTORY_LIMIT = 24;
+const PROMETHEUS_PLAN_HISTORY = [];
+const PROMETHEUS_PLAN_HISTORY_LIMIT = 24;
 
 function normalizeText(value) {
   return String(value || "")
@@ -101,19 +102,19 @@ function getLastWorkerMessage(session, roleName) {
   return null;
 }
 
-function computePlanStatus(plan, workerSessions, mosesCoordination) {
+function computePlanStatus(plan, workerSessions, athenaState) {
   const role = String(plan?.role || "");
   const task = String(plan?.task || "");
   const session = workerSessions?.[role] || {};
   const sessionStatus = String(session?.status || "idle").toLowerCase();
-  const completedTasks = Array.isArray(mosesCoordination?.completedTasks) ? mosesCoordination.completedTasks : [];
+  const completedTasks = Array.isArray(athenaState?.completedTasks) ? athenaState.completedTasks : [];
   const completedHit = completedTasks.some((item) => textLooksRelated(item, task));
 
   const history = Array.isArray(session?.history) ? session.history : [];
   let lastWorkerEntry = null;
   for (let i = history.length - 1; i >= 0; i -= 1) {
     const entry = history[i];
-    if (!entry || entry.from === "moses") continue;
+    if (!entry || entry.from === "orchestrator") continue;
     lastWorkerEntry = entry;
     break;
   }
@@ -123,17 +124,17 @@ function computePlanStatus(plan, workerSessions, mosesCoordination) {
 
   const lastWorkerStatus = String(lastWorkerEntry?.status || "").toLowerCase();
   const lastWorkerSummary = String(lastWorkerEntry?.content || "");
-  const benchHint = /benched|not re-dispatched|skipped this cycle/i.test(String(mosesCoordination?.summary || ""));
-  if (benchHint && role && String(mosesCoordination?.summary || "").includes(role)) return "skipped";
+  const benchHint = /benched|not re-dispatched|skipped this cycle/i.test(String(athenaState?.summary || ""));
+  if (benchHint && role && String(athenaState?.summary || "").includes(role)) return "skipped";
   if (lastWorkerStatus === "done" && textLooksRelated(lastWorkerSummary, task)) return "done";
   if ((lastWorkerStatus === "blocked" || lastWorkerStatus === "error") && textLooksRelated(lastWorkerSummary, task)) return "skipped";
   if (sessionStatus === "error" && textLooksRelated(session?.lastTask || "", task)) return "skipped";
   return "queued";
 }
 
-function buildTrumpPlanBoard(trumpAnalysis, workerSessions, mosesCoordination) {
+function buildPrometheusPlanBoard(prometheusAnalysis, workerSessions, athenaState) {
   const sessions = workerSessions || {};
-  const coord = mosesCoordination || {};
+  const coord = athenaState || {};
 
   const coordMs = coord?.coordinatedAt ? new Date(coord.coordinatedAt).getTime() : Date.now();
   const cycleItems = Object.entries(sessions)
@@ -170,18 +171,18 @@ function buildTrumpPlanBoard(trumpAnalysis, workerSessions, mosesCoordination) {
     projectHealth: String(coord?.jesusDecision || "tactical"),
     summary: String(coord?.summary || "").slice(0, 260),
     items: cycleItems,
-    source: "moses-cycle",
+    source: "athena-cycle",
     updatedAt: new Date().toISOString()
   };
 
   if (cycleItems.length > 0) {
-    const cycleIndex = TRUMP_PLAN_HISTORY.findIndex((entry) => entry.key === cycleKey);
-    if (cycleIndex >= 0) TRUMP_PLAN_HISTORY[cycleIndex] = cycleSnapshot;
-    else TRUMP_PLAN_HISTORY.unshift(cycleSnapshot);
+    const cycleIndex = PROMETHEUS_PLAN_HISTORY.findIndex((entry) => entry.key === cycleKey);
+    if (cycleIndex >= 0) PROMETHEUS_PLAN_HISTORY[cycleIndex] = cycleSnapshot;
+    else PROMETHEUS_PLAN_HISTORY.unshift(cycleSnapshot);
   }
 
-  const plans = Array.isArray(trumpAnalysis?.plans) ? trumpAnalysis.plans : [];
-  const analyzedAt = trumpAnalysis?.analyzedAt || null;
+  const plans = Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans : [];
+  const analyzedAt = prometheusAnalysis?.analyzedAt || null;
   const key = `${analyzedAt || "no-analysis"}|${plans.length}|${plans.map((p) => `${p?.role || "?"}:${normalizeText(p?.task || "")}`).join("||")}`;
 
   const items = plans.map((plan, index) => ({
@@ -190,37 +191,37 @@ function buildTrumpPlanBoard(trumpAnalysis, workerSessions, mosesCoordination) {
     priority: Number(plan?.priority || (index + 1)),
     kind: String(plan?.kind || "default"),
     task: String(plan?.task || ""),
-    status: computePlanStatus(plan, workerSessions || {}, mosesCoordination || {})
+    status: computePlanStatus(plan, workerSessions || {}, athenaState || {})
   }));
 
-  const existingIndex = TRUMP_PLAN_HISTORY.findIndex((entry) => entry.key === key);
+  const existingIndex = PROMETHEUS_PLAN_HISTORY.findIndex((entry) => entry.key === key);
   const snapshot = {
     key,
     analyzedAt,
-    projectHealth: String(trumpAnalysis?.projectHealth || "unknown"),
-    summary: String(trumpAnalysis?.analysis || "").slice(0, 260),
+    projectHealth: String(prometheusAnalysis?.projectHealth || "unknown"),
+    summary: String(prometheusAnalysis?.analysis || "").slice(0, 260),
     items,
-    source: "trump-analysis",
+    source: "prometheus-analysis",
     updatedAt: new Date().toISOString()
   };
 
   if (existingIndex >= 0) {
-    TRUMP_PLAN_HISTORY[existingIndex] = snapshot;
+    PROMETHEUS_PLAN_HISTORY[existingIndex] = snapshot;
   } else {
-    TRUMP_PLAN_HISTORY.unshift(snapshot);
+    PROMETHEUS_PLAN_HISTORY.unshift(snapshot);
   }
 
-  if (TRUMP_PLAN_HISTORY.length > TRUMP_PLAN_HISTORY_LIMIT) {
-    TRUMP_PLAN_HISTORY.length = TRUMP_PLAN_HISTORY_LIMIT;
+  if (PROMETHEUS_PLAN_HISTORY.length > PROMETHEUS_PLAN_HISTORY_LIMIT) {
+    PROMETHEUS_PLAN_HISTORY.length = PROMETHEUS_PLAN_HISTORY_LIMIT;
   }
 
-  const activeKey = coord?.hadTrumpPlans === false && cycleItems.length > 0 ? cycleKey : key;
-  const active = TRUMP_PLAN_HISTORY.find((entry) => entry.key === activeKey) || snapshot;
+  const activeKey = coord?.hadPrometheusPlans === false && cycleItems.length > 0 ? cycleKey : key;
+  const active = PROMETHEUS_PLAN_HISTORY.find((entry) => entry.key === activeKey) || snapshot;
 
   return {
     activeKey,
     active,
-    history: TRUMP_PLAN_HISTORY
+    history: PROMETHEUS_PLAN_HISTORY
   };
 }
 
@@ -929,8 +930,8 @@ function deriveProjectLabel(targetRepo, packageName) {
   return String(packageName || "unknown");
 }
 
-function deriveTasks(trumpAnalysis, workerSessions) {
-  const allPlans = Array.isArray(trumpAnalysis?.plans) ? trumpAnalysis.plans : [];
+function deriveTasks(prometheusAnalysis, workerSessions) {
+  const allPlans = Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans : [];
   // Filter out Issachar/Ezra scan-only tasks (removed from active plan)
   const plans = allPlans.filter(p => !/^(Issachar|Ezra)/i.test(String(p.role || "")));
   const sessions = workerSessions || {};
@@ -1037,9 +1038,9 @@ async function collectDashboardData() {
     oneTimeCost,
     copilotApiUsage,
     workerSessions,
-    mosesCoordination,
+    athenaState,
     jesusDirective,
-    trumpAnalysis,
+    prometheusAnalysis,
     alertsData,
     suggestionsData,
     premiumUsageLog,
@@ -1050,14 +1051,17 @@ async function collectDashboardData() {
     getHourlyClaudeCost(),
     getHourlyCopilotUsage(),
     readJsonSafe(path.join(STATE_DIR, "worker_sessions.json"), {}),
-    readJsonSafe(path.join(STATE_DIR, "moses_coordination.json"), {}),
+    readJsonSafe(path.join(STATE_DIR, "athena_plan_review.json"), {}),
     readJsonSafe(path.join(STATE_DIR, "jesus_directive.json"), {}),
-    readJsonSafe(path.join(STATE_DIR, "trump_analysis.json"), {}),
+    readJsonSafe(path.join(STATE_DIR, "prometheus_analysis.json"), {}),
     readJsonSafe(path.join(STATE_DIR, "alerts.json"), { entries: [] }),
     readJsonSafe(path.join(STATE_DIR, "worker_suggestions.json"), { entries: [] }),
     readJsonSafe(path.join(STATE_DIR, "premium_usage_log.json"), []),
     readJsonSafe(path.join(STATE_DIR, "completed_projects.json"), [])
   ]);
+
+  // Read pipeline progress authoritatively — no heuristic inference of stage.
+  const pipelineProgress = await readPipelineProgress({ paths: { stateDir: STATE_DIR } });
 
   const [daemonStatus, prDeltaResult, gitActivity] = await Promise.all([getDaemonStatus(), getHourlyPrDeltaStats(), Promise.resolve(getGitActivity())]);
 
@@ -1099,7 +1103,7 @@ async function collectDashboardData() {
     ? apiRemaining
     : Math.max(0, copilotQuota - copilotUsedRequests);
   const copilotUsedPercent = copilotQuota > 0 ? (copilotUsedRequests / copilotQuota) * 100 : 0;
-  const trumpPlanBoard = buildTrumpPlanBoard(trumpAnalysis, workerSessions, mosesCoordination);
+  const prometheusPlanBoard = buildPrometheusPlanBoard(prometheusAnalysis, workerSessions, athenaState);
 
   // Check if current target repo is in the completion ledger
   const completedEntry = Array.isArray(completedProjects)
@@ -1134,7 +1138,7 @@ async function collectDashboardData() {
       daemonPid: daemonStatus.pid,
       roleRegistry: {
         ceo: String(boxConfig?.roleRegistry?.ceoSupervisor?.name || "Jesus"),
-        lead: String(boxConfig?.roleRegistry?.leadWorker?.name || "Moses"),
+        lead: String(boxConfig?.roleRegistry?.qualityReviewer?.name || "Athena"),
         workers: (boxConfig?.roleRegistry?.workers && typeof boxConfig.roleRegistry.workers === "object")
           ? boxConfig.roleRegistry.workers
           : {}
@@ -1155,8 +1159,9 @@ async function collectDashboardData() {
       refreshInSec: oneTimeCost.refreshInSec
     },
     docker,
-    tasks: deriveTasks(trumpAnalysis, workerSessions),
-    trumpPlanBoard,
+    pipeline: pipelineProgress,
+    tasks: deriveTasks(prometheusAnalysis, workerSessions),
+    prometheusPlanBoard,
     taskInsights: {},
     issues: { total: 0, list: [] },
     alerts: deriveAlerts(alertsData),
@@ -1165,7 +1170,7 @@ async function collectDashboardData() {
       list: Array.isArray(suggestionsData?.entries) ? suggestionsData.entries.slice(-30).reverse() : []
     },
     tests: {},
-    premiumRequestEstimate: derivePremiumEstimate(trumpAnalysis, copilotUsedRequests, copilotQuota),
+    premiumRequestEstimate: derivePremiumEstimate(prometheusAnalysis, copilotUsedRequests, copilotQuota),
     usage: {
       copilot: {
         totalEntries: 0,
@@ -1219,11 +1224,11 @@ async function collectDashboardData() {
       const sessions = workerSessions || {};
       const cleaned = {};
       for (const [role, s] of Object.entries(sessions)) {
-        // Cross-check: if status is "working" but last non-Moses history says "done",
+        // Cross-check: if status is "working" but last non-orchestrator history says "done",
         // the worker actually finished — session file is stale
         let effectiveStatus = s.status || "idle";
         if (effectiveStatus === "working" && Array.isArray(s.history) && s.history.length > 0) {
-          const lastEntry = s.history.filter(h => h && h.role !== "Moses").pop();
+          const lastEntry = s.history.filter(h => h && h.role !== "Athena").pop();
           if (lastEntry && ["done", "partial", "blocked"].includes(String(lastEntry.status || "").toLowerCase())) {
             effectiveStatus = "idle";
           }
@@ -1240,9 +1245,9 @@ async function collectDashboardData() {
       return cleaned;
     })(),
     leadership: {
-      moses: mosesCoordination,
+      athena: athenaState,
       jesus: jesusDirective,
-      trump: trumpAnalysis
+      prometheus: prometheusAnalysis
     },
     guardian: {
       report: {},
@@ -3475,7 +3480,7 @@ function renderHtml() {
         var models = reqs.copilotByModel || [];
         if (models.length > 0) {
           var top3 = models.slice().sort(function(a,b){ return (b.qty||0)-(a.qty||0); }).slice(0,3);
-          copilotSub.textContent = pct + '% — ' + top3.map(function(m){ return (m.model||'').replace(/^Auto:\s*/,'').split(' ').slice(-2).join(' ') + ': ' + Math.round(m.qty); }).join(', ');
+          copilotSub.textContent = pct + '% — ' + top3.map(function(m){ return (m.model||'').replace(/^Auto:\\s*/,'').split(' ').slice(-2).join(' ') + ': ' + Math.round(m.qty); }).join(', ');
         } else {
           copilotSub.textContent = pct + '% used';
         }

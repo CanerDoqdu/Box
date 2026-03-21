@@ -28,6 +28,7 @@ import { runSelfImprovementCycle } from "./self_improvement.js";
 import { capturePreWorkBaseline, runProjectCompletion, isProjectAlreadyCompleted } from "./project_lifecycle.js";
 import { warn } from "./logger.js";
 import { readJson, readJsonSafe, writeJson, READ_JSON_REASON } from "./fs_utils.js";
+import { updatePipelineProgress } from "./pipeline_progress.js";
 
 /**
  * Orchestrator health status enum.
@@ -46,6 +47,23 @@ async function writeOrchestratorHealth(stateDir, status, reason, details = null)
     details: details || null,
     recordedAt: new Date().toISOString()
   });
+}
+
+/**
+ * Safe wrapper for updatePipelineProgress.
+ *
+ * Pipeline progress is observability state — a write failure must NEVER block
+ * orchestration. Errors are logged explicitly (never silently dropped) so
+ * the failure is observable via the progress log.
+ *
+ * Risk: medium — touches orchestrator transitions directly.
+ */
+async function safeUpdatePipelineProgress(config, stepId, detail, extra) {
+  try {
+    await updatePipelineProgress(config, stepId, detail, extra);
+  } catch (err) {
+    warn(`[orchestrator] pipeline progress update failed (step=${stepId}): ${String(err?.message || err)}`);
+  }
 }
 
 /**
@@ -443,8 +461,10 @@ async function runSingleCycle(config) {
 
   // Step 1: Jesus analyzes state and decides what to do (1 request)
   await appendProgress(config, "[CYCLE] ── Step 1: Jesus analyzing system state ──");
+  await safeUpdatePipelineProgress(config, "jesus_awakening", "Jesus starting system state analysis");
   let jesusDecision;
   try {
+    await safeUpdatePipelineProgress(config, "jesus_reading", "Jesus reading system state");
     jesusDecision = await runJesusCycle(config);
   } catch (err) {
     await appendProgress(config, `[CYCLE] Jesus failed: ${String(err?.message || err)}`);
@@ -457,10 +477,16 @@ async function runSingleCycle(config) {
     return;
   }
 
+  await safeUpdatePipelineProgress(config, "jesus_decided", "Jesus decision ready", {
+    jesusDecision: typeof jesusDecision === "object" ? String(jesusDecision.thinking || "").slice(0, 200) : ""
+  });
+
   // Step 2: Prometheus plans (single-prompt, no autopilot)
   await appendProgress(config, "[CYCLE] ── Step 2: Prometheus scanning & planning ──");
+  await safeUpdatePipelineProgress(config, "prometheus_starting", "Prometheus starting repository scan");
   let prometheusAnalysis;
   try {
+    await safeUpdatePipelineProgress(config, "prometheus_reading_repo", "Prometheus reading repository");
     prometheusAnalysis = await runPrometheusAnalysis(config, {
       prompt: jesusDecision.briefForPrometheus || jesusDecision.briefForMoses || jesusDecision.thinking || "Full repository analysis",
       requestedBy: "Jesus"
@@ -473,11 +499,17 @@ async function runSingleCycle(config) {
 
   if (!prometheusAnalysis || !Array.isArray(prometheusAnalysis.plans) || prometheusAnalysis.plans.length === 0) {
     await appendProgress(config, "[CYCLE] Prometheus produced no plans — cycle complete");
+    await safeUpdatePipelineProgress(config, "cycle_complete", "Prometheus produced no plans — nothing to dispatch");
     return;
   }
 
+  await safeUpdatePipelineProgress(config, "prometheus_done", `Prometheus complete — ${prometheusAnalysis.plans.length} plan(s)`, {
+    planCount: prometheusAnalysis.plans.length
+  });
+
   // Step 3: Athena validates the plan (1 request)
   await appendProgress(config, "[CYCLE] ── Step 3: Athena reviewing plan ──");
+  await safeUpdatePipelineProgress(config, "athena_reviewing", "Athena reviewing Prometheus plan");
   let planReview;
   try {
     planReview = await runAthenaPlanReview(config, prometheusAnalysis);
@@ -522,10 +554,17 @@ async function runSingleCycle(config) {
     return;
   }
 
+  await safeUpdatePipelineProgress(config, "athena_approved", "Athena approved the plan");
+
   // Step 4: Dispatch workers sequentially (1 request per worker)
   const plans = prometheusAnalysis.plans;
   await appendProgress(config, `[CYCLE] ── Step 4: Dispatching ${plans.length} workers ──`);
+  await safeUpdatePipelineProgress(config, "workers_dispatching", `Dispatching ${plans.length} worker(s)`, {
+    workersTotal: plans.length,
+    workersDone: 0
+  });
 
+  let workersDone = 0;
   for (const plan of plans) {
     // Check for stop request between each worker
     const stopReq = await readStopRequest(config);
@@ -533,6 +572,12 @@ async function runSingleCycle(config) {
       await appendProgress(config, `[CYCLE] Stop requested — halting dispatch`);
       return;
     }
+
+    await safeUpdatePipelineProgress(config, "workers_running", `Running worker: ${plan.role}`, {
+      workersTotal: plans.length,
+      workersDone,
+      currentWorker: plan.role
+    });
 
     let workerResult;
     try {
@@ -552,11 +597,21 @@ async function runSingleCycle(config) {
       await appendProgress(config, `[CYCLE] Athena postmortem failed for ${plan.role}: ${String(err?.message || err)}`);
     }
 
+    workersDone += 1;
     // Wait for worker to fully finish (PR created, etc.)
     await waitForWorkersToFinish(config);
   }
 
+  await safeUpdatePipelineProgress(config, "workers_finishing", "All workers finishing up", {
+    workersTotal: plans.length,
+    workersDone: plans.length
+  });
+
   await appendProgress(config, "[CYCLE] ── All workers dispatched and reviewed — cycle complete ──");
+  await safeUpdatePipelineProgress(config, "cycle_complete", `Cycle complete — ${plans.length} worker(s) processed`, {
+    workersTotal: plans.length,
+    workersDone: plans.length
+  });
 }
 
 // ── Main loop: Jesus → Prometheus → Athena → Worker → Athena → repeat ──────
@@ -568,11 +623,15 @@ async function mainLoop(config) {
   // Phase 1: wait for any active workers from previous session
   await waitForWorkersToFinish(config);
 
+  // Mark system idle before entering the main loop.
+  await safeUpdatePipelineProgress(config, "idle", "System idle — awaiting next cycle");
+
   // Phase 2: main cycle loop
   while (true) {
     const stopReq = await readStopRequest(config);
     if (stopReq?.requestedAt) {
       await appendProgress(config, `[BOX] Stop request detected, shutting down (reason=${stopReq.reason || "unknown"})`);
+      await safeUpdatePipelineProgress(config, "idle", "System stopped");
       await clearStopRequest(config);
       await clearDaemonPid(config);
       break;
@@ -648,6 +707,7 @@ async function mainLoop(config) {
       await runSingleCycle(config);
     }
 
+    await safeUpdatePipelineProgress(config, "idle", "Cycle complete — waiting before next iteration");
     await sleep(RE_EVAL_SLEEP_MS);
   }
 }
