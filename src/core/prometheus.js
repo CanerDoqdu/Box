@@ -11,12 +11,18 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import { writeJson, spawnAsync } from "./fs_utils.js";
-import { appendAlert, appendProgress } from "./state_tracker.js";
+import { appendAlert, appendProgress, appendInterventionOptimizerEntry } from "./state_tracker.js";
 import { getRoleRegistry } from "./role_registry.js";
 import { buildAgentArgs, parseAgentOutput, logAgentThinking } from "./agent_loader.js";
 import { chatLog } from "./logger.js";
 import { addSchemaVersion, STATE_FILE_TYPE } from "./schema_registry.js";
 import { PREMORTEM_RISK_LEVEL } from "./athena_reviewer.js";
+import {
+  runInterventionOptimizer,
+  buildInterventionsFromPlan,
+  buildBudgetFromConfig,
+  OPTIMIZER_STATUS,
+} from "./intervention_optimizer.js";
 
 export function detectModelFallback(rawText) {
   const text = String(rawText || "");
@@ -659,6 +665,58 @@ CRITICAL: Any plan with riskLevel=high MUST include a fully-populated premortem 
   const planCount = Array.isArray(analysis.plans) ? analysis.plans.length : 0;
   await appendProgress(config, `[PROMETHEUS] Analysis complete — ${planCount} work items | health=${analysis.projectHealth}`);
   chatLog(stateDir, prometheusName, `Analysis ready: ${planCount} plans | health=${analysis.projectHealth}`);
+
+  // ── Budget-aware intervention optimizer (non-blocking) ────────────────────
+  // Converts prometheus plans to Interventions and runs the optimizer.
+  // Failures here NEVER propagate to the caller — orchestration must continue.
+  if (config?.interventionOptimizer?.enabled !== false && Array.isArray(analysis.plans) && analysis.plans.length > 0) {
+    try {
+      const interventions = buildInterventionsFromPlan(analysis.plans, config);
+      const budget = buildBudgetFromConfig(analysis.requestBudget, config);
+      const optimizerResult = runInterventionOptimizer(interventions, budget);
+
+      // Persist selection rationale (non-blocking)
+      await appendInterventionOptimizerEntry(config, {
+        ...optimizerResult,
+        correlationId: `prometheus-${Date.now()}`,
+        prometheusAnalyzedAt: analysis.analyzedAt,
+      }).catch((err) => {
+        // Persist failure is non-fatal; log it for observability
+        appendProgress(config, `[PROMETHEUS][WARN] Optimizer log persist failed: ${String(err?.message || err)}`).catch(() => {});
+      });
+
+      const selectedCount = Array.isArray(optimizerResult.selected) ? optimizerResult.selected.length : 0;
+      const rejectedCount = Array.isArray(optimizerResult.rejected) ? optimizerResult.rejected.length : 0;
+      await appendProgress(config,
+        `[PROMETHEUS] Intervention optimizer: status=${optimizerResult.status} selected=${selectedCount} rejected=${rejectedCount} budgetUsed=${optimizerResult.totalBudgetUsed}/${optimizerResult.totalBudgetLimit} (${optimizerResult.budgetUnit ?? "workerSpawns"})`
+      ).catch(() => {});
+
+      if (optimizerResult.status === OPTIMIZER_STATUS.BUDGET_EXCEEDED) {
+        await appendProgress(config,
+          `[PROMETHEUS][WARN] Budget pressure: ${rejectedCount} intervention(s) blocked — reasonCode=${optimizerResult.reasonCode}`
+        ).catch(() => {});
+      }
+
+      // Attach optimizer result to analysis for downstream consumers
+      analysis.interventionOptimizer = {
+        status:           optimizerResult.status,
+        reasonCode:       optimizerResult.reasonCode,
+        selectedCount,
+        rejectedCount,
+        totalBudgetUsed:  optimizerResult.totalBudgetUsed,
+        totalBudgetLimit: optimizerResult.totalBudgetLimit,
+        budgetUnit:       optimizerResult.budgetUnit,
+      };
+    } catch (err) {
+      // Optimizer error must never fail the analysis pipeline
+      analysis.interventionOptimizer = {
+        status:       "error",
+        reasonCode:   "OPTIMIZER_INTERNAL_ERROR",
+        errorMessage: String(err?.message || err),
+      };
+      await appendProgress(config, `[PROMETHEUS][WARN] Intervention optimizer error (non-fatal): ${String(err?.message || err)}`).catch(() => {});
+    }
+  }
 
   return analysis;
 }

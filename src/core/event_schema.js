@@ -64,6 +64,7 @@ export const EVENTS = Object.freeze({
   PLANNING_PLAN_REJECTED:            "box.v1.planning.planRejected",
   PLANNING_TASK_QUEUED:              "box.v1.planning.taskQueued",
   PLANNING_TASK_DISPATCHED:          "box.v1.planning.taskDispatched",
+  PLANNING_INTERVENTION_OPTIMIZED:  "box.v1.planning.interventionOptimized",
 
   // Verification domain — Athena postmortem / gate decisions
   VERIFICATION_GATE_PASSED:          "box.v1.verification.gatePassed",

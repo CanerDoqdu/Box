@@ -122,7 +122,35 @@
       "src/core/policy_engine.js"
     ],
     "knowledgeMemoryEnabled": true,
-    "experimentEngineEnabled": true
+    "experimentEngineEnabled": true,
+    "experimentEnforcement": "soft",
+    "scheduler": {
+      "maxTotalActiveExperiments": 3,
+      "highImpactScoreThreshold": 0.7,
+      "maxActiveExperimentsPerTier": {
+        "critical": 1,
+        "high": 1,
+        "medium": 2,
+        "low": 3
+      },
+      "baselineMetricsPath": "state/hypothesis_baselines.json",
+      "rationaleOutputPath": "state/scheduler_rationale.json"
+    }
+  },
+  "canary": {
+    "enabled": true,
+    "defaultRatio": 0.2,
+    "minCyclesToObserve": 2,
+    "promotion": {
+      "minTaskSuccessRate": 0.8,
+      "maxErrorRate": 0.1
+    },
+    "rollback": {
+      "triggerErrorRate": 0.25,
+      "triggerTaskSuccessRateLow": 0.5
+    },
+    "auditLogPath": "state/canary_audit.jsonl",
+    "ledgerPath": "state/canary_ledger.json"
   },
   "systemGuardian": {
     "enabled": true,
@@ -281,6 +309,20 @@
         "promptFile": ".github/prompts/backend-stability.prompt.md"
       }
     }
+  },
+  "interventionOptimizer": {
+    "enabled": true,
+    "sparseDataThreshold": 3,
+    "defaultSuccessProbability": 0.8,
+    "defaultImpact": 0.7,
+    "defaultRiskCost": 0.3,
+    "defaultSampleCount": 3,
+    "budgetUnit": "workerSpawns"
+  },
+  "athenaCalibration": {
+    "fixturesDir": "tests/fixtures/calibration",
+    "maxDeviationScore": 0.25,
+    "stateFile": "state/athena_calibration_run.json"
   },
   "selfDev": {
     "enabled": true,

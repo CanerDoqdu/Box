@@ -29,6 +29,236 @@ import {
   MIGRATION_REASON
 } from "./schema_registry.js";
 
+// ── Rubric calibration ───────────────────────────────────────────────────────
+
+/**
+ * Taxonomy of rationale classes used in Athena plan review and calibration.
+ *
+ * Positive classes signal plan quality indicators.
+ * Negative classes signal plan deficiency indicators.
+ *
+ * These values are used in calibration fixtures (expectedRationaleClasses) and in
+ * the heuristic scoring function (scoreCalibrationPlan). New values must be added
+ * here before being referenced in fixtures or tests.
+ *
+ * @enum {string}
+ */
+export const RATIONALE_CLASS = Object.freeze({
+  // ── Positive (plan quality indicators) ────────────────────────────────────
+  /** Goal expressed in measurable, observable terms */
+  MEASURABLE_GOAL:          "MEASURABLE_GOAL",
+  /** Success criterion is explicit and unambiguous */
+  CLEAR_SUCCESS_CRITERION:  "CLEAR_SUCCESS_CRITERION",
+  /** Verification uses a concrete command, test, or check */
+  CONCRETE_VERIFICATION:    "CONCRETE_VERIFICATION",
+  /** Files, modules, or boundaries are explicitly named */
+  SCOPE_DEFINED:            "SCOPE_DEFINED",
+  /** Wave/dependency ordering is correct and consistent */
+  DEPENDENCY_CORRECT:       "DEPENDENCY_CORRECT",
+  // ── Negative (plan deficiency indicators) ─────────────────────────────────
+  /** Goal uses vague language (e.g. "improve", "refactor" without specifics) */
+  VAGUE_GOAL:               "VAGUE_GOAL",
+  /** No verification command, test, or check is provided */
+  NO_VERIFICATION:          "NO_VERIFICATION",
+  /** No files, modules, or boundaries are specified */
+  MISSING_SCOPE:            "MISSING_SCOPE",
+  /** Required fields are absent or incomplete */
+  SPEC_INCOMPLETE:          "SPEC_INCOMPLETE",
+  /** Wave ordering creates circular or contradictory dependencies */
+  CIRCULAR_DEPENDENCY:      "CIRCULAR_DEPENDENCY"
+});
+
+/** Set of all valid RATIONALE_CLASS values for O(1) lookup. */
+export const VALID_RATIONALE_CLASSES = new Set(Object.values(RATIONALE_CLASS));
+
+/**
+ * Score categories used in calibration deviation calculation.
+ * Maps a numeric heuristic score [0–10] to a verdict category.
+ *
+ * Formula: score ≥ 7 → "approved" | score ≤ 3 → "rejected" | else → "ambiguous"
+ * Range: [0.0, 1.0], unit: fraction (0.0 = no drift, 1.0 = complete drift)
+ *
+ * @enum {string}
+ */
+export const CALIBRATION_VERDICT = Object.freeze({
+  APPROVED:  "approved",
+  AMBIGUOUS: "ambiguous",
+  REJECTED:  "rejected"
+});
+
+/**
+ * Derive the verdict category from a numeric heuristic score.
+ * Score thresholds: ≥7 → approved, ≤3 → rejected, 4–6 → ambiguous.
+ *
+ * @param {number} score - integer 0–10
+ * @returns {string} - a CALIBRATION_VERDICT value
+ */
+export function verdictFromScore(score) {
+  if (score >= 7) return CALIBRATION_VERDICT.APPROVED;
+  if (score <= 3) return CALIBRATION_VERDICT.REJECTED;
+  return CALIBRATION_VERDICT.AMBIGUOUS;
+}
+
+/** Words in a task description that signal vague/non-measurable goals. */
+const VAGUE_TASK_PATTERNS = [
+  /\bimprove\b/i,
+  /\brefactor\b(?!\s+\w+\s+to\b)/i,
+  /\bclean\s+up\b/i,
+  /\benhance\b/i,
+  /\boptimize\b(?!\s+[\w.]+\s+from\b)/i,
+  /\bfix\s+(the\s+)?codebase\b/i
+];
+
+/**
+ * Apply heuristic scoring to a single calibration fixture.
+ *
+ * Scoring rubric (deterministic, no AI):
+ *   +2  task field is present, non-empty, and contains no vague patterns
+ *   +2  verification field is present, non-empty, and is a concrete command
+ *   +2  files array is non-empty (scope defined)
+ *   +2  context field describes measurable success criterion (≥20 chars with criterion words)
+ *   +1  priority and wave are both defined integers
+ *   +1  task mentions a specific file path or function name
+ *
+ * Total: 0–10. Category: ≥7 → approved, ≤3 → rejected, 4–6 → ambiguous.
+ *
+ * Returns the assigned rationale classes alongside the numeric score.
+ *
+ * @param {object} fixture - parsed calibration fixture (schemaVersion 1)
+ * @returns {{ score: number, scoreCategory: string, rationaleClasses: string[] }}
+ */
+export function scoreCalibrationPlan(fixture) {
+  if (!fixture || typeof fixture !== "object") {
+    return { score: 0, scoreCategory: CALIBRATION_VERDICT.REJECTED, rationaleClasses: [RATIONALE_CLASS.SPEC_INCOMPLETE] };
+  }
+  const plan = fixture.plan || {};
+  const classes = [];
+  let score = 0;
+
+  // ── Task quality ──────────────────────────────────────────────────────────
+  const task = typeof plan.task === "string" ? plan.task.trim() : "";
+  if (task.length > 0) {
+    const isVague = VAGUE_TASK_PATTERNS.some(p => p.test(task)) && task.length < 80;
+    if (isVague) {
+      classes.push(RATIONALE_CLASS.VAGUE_GOAL);
+    } else {
+      classes.push(RATIONALE_CLASS.MEASURABLE_GOAL);
+      score += 2;
+    }
+  } else {
+    classes.push(RATIONALE_CLASS.VAGUE_GOAL);
+    classes.push(RATIONALE_CLASS.SPEC_INCOMPLETE);
+  }
+
+  // ── Verification ─────────────────────────────────────────────────────────
+  const verification = typeof plan.verification === "string" ? plan.verification.trim() : "";
+  if (verification.length > 0) {
+    classes.push(RATIONALE_CLASS.CONCRETE_VERIFICATION);
+    score += 2;
+  } else {
+    classes.push(RATIONALE_CLASS.NO_VERIFICATION);
+  }
+
+  // ── Scope (files) ────────────────────────────────────────────────────────
+  const files = Array.isArray(plan.files) ? plan.files.filter(f => typeof f === "string" && f.trim().length > 0) : [];
+  if (files.length > 0) {
+    classes.push(RATIONALE_CLASS.SCOPE_DEFINED);
+    score += 2;
+  } else {
+    classes.push(RATIONALE_CLASS.MISSING_SCOPE);
+  }
+
+  // ── Context / success criterion ───────────────────────────────────────────
+  const context = typeof plan.context === "string" ? plan.context.trim() : "";
+  const CRITERION_WORDS = /\b(success\s+crit|criterion|criteria|pass|should|must|expect|measur|result|output|retryCount|field|return)\b/i;
+  if (context.length >= 20 && CRITERION_WORDS.test(context)) {
+    classes.push(RATIONALE_CLASS.CLEAR_SUCCESS_CRITERION);
+    score += 2;
+  } else if (context.length > 0) {
+    // Partial context present but not a clear criterion — no SPEC_INCOMPLETE unless task also vague
+    score += 0;
+  } else if (!classes.includes(RATIONALE_CLASS.SPEC_INCOMPLETE)) {
+    classes.push(RATIONALE_CLASS.SPEC_INCOMPLETE);
+  }
+
+  // ── Priority + wave ───────────────────────────────────────────────────────
+  if (Number.isInteger(plan.priority) && Number.isInteger(plan.wave)) {
+    classes.push(RATIONALE_CLASS.DEPENDENCY_CORRECT);
+    score += 1;
+  }
+
+  // ── Specific file path or function reference in task ──────────────────────
+  if (/\b(src\/|tests\/|\.js\b|\.ts\b|\(\)|function\s|class\s)/.test(task)) {
+    score += 1;
+  }
+
+  return {
+    score: Math.min(10, Math.max(0, score)),
+    scoreCategory: verdictFromScore(score),
+    rationaleClasses: classes
+  };
+}
+
+/**
+ * Compute the deviation score across a set of calibration fixture results.
+ *
+ * Formula:
+ *   deviationScore = number_of_mismatches / total_fixtures
+ *
+ * Range: [0.0, 1.0]
+ * Unit:  fraction (0.0 = no drift, 1.0 = every fixture produced wrong verdict)
+ *
+ * A mismatch is when the actualCategory (derived from heuristic score) does not
+ * equal fixture.expectedVerdict.
+ *
+ * @param {{ fixture: object, actualCategory: string }[]} results
+ * @returns {{ deviationScore: number, total: number, mismatches: number, details: object[] }}
+ */
+export function computeCalibrationDeviation(results) {
+  if (!Array.isArray(results) || results.length === 0) {
+    return { deviationScore: 0.0, total: 0, mismatches: 0, details: [] };
+  }
+  const details = results.map(r => {
+    const expected = r.fixture?.expectedVerdict ?? "unknown";
+    const actual = r.actualCategory ?? "unknown";
+    return {
+      fixtureId: r.fixture?.fixtureId ?? "unknown",
+      expected,
+      actual,
+      match: expected === actual
+    };
+  });
+  const mismatches = details.filter(d => !d.match).length;
+  const deviationScore = mismatches / results.length;
+  return {
+    deviationScore: Math.round(deviationScore * 10000) / 10000,
+    total: results.length,
+    mismatches,
+    details
+  };
+}
+
+/**
+ * Run all fixtures through the heuristic scorer and compute deviation.
+ * Pure function — no I/O, fully offline.
+ *
+ * @param {object[]} fixtures - array of parsed calibration fixture objects
+ * @returns {{ deviationScore: number, total: number, mismatches: number, details: object[], results: object[] }}
+ */
+export function runCalibration(fixtures) {
+  if (!Array.isArray(fixtures) || fixtures.length === 0) {
+    return { deviationScore: 0.0, total: 0, mismatches: 0, details: [], results: [] };
+  }
+  const results = fixtures.map(fixture => {
+    const scored = scoreCalibrationPlan(fixture);
+    return { fixture, ...scored };
+  });
+  const deviation = computeCalibrationDeviation(
+    results.map(r => ({ fixture: r.fixture, actualCategory: r.scoreCategory }))
+  );
+  return { ...deviation, results };
+}
+
 // ── Canonical postmortem schema ──────────────────────────────────────────────
 
 /**

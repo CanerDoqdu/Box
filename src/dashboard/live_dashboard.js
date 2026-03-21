@@ -6,7 +6,7 @@ import { execSync, spawn } from "node:child_process";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
-import { readPipelineProgress } from "../core/pipeline_progress.js";
+import { readPipelineProgress, SYSTEM_STATUS_REASON_CODE } from "../core/pipeline_progress.js";
 import { parseTypedEvent } from "../core/event_schema.js";
 import { readCycleAnalytics } from "../core/cycle_analytics.js";
 
@@ -98,6 +98,156 @@ export function isTypedEventForDomain(raw, domain) {
   if (!result.ok) return false;
   if (domain !== undefined && result.event.domain !== domain) return false;
   return true;
+}
+
+// ── Dashboard payload size contract ──────────────────────────────────────────
+
+/**
+ * Maximum allowed byte size for a single dashboard poll payload.
+ * Criterion 5: payload MUST be < 50 KB per poll cycle.
+ * If the serialized payload exceeds this limit the response includes a
+ * payloadTruncated=true flag and large leaf arrays are trimmed.
+ */
+export const DASHBOARD_PAYLOAD_MAX_BYTES = 51200; // 50 KB
+
+// ── System status derivation ──────────────────────────────────────────────────
+
+/**
+ * Derive system status from authoritative event-driven state sources.
+ *
+ * Canonical event stream:
+ *   Module:      src/core/event_schema.js
+ *   Key events:  box.v1.orchestration.stageEntered  — written alongside updatePipelineProgress()
+ *                box.v1.orchestration.healthDegraded — written by writeOrchestratorHealth()
+ *                box.v1.orchestration.healthRecovered
+ *   State files: state/pipeline_progress.json  (authoritative stage source)
+ *                state/orchestrator_health.json (authoritative health source)
+ *
+ * Decision (Criterion 2 resolved): heuristic worker-session scanning is
+ * LABELED FALLBACK-ONLY and only used when the event-driven pipeline state
+ * is absent or stale (> 10 minutes old).
+ *
+ * Returns shape:
+ *   {
+ *     systemStatus:     one of SYSTEM_STATUS_ENUM
+ *     systemStatusText: human-readable label
+ *     statusSource:     "event-driven" | "fallback-heuristic"
+ *     statusFreshnessAt: ISO timestamp from the authoritative source, or null
+ *     degradedReason:   SYSTEM_STATUS_REASON_CODE value | null (only when degraded)
+ *   }
+ *
+ * @param {object} pipelineProgress  — content of pipeline_progress.json (or default)
+ * @param {object} orchestratorHealth — content of orchestrator_health.json (or default)
+ * @param {{ running: boolean, pid: number }} daemonStatus
+ * @param {object} workerSessions    — content of worker_sessions.json (or {})
+ * @param {object|null} completedEntry — matching entry from completed_projects.json, or null
+ * @returns {{ systemStatus: string, systemStatusText: string, statusSource: string, statusFreshnessAt: string|null, degradedReason: string|null }}
+ */
+export function deriveSystemStatus(pipelineProgress, orchestratorHealth, daemonStatus, workerSessions, completedEntry) {
+  const orchStatus = String(orchestratorHealth?.orchestratorStatus || "").toLowerCase();
+  const orchReason = orchestratorHealth?.reason || null;
+  const orchRecordedAt = orchestratorHealth?.recordedAt || null;
+  const pipelineStage = String(pipelineProgress?.stage || "idle");
+  const pipelineFreshnessAt = pipelineProgress?.updatedAt || null;
+
+  // ── Event-driven path: orchestratorHealth is the highest-priority source ──
+  if (orchStatus === "degraded") {
+    return {
+      systemStatus: "degraded",
+      systemStatusText: `System Degraded — ${orchReason || "see health file"}`,
+      statusSource: "event-driven",
+      statusFreshnessAt: orchRecordedAt || pipelineFreshnessAt,
+      degradedReason: orchReason || SYSTEM_STATUS_REASON_CODE.HEALTH_FILE_DEGRADED,
+    };
+  }
+
+  // ── Event-driven path: completion record ──────────────────────────────────
+  if (!daemonStatus?.running && completedEntry) {
+    return {
+      systemStatus: "completed",
+      systemStatusText: "Project Completed",
+      statusSource: "event-driven",
+      statusFreshnessAt: completedEntry.completedAt || pipelineFreshnessAt,
+      degradedReason: null,
+    };
+  }
+
+  // ── Event-driven path: active pipeline stages ─────────────────────────────
+  // pipeline_progress.stage is authoritative when it is fresh (< 10 min old).
+  const PIPELINE_STALE_MS = 10 * 60 * 1000;
+  const ACTIVE_STAGES = new Set([
+    "jesus_awakening", "jesus_reading", "jesus_thinking", "jesus_decided",
+    "prometheus_starting", "prometheus_reading_repo", "prometheus_analyzing",
+    "prometheus_audit", "prometheus_done",
+    "athena_reviewing", "athena_approved",
+    "workers_dispatching", "workers_running", "workers_finishing",
+  ]);
+
+  if (ACTIVE_STAGES.has(pipelineStage) && pipelineFreshnessAt) {
+    const staleness = Date.now() - new Date(pipelineFreshnessAt).getTime();
+    if (staleness < PIPELINE_STALE_MS) {
+      return {
+        systemStatus: "working",
+        systemStatusText: "Workers Active",
+        statusSource: "event-driven",
+        statusFreshnessAt: pipelineFreshnessAt,
+        degradedReason: null,
+      };
+    }
+    // Pipeline state is stale — fall through to heuristics
+  }
+
+  // ── Event-driven path: idle / cycle_complete + daemon online ─────────────
+  if (pipelineStage === "idle" || pipelineStage === "cycle_complete") {
+    if (!daemonStatus?.running) {
+      return {
+        systemStatus: "offline",
+        systemStatusText: "System Offline",
+        statusSource: "event-driven",
+        statusFreshnessAt: pipelineFreshnessAt,
+        degradedReason: SYSTEM_STATUS_REASON_CODE.DAEMON_OFFLINE,
+      };
+    }
+    return {
+      systemStatus: "idle",
+      systemStatusText: completedEntry ? "System Idle (last project completed)" : "System Idle",
+      statusSource: "event-driven",
+      statusFreshnessAt: pipelineFreshnessAt,
+      degradedReason: null,
+    };
+  }
+
+  // ── [FALLBACK-ONLY] — pipeline state absent/stale; heuristic scan ─────────
+  // Reason: pipeline_progress.json is either missing or was not updated in the
+  // last 10 minutes.  This path MUST NOT be used for authoritative decisions.
+  if (!daemonStatus?.running) {
+    return {
+      systemStatus: "offline",
+      systemStatusText: "System Offline",
+      statusSource: "fallback-heuristic",
+      statusFreshnessAt: pipelineFreshnessAt,
+      degradedReason: SYSTEM_STATUS_REASON_CODE.DAEMON_OFFLINE,
+    };
+  }
+
+  const hasWorkingWorkers = Object.values(workerSessions || {}).some(s => s?.status === "working");
+  if (hasWorkingWorkers) {
+    return {
+      systemStatus: "working",
+      systemStatusText: "Workers Active",
+      statusSource: "fallback-heuristic",
+      statusFreshnessAt: pipelineFreshnessAt,
+      degradedReason: SYSTEM_STATUS_REASON_CODE.FALLBACK_HEURISTIC,
+    };
+  }
+
+  return {
+    systemStatus: "idle",
+    systemStatusText: completedEntry ? "System Idle (last project completed)" : "System Idle",
+    statusSource: "fallback-heuristic",
+    statusFreshnessAt: pipelineFreshnessAt,
+    degradedReason: SYSTEM_STATUS_REASON_CODE.FALLBACK_HEURISTIC,
+  };
 }
 
 // ── Decision Quality Trend ───────────────────────────────────────────────────
@@ -1203,27 +1353,14 @@ async function collectDashboardData() {
     ? completedProjects.find(e => e.repo === TARGET_REPO)
     : null;
 
-  // 5-state system status: offline / completed / degraded / idle / working
-  // "degraded" fires when orchestratorStatus=degraded in orchestrator_health.json (e.g. SLO breach).
-  const hasWorkingWorkers = Object.values(workerSessions || {}).some(s => s?.status === "working");
-  const isOrchestratorDegraded = String(orchestratorHealth?.orchestratorStatus || "").toLowerCase() === "degraded";
-  let systemStatus, systemStatusText;
-  if (!daemonStatus.running && completedEntry) {
-    systemStatus = "completed";
-    systemStatusText = "Project Completed";
-  } else if (!daemonStatus.running) {
-    systemStatus = "offline";
-    systemStatusText = "System Offline";
-  } else if (isOrchestratorDegraded) {
-    systemStatus = "degraded";
-    systemStatusText = `System Degraded — ${orchestratorHealth?.reason || "see health file"}`;
-  } else if (hasWorkingWorkers) {
-    systemStatus = "working";
-    systemStatusText = "Workers Active";
-  } else {
-    systemStatus = "idle";
-    systemStatusText = completedEntry ? "System Idle (last project completed)" : "System Idle";
-  }
+  // Derive system status from canonical event-driven sources (pipeline_progress.json +
+  // orchestrator_health.json).  Heuristic fallback is used only when those are absent
+  // or stale — see deriveSystemStatus() for full decision tree.
+  const statusResult = deriveSystemStatus(
+    pipelineProgress, orchestratorHealth, daemonStatus, workerSessions, completedEntry
+  );
+  const systemStatus = statusResult.systemStatus;
+  const systemStatusText = statusResult.systemStatusText;
 
   const decisionQualityTrend = await getDecisionQualityTrend(STATE_DIR);
 
@@ -1235,6 +1372,12 @@ async function collectDashboardData() {
       projectLabel: deriveProjectLabel(TARGET_REPO, ""),
       systemStatus,
       systemStatusText,
+      /** Source freshness timestamp from the authoritative event-driven state file. */
+      statusFreshnessAt: statusResult.statusFreshnessAt,
+      /** "event-driven" when status came from pipeline_progress/orchestrator_health; "fallback-heuristic" otherwise. */
+      statusSource: statusResult.statusSource,
+      /** Reason code when systemStatus === "degraded"; null otherwise. */
+      degradedReason: statusResult.degradedReason,
       daemonPid: daemonStatus.pid,
       roleRegistry: {
         ceo: String(boxConfig?.roleRegistry?.ceoSupervisor?.name || "Jesus"),
@@ -4085,8 +4228,29 @@ async function serve(req, res) {
 
   if (url.pathname === "/api/state") {
     const data = await collectDashboardData();
+    // Criterion 5: enforce < 50 KB payload size per poll cycle.
+    // If the serialised payload exceeds DASHBOARD_PAYLOAD_MAX_BYTES, trim large leaf
+    // arrays (logs, premiumUsageByWorker entries, suggestions) and set payloadTruncated.
+    let body = JSON.stringify(data);
+    if (Buffer.byteLength(body, "utf8") > DASHBOARD_PAYLOAD_MAX_BYTES) {
+      // Trim the largest arrays in-place and re-serialise.
+      if (Array.isArray(data.logs)) {
+        data.logs = data.logs.slice(-20);
+      }
+      if (data.premiumUsageByWorker?.byWorker) {
+        for (const w of Object.keys(data.premiumUsageByWorker.byWorker)) {
+          const entry = data.premiumUsageByWorker.byWorker[w];
+          if (Array.isArray(entry.entries)) entry.entries = entry.entries.slice(-3);
+        }
+      }
+      if (Array.isArray(data.suggestions?.list)) {
+        data.suggestions.list = data.suggestions.list.slice(0, 10);
+      }
+      data.payloadTruncated = true;
+      body = JSON.stringify(data);
+    }
     res.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-    res.end(JSON.stringify(data));
+    res.end(body);
     return;
   }
 

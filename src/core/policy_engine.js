@@ -1,4 +1,5 @@
 import { readJson } from "./fs_utils.js";
+import { runShadowEvaluation } from "./shadow_policy_evaluator.js";
 
 export async function loadPolicy(config) {
   return readJson(config.paths.policyFile, {
@@ -141,4 +142,20 @@ export function getRolePathViolations(policy, roleName, filePaths) {
     outsideAllowed,
     hasViolation: deniedMatches.length > 0 || outsideAllowed.length > 0
   };
+}
+
+/**
+ * Gate a policy promotion through shadow evaluation.
+ *
+ * Runs runShadowEvaluation against recent cycle history before any policy change
+ * is applied to the runtime. Returns the evaluation result; callers must inspect
+ * result.blocked to decide whether to proceed.
+ *
+ * @param {object}   currentPolicy    The currently loaded policy.
+ * @param {object[]} proposedChanges  Proposed changes (see shadow_policy_evaluator.js schema).
+ * @param {object}   [options]        Forwarded to runShadowEvaluation (stateDir, threshold, owner).
+ * @returns {Promise<object>}         Shadow evaluation result (schemaVersion: 1).
+ */
+export async function evaluatePolicyPromotion(currentPolicy, proposedChanges, options = {}) {
+  return runShadowEvaluation(currentPolicy, proposedChanges, options);
 }
