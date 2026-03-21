@@ -17,7 +17,7 @@
  */
 
 import path from "node:path";
-import { appendProgress } from "./state_tracker.js";
+import { appendProgress, appendAlert, ALERT_SEVERITY } from "./state_tracker.js";
 import { readStopRequest, writeDaemonPid, clearDaemonPid, clearStopRequest, readReloadRequest, clearReloadRequest } from "./daemon_control.js";
 import { loadConfig } from "../config.js";
 import { runJesusCycle } from "./jesus_supervisor.js";
@@ -28,7 +28,6 @@ import { runSelfImprovementCycle } from "./self_improvement.js";
 import { capturePreWorkBaseline, runProjectCompletion, isProjectAlreadyCompleted } from "./project_lifecycle.js";
 import { warn } from "./logger.js";
 import { readJson, writeJson } from "./fs_utils.js";
-import { getRoleRegistry } from "./role_registry.js";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -398,16 +397,41 @@ async function runSingleCycle(config) {
   try {
     planReview = await runAthenaPlanReview(config, prometheusAnalysis);
   } catch (err) {
-    await appendProgress(config, `[CYCLE] Athena plan review failed: ${String(err?.message || err)} — proceeding anyway`);
-    planReview = { approved: true, reason: "Athena error — auto-approved" };
+    const msg = String(err?.message || err).slice(0, 200);
+    await appendProgress(config, `[CYCLE] Athena plan review threw exception: ${msg} — blocking cycle (fail-closed)`);
+    warn(`[orchestrator] Athena plan review exception: ${msg}`);
+
+    // Rollback: if runtime.athenaFailOpen is enabled, restore legacy permissive behavior.
+    if (config.runtime?.athenaFailOpen === true) {
+      planReview = { approved: true, reason: { code: "REVIEW_EXCEPTION_FAILOPEN", message: msg }, corrections: [] };
+    } else {
+      // Fail-closed: exception must block the cycle and record a deterministic blocked state.
+      const reason = { code: "REVIEW_EXCEPTION", message: msg };
+      await appendAlert(config, {
+        severity: ALERT_SEVERITY.CRITICAL,
+        source: "orchestrator",
+        title: "Athena plan review exception — cycle blocked",
+        message: `code=${reason.code} message=${reason.message}`
+      });
+      await writeJson(path.join(stateDir, "athena_plan_rejection.json"), {
+        rejectedAt: new Date().toISOString(),
+        reason,
+        corrections: [],
+        summary: `Plan review exception: ${msg}`
+      });
+      planReview = { approved: false, reason, corrections: [] };
+    }
   }
 
   if (!planReview.approved) {
-    await appendProgress(config, `[CYCLE] Athena REJECTED plan — corrections: ${(planReview.corrections || []).join("; ")}`);
+    const rejectionReason = planReview.reason || { code: "PLAN_REJECTED", message: planReview.summary || "Rejected by Athena" };
+    const correctionsList = planReview.corrections || [];
+    await appendProgress(config, `[CYCLE] Athena REJECTED plan — code=${typeof rejectionReason === "object" ? rejectionReason.code : rejectionReason} corrections: ${correctionsList.join("; ")}`);
     // Save rejection for Prometheus to read on next cycle
     await writeJson(path.join(stateDir, "athena_plan_rejection.json"), {
       rejectedAt: new Date().toISOString(),
-      corrections: planReview.corrections || [],
+      reason: rejectionReason,
+      corrections: correctionsList,
       summary: planReview.summary || ""
     });
     return;

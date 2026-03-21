@@ -2,6 +2,14 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { ensureParent, readJson, writeJson } from "./fs_utils.js";
 
+// ── Alert severity enum — deterministic constants for all alert records ───────
+export const ALERT_SEVERITY = {
+  LOW: "low",
+  MEDIUM: "medium",
+  HIGH: "high",
+  CRITICAL: "critical"
+};
+
 function getMonthKey(date = new Date()) {
   const year = date.getUTCFullYear();
   const month = String(date.getUTCMonth() + 1).padStart(2, "0");
