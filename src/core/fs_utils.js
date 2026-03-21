@@ -7,6 +7,119 @@ export async function ensureParent(filePath) {
 }
 
 /**
+ * Exhaustive reason enum for writeJsonAtomic / writeJsonAtomicSafe outcomes.
+ * - NULL_VALUE:        value is null or undefined (missing input)
+ * - NOT_SERIALIZABLE:  JSON.stringify threw — value cannot be serialized (invalid input)
+ * - TEMP_WRITE_FAILED: writing the temporary file failed (filesystem error)
+ * - RENAME_FAILED:     atomic rename from tmp → final path failed (filesystem error)
+ */
+export const WRITE_JSON_REASON = Object.freeze({
+  NULL_VALUE: "null_value",
+  NOT_SERIALIZABLE: "not_serializable",
+  TEMP_WRITE_FAILED: "temp_write_failed",
+  RENAME_FAILED: "rename_failed"
+});
+
+/**
+ * writeJsonAtomicSafe — atomic write with structured outcome contract.
+ *
+ * Algorithm:
+ *   1. Validate value (not null/undefined, JSON-serializable).
+ *   2. Write serialized content to <filePath>.tmp.
+ *   3. Rename <filePath>.tmp → <filePath> (atomic on POSIX; best-effort on Windows).
+ *   4. On any failure: clean up the .tmp file, return structured error.
+ *
+ * Returns: { ok: boolean, reason: WRITE_JSON_REASON|null, error: Error|null }
+ *   ok=true  → file written atomically, reason and error are null
+ *   ok=false → reason is one of WRITE_JSON_REASON.*, error is the raw Error
+ *
+ * Never throws. Distinguishes missing input (NULL_VALUE) from invalid input
+ * (NOT_SERIALIZABLE) from filesystem errors (TEMP_WRITE_FAILED / RENAME_FAILED).
+ */
+export async function writeJsonAtomicSafe(filePath, value) {
+  if (value === null || value === undefined) {
+    return {
+      ok: false,
+      reason: WRITE_JSON_REASON.NULL_VALUE,
+      error: new TypeError(`writeJsonAtomic: value must not be null or undefined (path=${filePath})`)
+    };
+  }
+
+  let content;
+  try {
+    content = `${JSON.stringify(value, null, 2)}\n`;
+  } catch (serErr) {
+    return { ok: false, reason: WRITE_JSON_REASON.NOT_SERIALIZABLE, error: serErr };
+  }
+
+  const tmpPath = `${filePath}.tmp`;
+  try {
+    await ensureParent(filePath);
+    await fs.writeFile(tmpPath, content, "utf8");
+  } catch (writeErr) {
+    try { await fs.rm(tmpPath, { force: true }); } catch { /* best-effort cleanup */ }
+    return { ok: false, reason: WRITE_JSON_REASON.TEMP_WRITE_FAILED, error: writeErr };
+  }
+
+  try {
+    await fs.rename(tmpPath, filePath);
+  } catch (renameErr) {
+    try { await fs.rm(tmpPath, { force: true }); } catch { /* best-effort cleanup */ }
+    return { ok: false, reason: WRITE_JSON_REASON.RENAME_FAILED, error: renameErr };
+  }
+
+  return { ok: true, reason: null, error: null };
+}
+
+/**
+ * writeJsonAtomic — atomic write that throws on failure.
+ *
+ * Uses temp-file + rename to prevent truncated JSON on crash or kill.
+ * Thrown errors carry a `reason` property from WRITE_JSON_REASON for
+ * machine-readable diagnostics.
+ *
+ * Callers that need structured outcomes without throwing: use writeJsonAtomicSafe.
+ */
+export async function writeJsonAtomic(filePath, value) {
+  const result = await writeJsonAtomicSafe(filePath, value);
+  if (!result.ok) {
+    const err = result.error || new Error(`writeJsonAtomic failed: reason=${result.reason} path=${filePath}`);
+    err.reason = result.reason;
+    throw err;
+  }
+}
+
+/**
+ * cleanupStaleTempFiles — remove leftover .tmp files from a crashed atomic write.
+ *
+ * Called at daemon/orchestrator startup to ensure no partial-write artifacts
+ * remain from a previous crash or kill. Removal is best-effort: individual
+ * file failures are silently skipped, but the overall scan continues.
+ *
+ * Returns: { ok: boolean, removed: string[], error: Error|null }
+ *   ok=true  → scan completed (even if some files could not be removed)
+ *   ok=false → directory could not be read (error is the raw Error)
+ */
+export async function cleanupStaleTempFiles(dir) {
+  try {
+    const entries = await fs.readdir(dir);
+    const removed = [];
+    for (const entry of entries) {
+      if (entry.endsWith(".tmp")) {
+        try {
+          await fs.rm(path.join(dir, entry), { force: true });
+          removed.push(entry);
+        } catch { /* already gone — skip */ }
+      }
+    }
+    return { ok: true, removed, error: null };
+  } catch (err) {
+    if (err.code === "ENOENT") return { ok: true, removed: [], error: null };
+    return { ok: false, removed: [], error: err };
+  }
+}
+
+/**
  * Exhaustive reason enum for readJson/readJsonSafe outcomes.
  * - MISSING: file does not exist (ENOENT)
  * - INVALID: file exists but JSON.parse failed, or an unexpected read error occurred
@@ -70,9 +183,14 @@ export async function readJson(filePath, fallback) {
   return result.data;
 }
 
+/**
+ * writeJson — backward-compatible convenience wrapper around writeJsonAtomic.
+ *
+ * All writes go through temp-file + atomic rename.
+ * Throws on failure (same contract as before this change).
+ */
 export async function writeJson(filePath, value) {
-  await ensureParent(filePath);
-  await fs.writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  await writeJsonAtomic(filePath, value);
 }
 
 export function spawnAsync(command, args, options) {

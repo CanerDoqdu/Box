@@ -27,7 +27,7 @@ import { runWorkerConversation } from "./worker_runner.js";
 import { runSelfImprovementCycle } from "./self_improvement.js";
 import { capturePreWorkBaseline, runProjectCompletion, isProjectAlreadyCompleted } from "./project_lifecycle.js";
 import { warn } from "./logger.js";
-import { readJson, readJsonSafe, writeJson, READ_JSON_REASON } from "./fs_utils.js";
+import { readJson, readJsonSafe, writeJson, cleanupStaleTempFiles, READ_JSON_REASON } from "./fs_utils.js";
 import { updatePipelineProgress } from "./pipeline_progress.js";
 import { loadEscalationQueue, sortEscalationQueue } from "./escalation_queue.js";
 import {
@@ -216,6 +216,17 @@ export async function runDaemon(config) {
     await clearDaemonPid(liveConfig);
     process.exit(0);
   });
+
+  // ── Checkpoint-based startup: clean up leftover .tmp files, then audit ──
+  {
+    const cleanupResult = await cleanupStaleTempFiles(stateDir);
+    if (cleanupResult.removed.length > 0) {
+      await appendProgress(liveConfig, `[STARTUP] Cleaned up ${cleanupResult.removed.length} stale temp file(s): ${cleanupResult.removed.join(", ")}`);
+    }
+    if (!cleanupResult.ok) {
+      warn(`[orchestrator] stale-temp cleanup failed (non-fatal): ${String(cleanupResult.error?.message || cleanupResult.error)}`);
+    }
+  }
 
   // ── Checkpoint-based startup: audit critical state files, then resume ──
   const { sessions, jesusDirective, prometheusAnalysis } =
@@ -507,6 +518,15 @@ async function countCompletedPlans(config, plans) {
 
 async function runSingleCycle(config) {
   const stateDir = config.paths?.stateDir || "state";
+
+  // Clean up any leftover .tmp files from a previous crash before reading state.
+  const cleanupResult = await cleanupStaleTempFiles(stateDir);
+  if (cleanupResult.removed.length > 0) {
+    await appendProgress(config, `[CYCLE] Cleaned up ${cleanupResult.removed.length} stale temp file(s): ${cleanupResult.removed.join(", ")}`);
+  }
+  if (!cleanupResult.ok) {
+    warn(`[orchestrator] stale-temp cleanup failed (non-fatal): ${String(cleanupResult.error?.message || cleanupResult.error)}`);
+  }
 
   // Audit critical state files at cycle start — writes orchestrator_health.json.
   // This ensures runOnce (used in tests and CLI) also surfaces corrupt state.

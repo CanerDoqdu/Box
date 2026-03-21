@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { execSync } from "node:child_process";
-import { readJson, writeJson } from "./fs_utils.js";
+import { readJson, writeJson, writeJsonAtomic } from "./fs_utils.js";
 
 // ── State files that must be cleared on shutdown (full reset) ────────────────
 const SHUTDOWN_CLEAR_FILES = [
@@ -73,7 +73,7 @@ export async function readStopRequest(config) {
 }
 
 export async function requestDaemonStop(config, reason = "cli-stop") {
-  await writeJson(daemonStopFile(config), {
+  await writeJsonAtomic(daemonStopFile(config), {
     requestedAt: new Date().toISOString(),
     reason
   });
@@ -88,7 +88,7 @@ export async function readReloadRequest(config) {
 }
 
 export async function requestDaemonReload(config, reason = "cli-reload") {
-  await writeJson(daemonReloadFile(config), {
+  await writeJsonAtomic(daemonReloadFile(config), {
     requestedAt: new Date().toISOString(),
     reason
   });
