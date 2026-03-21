@@ -27,7 +27,89 @@ import { runWorkerConversation } from "./worker_runner.js";
 import { runSelfImprovementCycle } from "./self_improvement.js";
 import { capturePreWorkBaseline, runProjectCompletion, isProjectAlreadyCompleted } from "./project_lifecycle.js";
 import { warn } from "./logger.js";
-import { readJson, writeJson } from "./fs_utils.js";
+import { readJson, readJsonSafe, writeJson, READ_JSON_REASON } from "./fs_utils.js";
+
+/**
+ * Orchestrator health status enum.
+ * Written to state/orchestrator_health.json whenever status changes.
+ */
+export const ORCHESTRATOR_STATUS = Object.freeze({
+  OPERATIONAL: "operational",
+  DEGRADED: "degraded"
+});
+
+/** Write orchestrator health record to state/orchestrator_health.json. */
+async function writeOrchestratorHealth(stateDir, status, reason, details = null) {
+  await writeJson(path.join(stateDir, "orchestrator_health.json"), {
+    orchestratorStatus: status,
+    reason,
+    details: details || null,
+    recordedAt: new Date().toISOString()
+  });
+}
+
+/**
+ * Audit the three critical checkpoint state files using readJsonSafe.
+ *
+ * Critical vs non-critical classification:
+ *   CRITICAL  (handled here): worker_sessions.json, jesus_directive.json, prometheus_analysis.json
+ *   NON-CRITICAL (handled by readJson with fallback + box:readError event): all other reads.
+ *
+ * A missing file (ENOENT) is expected on first run and is NOT an error.
+ * An invalid file (corrupt JSON) is always an error — sets orchestratorStatus=degraded.
+ *
+ * Returns: { sessions, jesusDirective, prometheusAnalysis, degraded: boolean }
+ */
+async function auditCriticalStateFiles(config, stateDir) {
+  const criticalReads = await Promise.all([
+    readJsonSafe(path.join(stateDir, "worker_sessions.json")),
+    readJsonSafe(path.join(stateDir, "jesus_directive.json")),
+    readJsonSafe(path.join(stateDir, "prometheus_analysis.json"))
+  ]);
+  const [sessionsResult, jesusDirectiveResult, prometheusAnalysisResult] = criticalReads;
+
+  let sessions = {};
+  let jesusDirective = null;
+  let prometheusAnalysis = null;
+  const degradedReasons = [];
+
+  for (const [label, result, defaultFallback] of [
+    ["worker_sessions.json", sessionsResult, {}],
+    ["jesus_directive.json", jesusDirectiveResult, null],
+    ["prometheus_analysis.json", prometheusAnalysisResult, null]
+  ]) {
+    if (result.ok) {
+      // Successfully parsed
+    } else if (result.reason === READ_JSON_REASON.MISSING) {
+      // Expected on first run — use fallback silently
+    } else {
+      // Invalid JSON in a critical state file — record degraded reason and emit telemetry
+      const detail = `${label}: ${result.error?.message || "parse error"}`;
+      degradedReasons.push(detail);
+      await appendProgress(config,
+        `[STARTUP] CRITICAL: corrupt state file ${label} (reason=invalid) — entering degraded mode`
+      );
+      await appendAlert(config, {
+        severity: ALERT_SEVERITY.CRITICAL,
+        source: "orchestrator",
+        title: `Corrupt critical state file: ${label}`,
+        message: `reason=invalid error=${result.error?.message || "parse error"}`
+      });
+    }
+    if (label === "worker_sessions.json") sessions = result.ok ? result.data : defaultFallback;
+    if (label === "jesus_directive.json") jesusDirective = result.ok ? result.data : defaultFallback;
+    if (label === "prometheus_analysis.json") prometheusAnalysis = result.ok ? result.data : defaultFallback;
+  }
+
+  if (degradedReasons.length > 0) {
+    await writeOrchestratorHealth(stateDir, ORCHESTRATOR_STATUS.DEGRADED, "corrupt_state_files", degradedReasons);
+    await appendProgress(config, `[STARTUP] orchestratorStatus=degraded reasons: ${degradedReasons.join("; ")}`);
+  } else {
+    await writeOrchestratorHealth(stateDir, ORCHESTRATOR_STATUS.OPERATIONAL, null);
+  }
+
+  return { sessions, jesusDirective, prometheusAnalysis, degraded: degradedReasons.length > 0 };
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -64,10 +146,9 @@ export async function runDaemon(config) {
     process.exit(0);
   });
 
-  // ── Checkpoint-based startup: resume from where we left off ──
-  const sessions = await readJson(path.join(stateDir, "worker_sessions.json"), {});
-  const jesusDirective = await readJson(path.join(stateDir, "jesus_directive.json"), null);
-  const prometheusAnalysis = await readJson(path.join(stateDir, "prometheus_analysis.json"), null);
+  // ── Checkpoint-based startup: audit critical state files, then resume ──
+  const { sessions, jesusDirective, prometheusAnalysis } =
+    await auditCriticalStateFiles(liveConfig, stateDir);
 
   // Reset zombie workers (stale > 2× timeout)
   const workerTimeoutMs = Number(liveConfig.runtime?.workerTimeoutMinutes || 30) * 60 * 1000;
@@ -355,6 +436,10 @@ async function countCompletedPlans(config, plans) {
 
 async function runSingleCycle(config) {
   const stateDir = config.paths?.stateDir || "state";
+
+  // Audit critical state files at cycle start — writes orchestrator_health.json.
+  // This ensures runOnce (used in tests and CLI) also surfaces corrupt state.
+  await auditCriticalStateFiles(config, stateDir);
 
   // Step 1: Jesus analyzes state and decides what to do (1 request)
   await appendProgress(config, "[CYCLE] ── Step 1: Jesus analyzing system state ──");

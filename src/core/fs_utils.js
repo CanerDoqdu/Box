@@ -6,13 +6,68 @@ export async function ensureParent(filePath) {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
 }
 
-export async function readJson(filePath, fallback) {
+/**
+ * Exhaustive reason enum for readJson/readJsonSafe outcomes.
+ * - MISSING: file does not exist (ENOENT)
+ * - INVALID: file exists but JSON.parse failed, or an unexpected read error occurred
+ */
+export const READ_JSON_REASON = Object.freeze({
+  MISSING: "missing",
+  INVALID: "invalid"
+});
+
+/**
+ * readJsonSafe — structured outcome contract for JSON file reads.
+ *
+ * Returns: { ok: boolean, data: any|null, reason: 'missing'|'invalid'|null, error: Error|null }
+ *   ok=true  → data contains parsed object, reason and error are null
+ *   ok=false → data is null, reason is READ_JSON_REASON.MISSING or .INVALID, error is the raw Error
+ *
+ * Never throws. Never silently swallows errors — callers receive full diagnostic information.
+ */
+export async function readJsonSafe(filePath) {
+  let raw;
   try {
-    const raw = await fs.readFile(filePath, "utf8");
-    return JSON.parse(raw);
-  } catch {
+    raw = await fs.readFile(filePath, "utf8");
+  } catch (readErr) {
+    const reason = readErr.code === "ENOENT" ? READ_JSON_REASON.MISSING : READ_JSON_REASON.INVALID;
+    return { ok: false, data: null, reason, error: readErr };
+  }
+  try {
+    const data = JSON.parse(raw);
+    return { ok: true, data, reason: null, error: null };
+  } catch (parseErr) {
+    return { ok: false, data: null, reason: READ_JSON_REASON.INVALID, error: parseErr };
+  }
+}
+
+/**
+ * readJson — backward-compatible convenience wrapper around readJsonSafe.
+ *
+ * Emits a `box:readError` event on process for every read failure, ensuring
+ * no error is silently swallowed.  The event payload is:
+ *   { filePath: string, reason: 'missing'|'invalid', error: Error, timestamp: string }
+ *
+ * For critical state files that must NOT fall back silently, use readJsonSafe
+ * directly and inspect the structured outcome.
+ *
+ * Classification:
+ *   Non-critical callers: pass a fallback value here — they get the fallback on
+ *     any failure, but the event is still emitted for telemetry.
+ *   Critical callers: call readJsonSafe and handle { ok, reason } explicitly.
+ */
+export async function readJson(filePath, fallback) {
+  const result = await readJsonSafe(filePath);
+  if (!result.ok) {
+    process.emit("box:readError", {
+      filePath,
+      reason: result.reason,
+      error: result.error,
+      timestamp: new Date().toISOString()
+    });
     return fallback;
   }
+  return result.data;
 }
 
 export async function writeJson(filePath, value) {
@@ -39,7 +94,10 @@ export function spawnAsync(command, args, options) {
       stdoutChunks.push(chunk);
       if (options.onStdout) options.onStdout(chunk);
     });
-    child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
+    child.stderr.on("data", (chunk) => {
+      stderrChunks.push(chunk);
+      if (options.onStderr) options.onStderr(chunk);
+    });
 
     let settled = false;
     const timeoutMs = options.timeoutMs ?? 45 * 60 * 1000; // 45-minute default
