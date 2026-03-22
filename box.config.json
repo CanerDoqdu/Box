@@ -360,6 +360,15 @@
     "defaultSampleCount": 3,
     "budgetUnit": "workerSpawns"
   },
+  "rollbackEngine": {
+    "enabled": true,
+    "oneCycleSlaMs": 5000,
+    "incidentLogPath": "state/rollback_incidents.jsonl",
+    "lockFilePath": "state/rollback_lock.json",
+    "baselineRefPath": "state/project_baseline.json",
+    "configFilePath": "box.config.json",
+    "policyFilePath": "policy.json"
+  },
   "athenaCalibration": {
     "fixturesDir": "tests/fixtures/calibration",
     "maxDeviationScore": 0.25,
