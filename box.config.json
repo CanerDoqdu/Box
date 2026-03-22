@@ -53,6 +53,47 @@
     "maxDescendantDepth": 3,
     "maxSplitCountPerLineage": 10,
     "semanticSimilarityThreshold": 0.92,
+    "retryStrategy": "adaptive",
+    "adaptiveRetry": {
+      "environment": {
+        "cooldownMinutes": 30,
+        "maxRetries": 3,
+        "escalateAfter": 3,
+        "escalationTarget": "daemon_queue"
+      },
+      "logic_defect": {
+        "maxReworkAttempts": 2,
+        "escalateAfter": 2,
+        "reworkQueue": "rework_queue",
+        "verificationStep": "verification_gate",
+        "escalationTarget": "daemon_queue"
+      },
+      "policy": {
+        "reassignBeforeAttempt": 2,
+        "splitAfterAttempt": 2,
+        "escalateAfter": 3,
+        "escalationTarget": "daemon_queue"
+      },
+      "verification": {
+        "maxReworkAttempts": 2,
+        "escalateAfter": 2,
+        "reworkQueue": "rework_queue",
+        "verificationStep": "verification_gate",
+        "escalationTarget": "daemon_queue"
+      },
+      "model": {
+        "cooldownMinutes": 15,
+        "maxRetries": 3,
+        "escalateAfter": 3,
+        "escalationTarget": "daemon_queue"
+      },
+      "external_api": {
+        "cooldownMinutes": 10,
+        "maxRetries": 3,
+        "escalateAfter": 3,
+        "escalationTarget": "daemon_queue"
+      }
+    },
     "contextRevisionRequiredForSameFailureRetry": true,
     "staleIssueMaxAgeHours": 24,
     "staleIssueCloseGraceHours": 2,

@@ -26,6 +26,7 @@ import { enforceModelPolicy } from "./model_policy.js";
 import { loadPolicy, getProtectedPathMatches, getRolePathViolations } from "./policy_engine.js";
 import { appendEscalation, BLOCKING_REASON_CLASS, NEXT_ACTION } from "./escalation_queue.js";
 import { classifyFailure } from "./failure_classifier.js";
+import { resolveRetryAction, persistRetryMetric } from "./retry_strategy.js";
 
 // ── Premium usage tracking ──────────────────────────────────────────────────
 
@@ -463,6 +464,30 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       }
     }
 
+    // Resolve adaptive retry decision for error path
+    let errorRetryDecision = null;
+    try {
+      const exitClassification = classifyFailure({
+        workerStatus: "error",
+        blockingReasonClass: BLOCKING_REASON_CLASS.WORKER_ERROR,
+        errorMessage: errorMsg,
+        logLines: result.timedOut ? ["Process timed out"] : [],
+        taskId: instruction.taskId || null,
+      });
+      if (exitClassification.ok) {
+        const rd = resolveRetryAction(
+          exitClassification.classification.primaryClass,
+          Number(instruction.reworkAttempt || 0),
+          config,
+          instruction.taskId || null
+        );
+        if (rd.ok) {
+          errorRetryDecision = rd.decision;
+          persistRetryMetric(config, rd.decision);
+        }
+      }
+    } catch { /* non-fatal */ }
+
     updatedHistory.push({
       from: roleName,
       content: `ERROR: ${errorMsg}`,
@@ -474,7 +499,8 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       summary: errorMsg,
       updatedHistory,
       prUrl: null,
-      failureClassification: null
+      failureClassification: null,
+      retryDecision: errorRetryDecision
     };
   }
 
@@ -638,6 +664,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
 
   // Classify failure for error/blocked/partial statuses (non-critical)
   let failureClassification = null;
+  let retryDecision = null;
   if (parsed.status === "error" || parsed.status === "blocked" || parsed.status === "partial") {
     // Derive blockingReasonClass from the escalation that was persisted (best-effort)
     let derivedRc = null;
@@ -663,6 +690,20 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     if (cfResult.ok) {
       failureClassification = cfResult.classification;
       appendFailureClassification(config, cfResult.classification).catch(() => { /* non-fatal */ });
+
+      // Resolve adaptive retry decision based on failure class (non-critical)
+      try {
+        const rd = resolveRetryAction(
+          cfResult.classification.primaryClass,
+          Number(instruction.reworkAttempt || 0),
+          config,
+          instruction.taskId || null
+        );
+        if (rd.ok) {
+          retryDecision = rd.decision;
+          persistRetryMetric(config, rd.decision);
+        }
+      } catch { /* non-fatal — retry resolution must never block worker results */ }
     }
   }
 
@@ -688,6 +729,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     responsiveMatrix: parsed.responsiveMatrix,
     verificationEvidence: parsed.verificationEvidence || null,
     fullOutput: parsed.fullOutput,
-    failureClassification
+    failureClassification,
+    retryDecision
   };
 }
