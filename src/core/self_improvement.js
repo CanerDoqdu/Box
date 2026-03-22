@@ -31,6 +31,10 @@ import {
   recordApprovalEvidence,
   GOVERNANCE_CONTRACT_VERSION
 } from "./governance_contract.js";
+import {
+  evaluateFreezeGate,
+  FREEZE_GATE_RESULT
+} from "./governance_freeze.js";
 import { isGuardrailActive } from "./guardrail_executor.js";
 import { GUARDRAIL_ACTION } from "./catastrophe_detector.js";
 
@@ -1449,6 +1453,26 @@ export async function runSelfImprovementCycle(config) {
       // Non-fatal: guardrail check failure must not block; continue with improvement
       warn(`[self-improvement] FREEZE_SELF_IMPROVEMENT guardrail check failed (non-fatal): ${String(err?.message || err)}`);
     }
+  }
+
+  // Governance freeze gate (T-040): self-improvement cycles are high-risk by default.
+  // Blocked during month-12 freeze unless a critical incident override is provided.
+  const freezeCheck = evaluateFreezeGate(config, {
+    riskLevel:       "high",
+    taskType:        "self_improvement",
+    criticalOverride: siConfig.criticalOverride || null
+  });
+  if (!freezeCheck.allowed) {
+    warn(`[self-improvement] governance freeze blocked cycle: ${freezeCheck.reason}`);
+    await appendProgress(config,
+      `[SELF-IMPROVEMENT] Skipped: governance freeze is active (result=${freezeCheck.result} reason=${freezeCheck.reason}). Provide criticalOverride to proceed.`
+    );
+    return { status: "freeze_blocked", reason: freezeCheck.reason, result: freezeCheck.result };
+  }
+  if (freezeCheck.result === FREEZE_GATE_RESULT.ALLOWED && freezeCheck.overrideApproved) {
+    await appendProgress(config,
+      `[SELF-IMPROVEMENT] Critical override granted: incidentId=${freezeCheck.overrideApproved.incidentId}`
+    );
   }
 
   await appendProgress(config, "[SELF-IMPROVEMENT] Starting post-cycle analysis...");

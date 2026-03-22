@@ -41,6 +41,7 @@ import {
 } from "./schema_registry.js";
 import { runCatastropheDetection, GUARDRAIL_ACTION } from "./catastrophe_detector.js";
 import { executeGuardrailsForDetections, isGuardrailActive } from "./guardrail_executor.js";
+import { evaluateFreezeGate, isFreezeActive } from "./governance_freeze.js";
 
 /**
  * Orchestrator health status enum.
@@ -678,6 +679,55 @@ async function runSingleCycle(config) {
       }
     } catch (err) {
       warn(`[orchestrator] PAUSE_WORKERS guardrail check failed (non-fatal): ${String(err?.message || err)}`);
+    }
+  }
+
+  // Governance freeze gate (T-040): check per-plan risk before dispatching.
+  // During month-12 freeze, high-risk plans (riskLevel=high|critical) are blocked
+  // unless a critical incident override is attached to the plan.
+  {
+    const freezeStatus = isFreezeActive(config);
+    if (freezeStatus.active) {
+      await appendProgress(config,
+        `[CYCLE] Governance freeze active (reason=${freezeStatus.reason}) — evaluating plan risk levels`
+      );
+    }
+
+    const filteredPlans = [];
+    for (const plan of plans) {
+      const gateResult = evaluateFreezeGate(config, {
+        riskLevel:       plan.riskLevel || null,
+        riskScore:       typeof plan.riskScore === "number" ? plan.riskScore : 0,
+        criticalOverride: plan.criticalOverride || null
+      });
+      if (!gateResult.allowed) {
+        await appendProgress(config,
+          `[CYCLE] FREEZE BLOCKED plan for ${plan.role}: ${gateResult.reason}`
+        );
+        warn(`[orchestrator] governance freeze blocked plan for ${plan.role}: ${gateResult.reason}`);
+        // No silent fallback: write a machine-readable blocked record
+        continue;
+      }
+      if (gateResult.overrideApproved) {
+        await appendProgress(config,
+          `[CYCLE] Critical override granted for ${plan.role}: incidentId=${gateResult.overrideApproved.incidentId}`
+        );
+      }
+      filteredPlans.push(plan);
+    }
+
+    if (filteredPlans.length < plans.length) {
+      const blockedCount = plans.length - filteredPlans.length;
+      await appendProgress(config,
+        `[CYCLE] Governance freeze blocked ${blockedCount} of ${plans.length} plan(s) — proceeding with ${filteredPlans.length} allowed plan(s)`
+      );
+      // Reassign plans to only allowed set; if none remain, exit cycle
+      plans.splice(0, plans.length, ...filteredPlans);
+      if (plans.length === 0) {
+        await appendProgress(config, "[CYCLE] All plans blocked by governance freeze — cycle complete");
+        await safeUpdatePipelineProgress(config, "cycle_complete", "All plans blocked by governance freeze");
+        return;
+      }
     }
   }
 

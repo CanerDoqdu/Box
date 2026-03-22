@@ -386,6 +386,16 @@
     "maxDeviationScore": 0.25,
     "stateFile": "state/athena_calibration_run.json"
   },
+  "governanceFreeze": {
+    "enabled": false,
+    "monthTrigger": 12,
+    "manualOverrideActive": false,
+    "highRiskThreshold": 0.7,
+    "rollbackThroughputCollapseThreshold": 0.5,
+    "weeklyMetricsPath": "state/freeze_weekly_metrics.json",
+    "yearEndReportPath": "state/year_end_report.json",
+    "nextYearSeedPath": "state/next_year_seed.json"
+  },
   "selfDev": {
     "enabled": true,
     "recoveryTag": "box/recovery-v0.1.0-pre-selfdev",

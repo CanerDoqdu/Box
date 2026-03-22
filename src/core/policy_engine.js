@@ -51,6 +51,28 @@ export {
   GOVERNANCE_STARTUP_EXIT_CODE
 } from "./governance_contract.js";
 
+// Re-export governance freeze utilities (T-040)
+export {
+  FREEZE_RISK_LEVEL,
+  FREEZE_HIGH_RISK_LEVELS,
+  FREEZE_NON_CRITICAL_LEVELS,
+  FREEZE_GATE_RESULT,
+  RISK_SCORE_THRESHOLDS,
+  SYSTEMIC_GAP_SEVERITY,
+  FREEZE_WEEKLY_METRICS_SCHEMA,
+  YEAR_END_REPORT_SCHEMA,
+  NEXT_YEAR_SEED_SCHEMA,
+  isFreezeActive,
+  classifyRiskLevel,
+  evaluateFreezeGate,
+  validateCriticalOverride,
+  computeWeekKey,
+  recordFreezeWeeklyMetrics,
+  generateYearEndReport,
+  generateNextYearSeedQuestion,
+  checkFreezeRollbackCriteria
+} from "./governance_freeze.js";
+
 function normalizePath(value) {
   return String(value || "").replace(/\\/g, "/").replace(/^\.\//, "").trim();
 }
