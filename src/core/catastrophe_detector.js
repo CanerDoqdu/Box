@@ -100,14 +100,29 @@ export const CATASTROPHE_STATUS = Object.freeze({
 
 // ── Guardrail enums ───────────────────────────────────────────────────────────
 
-/** Recommended action values for GuardrailRecommendation.action. */
+/**
+ * Recommended action values for GuardrailRecommendation.action.
+ *
+ * Each value maps to a deterministic state file and execution handler in
+ * guardrail_executor.js.  New actions added here must also be registered in
+ * ACTION_STATE_FILE in that module.
+ *
+ * T-033 additions (resolves Athena gap — "pause planning, freeze self-improvement,
+ * force checkpoint validation, escalate" all now have explicit enum values):
+ *   FREEZE_SELF_IMPROVEMENT     — write state/guardrail_freeze_self_improvement.json
+ *   FORCE_CHECKPOINT_VALIDATION — write state/guardrail_force_checkpoint.json
+ */
 export const GUARDRAIL_ACTION = Object.freeze({
-  PAUSE_WORKERS:       "pause_workers",
-  INCREASE_DELAY:      "increase_delay",
-  NOTIFY_HUMAN:        "notify_human",
-  RESET_RETRY_COUNTER: "reset_retry_counter",
-  ESCALATE:            "escalate",
-  SKIP_CYCLE:          "skip_cycle",
+  PAUSE_WORKERS:               "pause_workers",
+  INCREASE_DELAY:              "increase_delay",
+  NOTIFY_HUMAN:                "notify_human",
+  RESET_RETRY_COUNTER:         "reset_retry_counter",
+  ESCALATE:                    "escalate",
+  SKIP_CYCLE:                  "skip_cycle",
+  /** Halt the self-improvement engine until the guardrail is reverted. */
+  FREEZE_SELF_IMPROVEMENT:     "freeze_self_improvement",
+  /** Require a fresh checkpoint validation pass before the next planning cycle. */
+  FORCE_CHECKPOINT_VALIDATION: "force_checkpoint_validation",
 });
 
 /** Urgency values for GuardrailRecommendation.urgency. */
@@ -173,39 +188,51 @@ export const CATASTROPHE_DEFAULTS = Object.freeze({
 /** @type {Record<string, import('./types.js').GuardrailRecommendation[]>} */
 const SCENARIO_GUARDRAILS = Object.freeze({
   [CATASTROPHE_SCENARIO.RUNAWAY_RETRIES]: [
-    { action: GUARDRAIL_ACTION.RESET_RETRY_COUNTER, urgency: GUARDRAIL_URGENCY.IMMEDIATE,
+    { action: GUARDRAIL_ACTION.RESET_RETRY_COUNTER,     urgency: GUARDRAIL_URGENCY.IMMEDIATE,
       description: "Reset per-task retry counters to prevent infinite retry loops." },
-    { action: GUARDRAIL_ACTION.INCREASE_DELAY,      urgency: GUARDRAIL_URGENCY.IMMEDIATE,
+    { action: GUARDRAIL_ACTION.INCREASE_DELAY,          urgency: GUARDRAIL_URGENCY.IMMEDIATE,
       description: "Increase inter-retry delay to reduce thundering-herd pressure." },
+    { action: GUARDRAIL_ACTION.FREEZE_SELF_IMPROVEMENT, urgency: GUARDRAIL_URGENCY.DEFERRED,
+      description: "Freeze self-improvement engine until retry storm subsides." },
   ],
   [CATASTROPHE_SCENARIO.MASS_BLOCKED_TASKS]: [
-    { action: GUARDRAIL_ACTION.PAUSE_WORKERS,  urgency: GUARDRAIL_URGENCY.IMMEDIATE,
+    { action: GUARDRAIL_ACTION.PAUSE_WORKERS,           urgency: GUARDRAIL_URGENCY.IMMEDIATE,
       description: "Pause worker dispatch until blocking condition is resolved." },
-    { action: GUARDRAIL_ACTION.NOTIFY_HUMAN,   urgency: GUARDRAIL_URGENCY.IMMEDIATE,
+    { action: GUARDRAIL_ACTION.NOTIFY_HUMAN,            urgency: GUARDRAIL_URGENCY.IMMEDIATE,
       description: "Notify operator: majority of tasks are blocked — human triage required." },
+    { action: GUARDRAIL_ACTION.FREEZE_SELF_IMPROVEMENT, urgency: GUARDRAIL_URGENCY.DEFERRED,
+      description: "Freeze self-improvement engine while mass blocking is active." },
   ],
   [CATASTROPHE_SCENARIO.STALE_CRITICAL_STATE]: [
-    { action: GUARDRAIL_ACTION.SKIP_CYCLE,   urgency: GUARDRAIL_URGENCY.IMMEDIATE,
+    { action: GUARDRAIL_ACTION.SKIP_CYCLE,                  urgency: GUARDRAIL_URGENCY.IMMEDIATE,
       description: "Skip this cycle to avoid acting on stale planning data." },
-    { action: GUARDRAIL_ACTION.NOTIFY_HUMAN, urgency: GUARDRAIL_URGENCY.DEFERRED,
+    { action: GUARDRAIL_ACTION.FORCE_CHECKPOINT_VALIDATION, urgency: GUARDRAIL_URGENCY.IMMEDIATE,
+      description: "Force a fresh checkpoint validation pass before next planning cycle." },
+    { action: GUARDRAIL_ACTION.NOTIFY_HUMAN,                urgency: GUARDRAIL_URGENCY.DEFERRED,
       description: "Notify operator: critical state files have exceeded staleness threshold." },
   ],
   [CATASTROPHE_SCENARIO.REPEATED_AI_PARSE_FAILURES]: [
-    { action: GUARDRAIL_ACTION.INCREASE_DELAY, urgency: GUARDRAIL_URGENCY.IMMEDIATE,
+    { action: GUARDRAIL_ACTION.INCREASE_DELAY,          urgency: GUARDRAIL_URGENCY.IMMEDIATE,
       description: "Increase cycle delay to allow AI provider to recover or rate limits to clear." },
-    { action: GUARDRAIL_ACTION.ESCALATE,       urgency: GUARDRAIL_URGENCY.DEFERRED,
+    { action: GUARDRAIL_ACTION.FREEZE_SELF_IMPROVEMENT, urgency: GUARDRAIL_URGENCY.IMMEDIATE,
+      description: "Freeze self-improvement engine while AI provider is degraded." },
+    { action: GUARDRAIL_ACTION.ESCALATE,                urgency: GUARDRAIL_URGENCY.DEFERRED,
       description: "Escalate to operator: repeated AI parse failures suggest provider degradation." },
   ],
   [CATASTROPHE_SCENARIO.BUDGET_EXHAUSTION_SPIRAL]: [
-    { action: GUARDRAIL_ACTION.PAUSE_WORKERS, urgency: GUARDRAIL_URGENCY.IMMEDIATE,
+    { action: GUARDRAIL_ACTION.PAUSE_WORKERS,           urgency: GUARDRAIL_URGENCY.IMMEDIATE,
       description: "Pause all worker spawning to halt budget consumption." },
-    { action: GUARDRAIL_ACTION.NOTIFY_HUMAN,  urgency: GUARDRAIL_URGENCY.IMMEDIATE,
+    { action: GUARDRAIL_ACTION.FREEZE_SELF_IMPROVEMENT, urgency: GUARDRAIL_URGENCY.IMMEDIATE,
+      description: "Freeze self-improvement engine to stop additional budget-consuming AI calls." },
+    { action: GUARDRAIL_ACTION.NOTIFY_HUMAN,            urgency: GUARDRAIL_URGENCY.IMMEDIATE,
       description: "Notify operator: budget limit breached in consecutive cycles — manual review required." },
   ],
   [CATASTROPHE_SCENARIO.SLO_CASCADING_BREACH]: [
-    { action: GUARDRAIL_ACTION.NOTIFY_HUMAN, urgency: GUARDRAIL_URGENCY.DEFERRED,
+    { action: GUARDRAIL_ACTION.FORCE_CHECKPOINT_VALIDATION, urgency: GUARDRAIL_URGENCY.IMMEDIATE,
+      description: "Force checkpoint validation to verify system state integrity under SLO stress." },
+    { action: GUARDRAIL_ACTION.NOTIFY_HUMAN,                urgency: GUARDRAIL_URGENCY.DEFERRED,
       description: "Notify operator: SLO breaches across multiple consecutive cycles indicate systemic slowdown." },
-    { action: GUARDRAIL_ACTION.ESCALATE,     urgency: GUARDRAIL_URGENCY.DEFERRED,
+    { action: GUARDRAIL_ACTION.ESCALATE,                    urgency: GUARDRAIL_URGENCY.DEFERRED,
       description: "Escalate to leadership for capacity or architecture review." },
   ],
 });
