@@ -9,6 +9,7 @@ import dotenv from "dotenv";
 import { readPipelineProgress, SYSTEM_STATUS_REASON_CODE } from "../core/pipeline_progress.js";
 import { parseTypedEvent } from "../core/event_schema.js";
 import { readCycleAnalytics } from "../core/cycle_analytics.js";
+import { collectHypothesisScorecard } from "../core/hypothesis_scorecard.js";
 
 dotenv.config();
 
@@ -1290,7 +1291,7 @@ async function collectDashboardData() {
   // Read pipeline progress, orchestrator health, and SLO metrics in parallel.
   // orchestrator_health.json is written by writeOrchestratorHealth() on any status change.
   // slo_metrics.json is written by persistSloMetrics() after each completed cycle.
-  const [pipelineProgress, orchestratorHealth, sloMetrics] = await Promise.all([
+  const [pipelineProgress, orchestratorHealth, sloMetrics, hypothesisScorecard] = await Promise.all([
     readPipelineProgress({ paths: { stateDir: STATE_DIR } }),
     readJsonSafe(path.join(STATE_DIR, "orchestrator_health.json"), {
       orchestratorStatus: "operational",
@@ -1304,6 +1305,7 @@ async function collectDashboardData() {
       history: [],
       updatedAt: null,
     }),
+    collectHypothesisScorecard(STATE_DIR),
   ]);
 
   const [daemonStatus, prDeltaResult, gitActivity] = await Promise.all([getDaemonStatus(), getHourlyPrDeltaStats(), Promise.resolve(getGitActivity())]);
@@ -1520,6 +1522,7 @@ async function collectDashboardData() {
       lastCycle: sloMetrics?.lastCycle || null,
       sloUpdatedAt: sloMetrics?.updatedAt || null,
     },
+    hypothesisScorecard,
   };
 }
 
@@ -4324,8 +4327,26 @@ async function serve(req, res) {
     return;
   }
 
+  if (url.pathname === "/api/hypothesis-scorecard") {
+    // Hypothesis scorecard endpoint — supports filtering by phase and risk.
+    // Query params: ?phase=<value>&risk=<value> (both optional)
+    // Returns: ScorecardResult (see src/core/hypothesis_scorecard.js)
+    try {
+      const phase = url.searchParams.get("phase") || null;
+      const risk  = url.searchParams.get("risk")  || null;
+      const filters = { phase, risk };
+      const scorecard = await collectHypothesisScorecard(STATE_DIR, filters);
+      const statusCode = scorecard.ok ? 200 : (scorecard.filterErrors ? 400 : 503);
+      res.writeHead(statusCode, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify(scorecard));
+    } catch (err) {
+      res.writeHead(500, { "content-type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({ ok: false, error: String(err?.message || err) }));
+    }
+    return;
+  }
+
   if (url.pathname === "/api/cycle-analytics") {
-    // Expose the latest cycle analytics snapshot for dashboard consumers (AC5).
     // Returns lastCycle and a trimmed history (up to 10 entries) to keep response small.
     try {
       const configModule = await import("../config.js");
