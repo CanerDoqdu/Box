@@ -23,6 +23,11 @@ import {
   buildBudgetFromConfig,
   OPTIMIZER_STATUS,
 } from "./intervention_optimizer.js";
+import {
+  resolveDependencyGraph,
+  persistGraphDiagnostics,
+  GRAPH_STATUS,
+} from "./dependency_graph_resolver.js";
 
 export function detectModelFallback(rawText) {
   const text = String(rawText || "");
@@ -715,6 +720,64 @@ CRITICAL: Any plan with riskLevel=high MUST include a fully-populated premortem 
         errorMessage: String(err?.message || err),
       };
       await appendProgress(config, `[PROMETHEUS][WARN] Intervention optimizer error (non-fatal): ${String(err?.message || err)}`).catch(() => {});
+    }
+  }
+
+  // ── Dependency graph resolver (non-blocking) ─────────────────────────────
+  // Converts prometheus plans to GraphTask descriptors, resolves cross-task
+  // dependencies, detects conflicts, and assigns parallel execution waves.
+  // Failures here NEVER propagate to the caller — orchestration must continue.
+  // Risk level: HIGH — touches scheduling core. See dependency_graph_resolver.js.
+  if (Array.isArray(analysis.plans) && analysis.plans.length > 0) {
+    try {
+      const graphTasks = analysis.plans.map((plan, i) => ({
+        id: String(plan.task || `plan-${i}`),
+        dependsOn: Array.isArray(plan.dependencies) ? plan.dependencies.map(String) : [],
+        // filesInScope is not part of the Prometheus plan schema; use empty array.
+        // Downstream callers that have richer task data should call resolveDependencyGraph
+        // directly with populated filesInScope arrays.
+        filesInScope: [],
+      }));
+
+      const graphResult = resolveDependencyGraph(graphTasks);
+
+      await persistGraphDiagnostics(stateDir, graphResult, {
+        correlationId: `prometheus-${Date.now()}`,
+        prometheusAnalyzedAt: analysis.analyzedAt,
+      }).catch((err) => {
+        appendProgress(config, `[PROMETHEUS][WARN] Dependency graph diagnostics persist failed: ${String(err?.message || err)}`).catch(() => {});
+      });
+
+      await appendProgress(config,
+        `[PROMETHEUS] Dependency graph: status=${graphResult.status} waves=${graphResult.waves.length} parallel=${graphResult.parallelTasks} serialized=${graphResult.serializedTasks} conflicts=${graphResult.conflictPairs.length}`
+      ).catch(() => {});
+
+      if (graphResult.status === GRAPH_STATUS.CYCLE_DETECTED) {
+        await appendProgress(config,
+          `[PROMETHEUS][WARN] Dependency graph cycle detected — scheduler will fall back to sequential dispatch: ${graphResult.errorMessage}`
+        ).catch(() => {});
+      }
+
+      // Attach resolver result to analysis for downstream consumers
+      analysis.dependencyGraph = {
+        status:          graphResult.status,
+        reasonCode:      graphResult.reasonCode,
+        waveCount:       graphResult.waves.length,
+        parallelTasks:   graphResult.parallelTasks,
+        serializedTasks: graphResult.serializedTasks,
+        conflictCount:   graphResult.conflictPairs.length,
+        cycleCount:      graphResult.cycles.length,
+        waves:           graphResult.waves,
+        errorMessage:    graphResult.errorMessage ?? null,
+      };
+    } catch (err) {
+      // Resolver error must never fail the analysis pipeline
+      analysis.dependencyGraph = {
+        status:       GRAPH_STATUS.DEGRADED,
+        reasonCode:   "RESOLVER_INTERNAL_ERROR",
+        errorMessage: String(err?.message || err),
+      };
+      await appendProgress(config, `[PROMETHEUS][WARN] Dependency graph resolver error (non-fatal): ${String(err?.message || err)}`).catch(() => {});
     }
   }
 
