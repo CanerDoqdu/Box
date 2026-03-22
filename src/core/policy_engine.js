@@ -4,6 +4,11 @@ import {
   validateGovernanceContract,
   GovernanceContractError
 } from "./governance_contract.js";
+import {
+  assignCohort,
+  COHORT,
+  isGovernanceCanaryBreachActive
+} from "./governance_canary.js";
 
 export async function loadPolicy(config) {
   return readJson(config.paths.policyFile, {
@@ -194,4 +199,62 @@ export function getRolePathViolations(policy, roleName, filePaths) {
  */
 export async function evaluatePolicyPromotion(currentPolicy, proposedChanges, options = {}) {
   return runShadowEvaluation(currentPolicy, proposedChanges, options);
+}
+
+/**
+ * Determine whether a governance rule should be applied to a given cycle.
+ *
+ * Uses the governance canary cohort selection algorithm to deterministically
+ * assign the cycle to "canary" or "control". Canary cycles have new governance
+ * rules applied; control cycles use the existing policy baseline.
+ *
+ * If a governance canary breach is active (status=rolled_back with
+ * breachAction=halt_new_assignments), new governance rules are NOT applied
+ * to ANY cycle until the breach is cleared (AC4 — rollback behavior).
+ *
+ * @param {object} config   - full runtime config
+ * @param {string} cycleId  - opaque cycle identifier (entropy source for hash-mod)
+ * @returns {Promise<{ cohort: "canary"|"control", applyNewRules: boolean, reason: string }>}
+ */
+export async function shouldApplyGovernanceRule(config, cycleId) {
+  if (!cycleId || typeof cycleId !== "string") {
+    // AC9: missing input → explicit reason code, default to control (safe)
+    return {
+      cohort:       COHORT.CONTROL,
+      applyNewRules: false,
+      reason:       "MISSING_CYCLE_ID:defaulting_to_control"
+    };
+  }
+
+  // Check if a breach is active — if so, halt new assignments (AC4)
+  let breachStatus;
+  try {
+    breachStatus = await isGovernanceCanaryBreachActive(config);
+  } catch {
+    // Non-fatal: if the check fails, default to control (safe fallback)
+    return {
+      cohort:        COHORT.CONTROL,
+      applyNewRules: false,
+      reason:        "BREACH_CHECK_FAILED:defaulting_to_control"
+    };
+  }
+
+  if (breachStatus.breachActive) {
+    return {
+      cohort:        COHORT.CONTROL,
+      applyNewRules: false,
+      reason:        `BREACH_ACTIVE:${breachStatus.reason || "halt_new_assignments"}`
+    };
+  }
+
+  const ratio  = config?.canary?.governance?.canaryRatio
+    ?? config?.canary?.defaultRatio
+    ?? 0.2;
+  const cohort = assignCohort(cycleId, ratio);
+
+  return {
+    cohort,
+    applyNewRules: cohort === COHORT.CANARY,
+    reason:        `COHORT_ASSIGNED:${cohort}:algorithm=hash-mod:ratio=${ratio}`
+  };
 }

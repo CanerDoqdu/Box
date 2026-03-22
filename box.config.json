@@ -191,7 +191,19 @@
       "triggerTaskSuccessRateLow": 0.5
     },
     "auditLogPath": "state/canary_audit.jsonl",
-    "ledgerPath": "state/canary_ledger.json"
+    "ledgerPath": "state/canary_ledger.json",
+    "governance": {
+      "canaryRatio": 0.2,
+      "cohortSelectionAlgorithm": "hash-mod",
+      "measurementWindowCycles": 5,
+      "falseBlockRateMax": 0.02,
+      "safetyScoreMin": 0.95,
+      "falseBlockRateTrigger": 0.05,
+      "safetyScoreTriggerLow": 0.80,
+      "breachAction": "halt_new_assignments",
+      "auditLogPath": "state/governance_canary_audit.jsonl",
+      "ledgerPath": "state/governance_canary_ledger.json"
+    }
   },
   "systemGuardian": {
     "enabled": true,

@@ -980,6 +980,29 @@ async function mainLoop(config) {
         warn(`[orchestrator] self-improvement error: ${String(err?.message || err)}`);
       }
 
+      // ── Governance canary: process running policy-rule canary experiments ──
+      // Advisory — never blocks orchestration. Processes each running governance
+      // canary experiment: assign cycle to cohort, record metrics, evaluate advancement.
+      // On breach: status=rolled_back, breachAction=halt_new_assignments (AC4).
+      try {
+        const { processGovernanceCycle } = await import("./governance_canary.js");
+        const cycleId = `governance-${Date.now()}`;
+        const govResults = await processGovernanceCycle(config, cycleId, {});
+        if (govResults.length > 0) {
+          const summary = govResults.map(r => `${r.canaryId}:cohort=${r.cohort}:action=${r.action}`).join(", ");
+          await appendProgress(config, `[GOVERNANCE_CANARY] Processed ${govResults.length} experiment(s): ${summary}`);
+          const breaches = govResults.filter(r => r.action === "rollback");
+          if (breaches.length > 0) {
+            await appendProgress(config,
+              `[GOVERNANCE_CANARY] BREACH detected — ${breaches.length} experiment(s) rolled back: ${breaches.map(b => `${b.canaryId}:${b.reason}`).join(", ")}`
+            );
+          }
+        }
+      } catch (err) {
+        // Advisory — never blocks orchestration
+        warn(`[orchestrator] governance canary processing error (non-fatal): ${String(err?.message || err)}`);
+      }
+
       // Start a new Prometheus cycle to find new work
       await appendProgress(config, "[LOOP] Post-completion done — running Prometheus for next iteration");
       await runSingleCycle(config);
