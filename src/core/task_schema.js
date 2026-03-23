@@ -5,6 +5,9 @@
  */
 
 import { createHash } from "node:crypto";
+import { validateLineageEntry, LINEAGE_ERROR_CODE } from "./lineage_graph.js";
+
+export { validateLineageEntry, LINEAGE_ERROR_CODE };
 
 /**
  * @typedef {"quality"|"stability"|"production"|"security"|"general"} Domain
@@ -30,6 +33,40 @@ import { createHash } from "node:crypto";
  * @property {number}  lineageRootTaskId
  * @property {number}  splitDepth
  * @property {number}  [splitCount]
+ */
+
+/**
+ * Lineage entry schema — one node in the task fingerprint lineage graph.
+ *
+ * 'split ancestry' definition: when a task is produced via source='autonomous-split',
+ * splitAncestry holds the ordered chain of taskIds from the lineage root down to (but
+ * not including) the current task. For root tasks and non-split retries the array is empty.
+ *
+ * @typedef {object} LineageEntry
+ * @property {string}      id            — unique entry ID: <fp_prefix>-<taskId>-<attempt>
+ * @property {number}      taskId        — the QueueTask.id this entry tracks
+ * @property {string}      semanticKey   — QueueTask.semanticKey
+ * @property {string}      fingerprint   — sha1(kind|normalizedTitle) 40-char hex
+ * @property {string|null} parentId      — lineage entry ID of the direct parent; null for roots
+ * @property {number}      rootId        — taskId of the lineage root (equals taskId for roots)
+ * @property {number}      depth         — depth from lineage root (0 = root)
+ * @property {"running"|"passed"|"failed"|"blocked"|"parked"} status
+ * @property {string}      timestamp     — ISO 8601 recording timestamp
+ * @property {string|null} failureReason — populated when status is 'failed' or 'blocked'; null otherwise
+ * @property {number[]}    splitAncestry — ordered taskIds [root, ..., direct-parent]; empty for non-splits
+ */
+
+/**
+ * Failure cluster — a group of failed/blocked entries sharing the same task fingerprint.
+ * Only clusters with count >= LINEAGE_THRESHOLDS.CLUSTER_MIN_SIZE are reported.
+ *
+ * @typedef {object} FailureCluster
+ * @property {string}   fingerprint   — task fingerprint (sha1 hex) shared by all entries
+ * @property {string}   semanticKey   — representative semanticKey (from most recent entry)
+ * @property {string}   failureReason — most common failure reason across the cluster
+ * @property {number}   count         — number of failed/blocked entries
+ * @property {number[]} taskIds       — deduplicated list of taskIds in this cluster
+ * @property {string}   lastFailedAt  — ISO timestamp of the most recent failure
  */
 
 /**

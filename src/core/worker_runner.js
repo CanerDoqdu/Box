@@ -18,13 +18,14 @@ import fs from "node:fs/promises";
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
 import { spawnAsync } from "./fs_utils.js";
 import { getRoleRegistry } from "./role_registry.js";
-import { appendProgress, appendFailureClassification } from "./state_tracker.js";
+import { appendProgress, appendLineageEntry, appendFailureClassification } from "./state_tracker.js";
 import { buildAgentArgs, nameToSlug } from "./agent_loader.js";
 import { buildVerificationChecklist } from "./verification_profiles.js";
 import { parseVerificationReport, parseResponsiveMatrix, validateWorkerContract, decideRework } from "./verification_gate.js";
 import { enforceModelPolicy } from "./model_policy.js";
 import { loadPolicy, getProtectedPathMatches, getRolePathViolations } from "./policy_engine.js";
 import { appendEscalation, BLOCKING_REASON_CLASS, NEXT_ACTION } from "./escalation_queue.js";
+import { buildTaskFingerprint, buildLineageId, LINEAGE_ENTRY_STATUS } from "./lineage_graph.js";
 import { classifyFailure } from "./failure_classifier.js";
 import { resolveRetryAction, persistRetryMetric } from "./retry_strategy.js";
 
@@ -661,6 +662,46 @@ export async function runWorkerConversation(config, roleName, instruction, histo
   await appendProgress(config,
     `[WORKER:${roleName}] Completed status=${parsed.status}${parsed.prUrl ? ` PR=${parsed.prUrl}` : ""}`
   );
+
+  // ── Optional lineage graph recording (non-blocking; rollback via config.runtime.lineageGraphEnabled=false) ──
+  // Only records when instruction.taskId is provided. Safe to skip — lineage is observability,
+  // not execution state. On any failure, warn and continue.
+  if (config?.runtime?.lineageGraphEnabled !== false && instruction.taskId) {
+    try {
+      const fp = buildTaskFingerprint(instruction.taskKind || "general", instruction.task || "");
+      const attempt = Number(instruction.reworkAttempt || 0) + 1;
+      const taskId = Number(instruction.taskId);
+      const parentId = instruction.parentLineageId || null;
+      const rootId = Number(instruction.lineageRootId || taskId);
+      const depth = Number(instruction.lineageDepth || instruction.reworkAttempt || 0);
+      const splitAncestry = Array.isArray(instruction.splitAncestry) ? instruction.splitAncestry : [];
+
+      // Map worker result status to lineage entry status
+      const statusMap = { done: LINEAGE_ENTRY_STATUS.PASSED, blocked: LINEAGE_ENTRY_STATUS.BLOCKED, error: LINEAGE_ENTRY_STATUS.FAILED };
+      const entryStatus = statusMap[parsed.status] || LINEAGE_ENTRY_STATUS.FAILED;
+
+      const lineageEntry = {
+        id: buildLineageId(fp, taskId, attempt),
+        taskId,
+        semanticKey: String(instruction.semanticKey || `${instruction.taskKind || "general"}::${fp.slice(0, 16)}`),
+        fingerprint: fp,
+        parentId,
+        rootId,
+        depth,
+        status: entryStatus,
+        timestamp: new Date().toISOString(),
+        failureReason: (entryStatus === LINEAGE_ENTRY_STATUS.FAILED || entryStatus === LINEAGE_ENTRY_STATUS.BLOCKED)
+          ? truncate(parsed.summary || "unknown failure", 200)
+          : null,
+        splitAncestry
+      };
+
+      await appendLineageEntry(config, lineageEntry);
+    } catch (lineageErr) {
+      // Lineage recording failures are non-fatal — log but never block execution
+      await appendProgress(config, `[LINEAGE] recording failed (non-fatal): ${String(lineageErr?.message || lineageErr)}`).catch(() => {});
+    }
+  }
 
   // Classify failure for error/blocked/partial statuses (non-critical)
   let failureClassification = null;
