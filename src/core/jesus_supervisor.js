@@ -2,15 +2,15 @@
  * Jesus — CEO AI Supervisor
  *
  * Jesus activates ONCE at system startup.
- * He reads everything: GitHub state, worker sessions, last Moses coordination, last Trump analysis.
+ * He reads everything: GitHub state, worker sessions, last coordination, last Prometheus analysis.
  * He calls the AI agent with NO restrictions — free thinking, full analysis.
  *
  * His output:
- *   - A comprehensive directive for Moses including his full reasoning
- *   - Optional: request Trump for a full repo scan before Moses acts
+ *   - A comprehensive directive for Prometheus including his full reasoning
+ *   - Optional: request Prometheus for a fresh deep repo scan
  *   - Optional: wait if there is genuinely nothing to do
  *
- * Moses escalates critical system problems back to Jesus via state/jesus_escalation.json.
+ * Escalations come back to Jesus via state/jesus_escalation.json.
  * Jesus writes his directive to state/jesus_directive.json for dashboard visibility.
  */
 
@@ -25,6 +25,7 @@ import {
   LEADERSHIP_CONTRACT_TYPE,
   TRUST_BOUNDARY_ERROR,
 } from "./trust_boundary.js";
+import { getRecentCapacity, computeTrend } from "./capacity_scoreboard.js";
 
 async function callCopilotAgent(command, agentSlug, contextPrompt) {
   const args = buildAgentArgs({ agentSlug, prompt: contextPrompt, allowAll: true, noAskUser: true });
@@ -260,6 +261,81 @@ async function fetchGitHubState(config) {
 
 // ── Main Jesus Cycle ─────────────────────────────────────────────────────────
 
+/**
+ * Build the capacity delta report for the Jesus directive (Packet 13).
+ * Identifies top bottlenecks, projected gains, and commanded interventions.
+ *
+ * @param {object} d — parsed AI decision
+ * @param {object[]} healthFindings — from health audit
+ * @param {object} kpis — parser confidence, plan count, etc.
+ * @returns {{ topBottlenecks: Array, projectedGains: Array, commandedInterventions: Array }}
+ */
+function buildCapacityDeltaReport(d, healthFindings, kpis) {
+  const topBottlenecks = [];
+  const projectedGains = [];
+  const commandedInterventions = [];
+
+  // Extract bottlenecks from health findings
+  const criticalFindings = (healthFindings || []).filter(f => f.severity === "critical");
+  const importantFindings = (healthFindings || []).filter(f => f.severity === "important");
+
+  for (const f of criticalFindings.slice(0, 3)) {
+    topBottlenecks.push({
+      area: f.area,
+      severity: f.severity,
+      description: f.finding,
+    });
+    commandedInterventions.push({
+      action: f.remediation,
+      priority: "immediate",
+      capability: f.capabilityNeeded,
+    });
+  }
+
+  for (const f of importantFindings.slice(0, 2)) {
+    topBottlenecks.push({
+      area: f.area,
+      severity: f.severity,
+      description: f.finding,
+    });
+  }
+
+  // Add capacity KPI-based insights
+  if (kpis.parserConfidence !== "n/a" && Number(kpis.parserConfidence) < 0.5) {
+    topBottlenecks.push({
+      area: "parser-reliability",
+      severity: "important",
+      description: `Parser confidence is ${kpis.parserConfidence} — plan quality may be degraded`,
+    });
+    projectedGains.push({
+      improvement: "parser-reliability",
+      estimatedGain: "20-40% reduction in plan retry churn",
+    });
+  }
+
+  if (kpis.planCount === 0) {
+    topBottlenecks.push({
+      area: "planning-void",
+      severity: "critical",
+      description: "Prometheus produced zero plans — system cannot evolve",
+    });
+  }
+
+  // Extract priorities from Jesus decision if available
+  const priorities = Array.isArray(d?.priorities) ? d.priorities : [];
+  for (const p of priorities.slice(0, 3)) {
+    const text = typeof p === "string" ? p : p?.description || "";
+    if (text) {
+      projectedGains.push({
+        improvement: text.slice(0, 100),
+        estimatedGain: "capacity increase per Jesus priority",
+      });
+    }
+  }
+
+  return { topBottlenecks, projectedGains, commandedInterventions };
+}
+
 export async function runJesusCycle(config) {
   const stateDir = config.paths?.stateDir || "state";
   const registry = getRoleRegistry(config);
@@ -274,13 +350,13 @@ export async function runJesusCycle(config) {
   const [
     lastDirective,
     mosesCoordination,
-    trumpAnalysis,
+    prometheusAnalysis,
     githubState,
     sessions
   ] = await Promise.all([
     readJson(path.join(stateDir, "jesus_directive.json"), {}),
     readJson(path.join(stateDir, "moses_coordination.json"), {}),
-    readJson(path.join(stateDir, "trump_analysis.json"), {}),
+    readJson(path.join(stateDir, "prometheus_analysis.json"), {}),
     fetchGitHubState(config),
     readJson(path.join(stateDir, "worker_sessions.json"), {})
   ]);
@@ -301,7 +377,7 @@ export async function runJesusCycle(config) {
 
   const activeSessions = Object.keys(sessions).filter(k => sessions[k]?.status === "working").length;
   const lastCycleAt = lastDirective?.decidedAt ? new Date(lastDirective.decidedAt).toLocaleString() : "never";
-  const trumpLastRunAt = trumpAnalysis?.analyzedAt ? new Date(trumpAnalysis.analyzedAt).toLocaleString() : "never";
+  const prometheusLastRunAt = prometheusAnalysis?.analyzedAt ? new Date(prometheusAnalysis.analyzedAt).toLocaleString() : "never";
 
   // Cost guard: skip the AI call if GitHub state hasn't changed and last directive is fresh
   const now = Date.now();
@@ -317,8 +393,9 @@ export async function runJesusCycle(config) {
   // Reuse directive if: (a) state unchanged + workers busy, OR (b) directive is very fresh with pending work
   const hasPendingWork = Array.isArray(lastDirective?.workItems) && lastDirective.workItems.length > 0;
   const isFreshDirective = minutesSinceLast < 2 && hasPendingWork && lastDirective?.wakeMoses;
+  const directiveFreshnessMins = Number(config.runtime?.jesusDirectiveFreshnessMinutes) || 30;
   if (
-    (minutesSinceLast < 8 && lastDirective?.decision && lastDirective?.githubStateHash === ghFingerprint && activeSessions > 0) ||
+    (minutesSinceLast < directiveFreshnessMins && lastDirective?.decision && lastDirective?.githubStateHash === ghFingerprint && activeSessions > 0) ||
     isFreshDirective
   ) {
     await appendProgress(config, `[JESUS] State unchanged (${minutesSinceLast.toFixed(1)}m ago) — reusing last directive (AI call skipped)`);
@@ -326,8 +403,8 @@ export async function runJesusCycle(config) {
     return lastDirective;
   }
 
-  const trumpAgeHours = trumpAnalysis?.analyzedAt
-    ? (now - new Date(trumpAnalysis.analyzedAt).getTime()) / 3600000
+  const prometheusAgeHours = prometheusAnalysis?.analyzedAt
+    ? (now - new Date(prometheusAnalysis.analyzedAt).getTime()) / 3600000
     : Infinity;
 
   const workersList = Object.entries(registry?.workers || {})
@@ -335,13 +412,37 @@ export async function runJesusCycle(config) {
     .join("\n");
 
   // English system state context — persona and output format are in jesus.agent.md
+  // ── Capacity KPIs for strategic decisions ──────────────────────────────────
+  const parserConfidence = prometheusAnalysis?.parserConfidence ?? "n/a";
+  const planCount = Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans.length : 0;
+  const optimizerStatus = prometheusAnalysis?.interventionOptimizer?.status || "n/a";
+  const budgetUsed = prometheusAnalysis?.interventionOptimizer?.totalBudgetUsed ?? "n/a";
+  const budgetLimit = prometheusAnalysis?.interventionOptimizer?.totalBudgetLimit ?? "n/a";
+
+  // ── Capacity trends from scoreboard ────────────────────────────────────────
+  let capacityTrendBlock = "";
+  try {
+    const recentEntries = await getRecentCapacity(config, 10);
+    if (recentEntries.length >= 3) {
+      const confTrend = computeTrend(recentEntries, "parserConfidence");
+      const planTrend = computeTrend(recentEntries, "planCount");
+      const budgetTrend = computeTrend(recentEntries, "budgetUsed");
+      const workerTrend = computeTrend(recentEntries, "workersDone");
+      capacityTrendBlock = `\n**Capacity Trends (last ${recentEntries.length} cycles):**
+  Parser confidence trend: ${confTrend}
+  Plan count trend: ${planTrend}
+  Budget usage trend: ${budgetTrend}
+  Worker completion trend: ${workerTrend}`;
+    }
+  } catch { /* non-critical */ }
+
   const contextPrompt = `TARGET REPO: ${config.env?.targetRepo || "unknown"}
 
 ## CURRENT SYSTEM STATE
 
 **Active Worker Sessions:** ${activeSessions}
 **Last Cycle:** ${lastCycleAt}
-**Trump Last Analysis:** ${trumpLastRunAt}${trumpAgeHours < 6 ? ` (${trumpAgeHours.toFixed(1)}h ago — FRESH, only set callTrump=true if health is critical)` : ""}
+**Prometheus Last Analysis:** ${prometheusLastRunAt}${prometheusAgeHours < 6 ? ` (${prometheusAgeHours.toFixed(1)}h ago — FRESH, only set callPrometheus=true if health is critical)` : ""}
 
 **GitHub State — ${config.env?.targetRepo}:**
 Open Issues (${githubState.issues.length}):
@@ -369,19 +470,26 @@ ${githubState.recentlyMergedPrs.length > 0
   ? githubState.recentlyMergedPrs.map(p => `  #${p.number}: ${p.title} [merged ${p.mergedAt}]`).join("\n")
   : "  No recently merged PRs"}
 
-**Last Moses Coordination:**
+**Last Coordination:**
 ${mosesCoordination?.summary ? `  ${mosesCoordination.summary}` : "  No previous coordination"}
 ${mosesCoordination?.completedTasks ? `  Completed tasks: ${mosesCoordination.completedTasks}` : ""}
 
-**Trump's Last Analysis:**
-${trumpAnalysis?.projectHealth ? `  Health: ${trumpAnalysis.projectHealth}` : "  No analysis available"}
-${trumpAnalysis?.keyFindings ? `  Key findings: ${trumpAnalysis.keyFindings}` : ""}
-${trumpAnalysis?.projectClassification ? `  Project type: ${trumpAnalysis.projectClassification.type} (${trumpAnalysis.projectClassification.confidence})` : ""}
+**Prometheus's Last Analysis:**
+${prometheusAnalysis?.projectHealth ? `  Health: ${prometheusAnalysis.projectHealth}` : "  No analysis available"}
+${prometheusAnalysis?.keyFindings ? `  Key findings: ${prometheusAnalysis.keyFindings}` : ""}
+${prometheusAnalysis?.projectClassification ? `  Project type: ${prometheusAnalysis.projectClassification.type} (${prometheusAnalysis.projectClassification.confidence})` : ""}
+
+**Capacity KPIs (use for strategic decisions):**
+  Parser confidence: ${parserConfidence}
+  Plans produced: ${planCount}
+  Optimizer: status=${optimizerStatus} budget=${budgetUsed}/${budgetLimit}
+  Prometheus age: ${prometheusAgeHours < Infinity ? `${prometheusAgeHours.toFixed(1)}h` : "never"}
+${capacityTrendBlock}
 
 **Hierarchical System Health Audit (detected by YOU — issues workers/Moses may have missed):**
 ${formatHealthAuditFindings(healthFindings)}
 ${healthFindings.filter(f => f.severity === "critical").length > 0 ? "\n⚠️ CRITICAL FINDINGS ABOVE — these MUST be addressed. Workers and Moses missed them." : ""}
-${healthFindings.filter(f => f.area === "capability-gap").length > 0 ? "\n⚠️ CAPABILITY GAPS DETECTED — the system is missing abilities that caused failures. Consider requesting Trump to plan fixes." : ""}
+${healthFindings.filter(f => f.area === "capability-gap").length > 0 ? "\n⚠️ CAPABILITY GAPS DETECTED — the system is missing abilities that caused failures. Consider requesting Prometheus to plan fixes." : ""}
 
 **Available Workers:**
 ${workersList}`;
@@ -392,17 +500,17 @@ ${workersList}`;
   if (!aiResult.ok || !aiResult.parsed) {
     await appendProgress(config, `[JESUS] AI call failed — ${aiResult.error || "no JSON"}`);
     chatLog(stateDir, jesusName, `AI failed: ${aiResult.error || "no JSON"}`);
-    const needsTrump = trumpAgeHours > 6;
+    const needsPrometheus = prometheusAgeHours > 6;
     return {
       wait: false,
       wakeMoses: true,
-      callTrump: needsTrump,
-      trumpReason: needsTrump ? "AI call failed and no recent Trump analysis — must scan" : undefined,
+      callPrometheus: needsPrometheus,
+      prometheusReason: needsPrometheus ? "AI call failed and no recent Prometheus analysis — must scan" : undefined,
       decision: "tactical",
       systemHealth: "unknown",
       thinking: "",
       fullOutput: aiResult.raw || "",
-      briefForMoses: `Check GitHub issues and activate appropriate workers. Target repo: ${config.env?.targetRepo}`,
+      briefForPrometheus: `Check GitHub issues and activate appropriate workers. Target repo: ${config.env?.targetRepo}`,
       priorities: [],
       workerSuggestions: []
     };
@@ -427,17 +535,17 @@ ${workersList}`;
       });
     } catch { /* non-fatal */ }
     // Degrade to safe fallback directive; never silently pass invalid output
-    const needsTrump = trumpAgeHours > 6;
+    const needsPrometheus = prometheusAgeHours > 6;
     return {
       wait: false,
       wakeMoses: true,
-      callTrump: needsTrump,
-      trumpReason: needsTrump ? "Trust-boundary violation in supervisor output and no recent Trump analysis" : undefined,
+      callPrometheus: needsPrometheus,
+      prometheusReason: needsPrometheus ? "Trust-boundary violation in supervisor output and no recent Prometheus analysis" : undefined,
       decision: "tactical",
       systemHealth: "unknown",
       thinking: aiResult.thinking,
       fullOutput: aiResult.raw || "",
-      briefForMoses: `Check GitHub issues and activate appropriate workers. Target repo: ${config.env?.targetRepo}`,
+      briefForPrometheus: `Check GitHub issues and activate appropriate workers. Target repo: ${config.env?.targetRepo}`,
       priorities: [],
       workerSuggestions: [],
       _trustBoundaryViolation: true,
@@ -451,19 +559,25 @@ ${workersList}`;
 
   const d = aiResult.parsed;
 
-  // Safety net: force callTrump=true when no valid trump analysis exists
-  if (!d.callTrump && trumpAgeHours > 6) {
-    d.callTrump = true;
-    d.trumpReason = (d.trumpReason || "") + " [OVERRIDE: no recent Trump analysis — forced callTrump=true]";
-    await appendProgress(config, `[JESUS] callTrump overridden to true — Trump analysis is ${trumpAgeHours === Infinity ? "missing" : trumpAgeHours.toFixed(1) + "h old"}`);
+  // Safety net: force callPrometheus=true when no valid Prometheus analysis exists
+  if (!d.callPrometheus && prometheusAgeHours > 6) {
+    d.callPrometheus = true;
+    d.prometheusReason = (d.prometheusReason || "") + " [OVERRIDE: no recent Prometheus analysis — forced callPrometheus=true]";
+    await appendProgress(config, `[JESUS] callPrometheus overridden to true — Prometheus analysis is ${prometheusAgeHours === Infinity ? "missing" : prometheusAgeHours.toFixed(1) + "h old"}`);
   }
 
   chatLog(stateDir, jesusName,
-    `Decision: ${d.decision || "?"} | Health: ${d.systemHealth || "?"} | callTrump: ${d.callTrump} | wakeMoses: ${d.wakeMoses}`
+    `Decision: ${d.decision || "?"} | Health: ${d.systemHealth || "?"} | callPrometheus: ${d.callPrometheus} | wakeMoses: ${d.wakeMoses}`
   );
   await appendProgress(config,
-    `[JESUS] decision=${d.decision} health=${d.systemHealth} callTrump=${d.callTrump} wakeMoses=${d.wakeMoses}`
+    `[JESUS] decision=${d.decision} health=${d.systemHealth} callPrometheus=${d.callPrometheus} wakeMoses=${d.wakeMoses}`
   );
+
+  // ── Capacity Delta Report (Packet 13) ──────────────────────────────────
+  // Extract top bottlenecks and projected gains from Jesus's analysis.
+  const capacityDelta = buildCapacityDeltaReport(d, healthFindings, {
+    parserConfidence, planCount, optimizerStatus, budgetUsed, budgetLimit
+  });
 
   const directive = {
     ...d,
@@ -472,7 +586,8 @@ ${workersList}`;
     decidedAt: new Date().toISOString(),
     model: jesusModel,
     repo: config.env?.targetRepo,
-    githubStateHash: ghFingerprint
+    githubStateHash: ghFingerprint,
+    capacityDelta,
   };
 
   await writeJson(path.join(stateDir, "jesus_directive.json"), directive);

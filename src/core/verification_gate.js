@@ -12,6 +12,40 @@
 
 import { getVerificationProfile } from "./verification_profiles.js";
 
+// ── Post-merge verification artifact patterns (Packet 1) ───────────────────
+// Worker output must contain a git SHA and raw npm test stdout block for
+// BOX_STATUS=done to be accepted on merge-oriented tasks.
+
+/** Regex matching a 7-40 character hex git SHA in output. */
+const GIT_SHA_PATTERN = /\b[0-9a-f]{7,40}\b/i;
+
+/** Regex matching raw npm test output block (pass/fail counts). */
+const NPM_TEST_OUTPUT_PATTERN = /(?:passing|failing|tests?\s+\d|✓|✗|#\s+tests\s+\d|test result|suites?\s+\d|\d+\s+pass)/i;
+
+/** Placeholder literal that must be replaced in verification reports. */
+export const POST_MERGE_PLACEHOLDER = "POST_MERGE_TEST_OUTPUT";
+
+/**
+ * Check if worker output contains the required post-merge verification artifact.
+ * The artifact is: a git SHA + raw npm test stdout block.
+ *
+ * @param {string} output — full worker output text
+ * @returns {{ hasArtifact: boolean, hasSha: boolean, hasTestOutput: boolean, hasUnfilledPlaceholder: boolean }}
+ */
+export function checkPostMergeArtifact(output) {
+  const text = String(output || "");
+  const hasSha = GIT_SHA_PATTERN.test(text);
+  const hasTestOutput = NPM_TEST_OUTPUT_PATTERN.test(text);
+  const hasUnfilledPlaceholder = text.includes(POST_MERGE_PLACEHOLDER);
+
+  return {
+    hasArtifact: hasSha && hasTestOutput && !hasUnfilledPlaceholder,
+    hasSha,
+    hasTestOutput,
+    hasUnfilledPlaceholder,
+  };
+}
+
 /**
  * Apply config-based gate overrides to a verification profile.
  * Gates config can upgrade optional evidence fields to required.
@@ -157,8 +191,29 @@ export function validateWorkerContract(workerKind, parsedResponse, options = {})
     return { passed: true, gaps: [], evidence, reason: "role exempt from verification" };
   }
 
+  // Roles with at least one required evidence field are "done-capable lanes"
+  const hasRequiredFields = Object.values(profile.evidence).some(v => v === "required");
+
+  // ── Post-merge verification artifact gate ───────────────────────────────
+  // Done-capable lanes (roles with at least one required evidence field) must
+  // include a git SHA + raw test output when reporting done. Roles whose
+  // evidence fields are all optional or exempt are not subject to this gate.
+  const requireArtifact = options.requirePostMergeArtifact !== false && hasRequiredFields;
+  if (requireArtifact) {
+    const artifact = checkPostMergeArtifact(output);
+    evidence.postMergeArtifact = artifact;
+    if (artifact.hasUnfilledPlaceholder) {
+      gaps.push("POST_MERGE_TEST_OUTPUT placeholder is still unfilled — replace it with actual test output");
+    }
+    if (!artifact.hasSha) {
+      gaps.push("Post-merge git SHA missing — run 'git rev-parse HEAD' on merged state and include the SHA");
+    }
+    if (!artifact.hasTestOutput) {
+      gaps.push("Post-merge raw npm test output missing — run 'npm test' on merged state and paste raw stdout");
+    }
+  }
+
   // No verification report at all — gap for any role with required fields
-  const hasRequiredFields = Object.values(profile.evidence).some(v => v === "required" && v !== "prUrl");
   if (!report && hasRequiredFields) {
     gaps.push("VERIFICATION_REPORT missing — worker did not provide any verification evidence");
     return { passed: false, gaps, evidence, reason: "no verification report" };

@@ -18,18 +18,22 @@ export async function loadConfig() {
   const fileConfig = JSON.parse(raw);
 
   const env = {
-    claudeApiKey: must(process.env.CLAUDE_API_KEY, "CLAUDE_API_KEY"),
     githubToken: must(process.env.GITHUB_TOKEN, "GITHUB_TOKEN"),
     // Copilot CLI needs a fine-grained PAT (github_pat_) with Copilot permissions.
     // Classic PATs (ghp_) are NOT supported by Copilot CLI.
-    // GITHUB_FINEGRADED is the fine-grained PAT with Copilot + Plan read access.
-    copilotGithubToken: must(process.env.COPILOT_GITHUB_TOKEN || process.env.GITHUB_FINEGRADED, "COPILOT_GITHUB_TOKEN"),
+    // Support legacy/local variable names used in older .env files.
+    copilotGithubToken: must(
+      process.env.COPILOT_GITHUB_TOKEN
+      || process.env.CanerdoqduFINEGRADEDGENERALANDTRUMP
+        || process.env.GITHUB_FINEGRADED
+      || process.env.GITHUBFINEGRADEDPERSONALINTEL,
+      "COPILOT_GITHUB_TOKEN"
+    ),
     targetRepo: must(process.env.TARGET_REPO, "TARGET_REPO"),
     targetBaseBranch: process.env.TARGET_BASE_BRANCH?.trim() || "main",
     copilotCliCommand: process.env.COPILOT_CLI_COMMAND?.trim() || "copilot",
     budgetUsd: Number(process.env.BOX_BUDGET_USD || "15"),
     mode: process.env.BOX_MODE?.trim() || "local",
-    claudeModel: process.env.CLAUDE_MODEL?.trim() || null,
     copilotStrategy: process.env.COPILOT_STRATEGY?.trim() || null,
     copilotAllowOpus: process.env.COPILOT_ALLOW_OPUS?.trim() || null,
     copilotAllowedModels: process.env.COPILOT_ALLOWED_MODELS?.trim() || null,
@@ -46,9 +50,6 @@ export async function loadConfig() {
     copilotAutoCompact: process.env.BOX_COPILOT_AUTO_COMPACT?.trim() || null,
     copilotRehydrateOnFail: process.env.BOX_COPILOT_REHYDRATE_ON_FAIL?.trim() || null,
     copilotMaxRetries: process.env.BOX_COPILOT_MAX_RETRIES?.trim() || null,
-    claudeEscalationOnly: process.env.BOX_CLAUDE_ESCALATION_ONLY?.trim() || null,
-    claudeSupervisorOnly: process.env.BOX_CLAUDE_SUPERVISOR_ONLY?.trim() || null,
-    claudeEnabled: process.env.BOX_CLAUDE_ENABLED?.trim() || null,
     reviewerProvider: process.env.BOX_REVIEWER_PROVIDER?.trim() || null,
     autonomousMaxAttemptsPerTask: process.env.BOX_AUTONOMOUS_MAX_ATTEMPTS_PER_TASK?.trim() || null,
     autonomousTaskSplitOnFailure: process.env.BOX_AUTONOMOUS_TASK_SPLIT_ON_FAILURE?.trim() || null,
@@ -82,11 +83,6 @@ export async function loadConfig() {
     // Dashboard bearer token — required for POST mutation endpoints on the live dashboard.
     // Must be a long random string. If unset, mutation endpoints return 403.
     dashboardToken: process.env.BOX_DASHBOARD_TOKEN?.trim() || null
-  };
-
-  const claude = {
-    ...(fileConfig.claude ?? {}),
-    model: env.claudeModel || fileConfig?.claude?.model || "claude-sonnet-4-6"
   };
 
   const parsedAllowedModels = env.copilotAllowedModels
@@ -138,16 +134,7 @@ export async function loadConfig() {
     copilotMaxRetries: env.copilotMaxRetries
       ? Number(env.copilotMaxRetries)
       : Number(fileConfig?.runtime?.copilotMaxRetries ?? 2),
-    claudeEscalationOnly: env.claudeEscalationOnly
-      ? ["1", "true", "yes", "on"].includes(env.claudeEscalationOnly.toLowerCase())
-      : Boolean(fileConfig?.runtime?.claudeEscalationOnly ?? false),
-    claudeSupervisorOnly: env.claudeSupervisorOnly
-      ? ["1", "true", "yes", "on"].includes(env.claudeSupervisorOnly.toLowerCase())
-      : Boolean(fileConfig?.runtime?.claudeSupervisorOnly ?? false),
-    claudeEnabled: env.claudeEnabled
-      ? ["1", "true", "yes", "on"].includes(env.claudeEnabled.toLowerCase())
-      : Boolean(fileConfig?.runtime?.claudeEnabled ?? true),
-    reviewerProvider: String(env.reviewerProvider || fileConfig?.runtime?.reviewerProvider || (fileConfig?.runtime?.claudeEnabled === false ? "copilot" : "claude")).trim().toLowerCase(),
+    reviewerProvider: String(env.reviewerProvider || fileConfig?.runtime?.reviewerProvider || "copilot").trim().toLowerCase(),
     autonomousMaxAttemptsPerTask: env.autonomousMaxAttemptsPerTask
       ? Number(env.autonomousMaxAttemptsPerTask)
       : Number(fileConfig?.runtime?.autonomousMaxAttemptsPerTask ?? 3),
@@ -250,55 +237,19 @@ export async function loadConfig() {
     return map;
   })();
 
-  const copilotWithRolePolicy = (() => {
-    const enforceNoClaudeModels = runtime.claudeSupervisorOnly;
-    if (!enforceNoClaudeModels) {
-      return {
-        ...copilot,
-        preferredModelsByRole: {
-            ...derivedRoleModelMap,
-            ...(copilot.preferredModelsByRole || {})
-        }
-      };
+  const copilotWithRolePolicy = {
+    ...copilot,
+    preferredModelsByRole: {
+      ...derivedRoleModelMap,
+      ...(copilot.preferredModelsByRole || {})
     }
-
-    const nonClaudeAllowed = (copilot.allowedModels || []).filter((model) => !String(model).toLowerCase().includes("claude"));
-    const fallbackDefault = String(copilot.defaultModel || "GPT-5.3-Codex");
-    const defaultIsClaude = fallbackDefault.toLowerCase().includes("claude");
-    const safeDefaultModel = defaultIsClaude ? "GPT-5.3-Codex" : fallbackDefault;
-    const allowedModels = nonClaudeAllowed.length > 0
-      ? nonClaudeAllowed
-      : [safeDefaultModel];
-
-    return {
-      ...copilot,
-      defaultModel: safeDefaultModel,
-      allowedModels,
-      // Supervisor-only mode disables coder-side Opus escalation to keep roles strict and cost predictable.
-      allowOpusEscalation: false,
-      opusModel: safeDefaultModel,
-      preferredModelsByTaskKind: {
-        ...(copilot.preferredModelsByTaskKind || {}),
-        quality: "GPT-5.3-Codex",
-        stability: "GPT-5.3-Codex",
-        production: "GPT-5.3-Codex",
-        refactor: "GPT-5.3-Codex"
-      },
-      preferredModelsByRole: {
-        ...derivedRoleModelMap,
-        ...(copilot.preferredModelsByRole || {})
-      }
-    };
-  })();
+  };
 
   const planner = {
     ...(fileConfig.planner ?? {}),
-    useClaudeForPlanning: runtime.claudeEnabled
-      ? Boolean(fileConfig?.planner?.useClaudeForPlanning ?? true)
-      : false,
     useReviewerForPlanning: runtime.reviewerProvider === "copilot"
       ? Boolean(fileConfig?.planner?.useReviewerForPlanning ?? true)
-      : Boolean(fileConfig?.planner?.useClaudeForPlanning ?? true),
+      : Boolean(fileConfig?.planner?.useReviewerForPlanning ?? true),
     maxTasks: Number(fileConfig?.planner?.maxTasks ?? 5),
     enforceTrumpExecutionStrategy: Boolean(fileConfig?.planner?.enforceTrumpExecutionStrategy ?? true),
     defaultMaxWorkersPerWave: Number(fileConfig?.planner?.defaultMaxWorkersPerWave ?? 3),
@@ -365,7 +316,6 @@ export async function loadConfig() {
   return {
     rootDir,
     ...fileConfig,
-    claude,
     copilot: copilotWithRolePolicy,
     planner,
     selfImprovement,

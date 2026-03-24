@@ -200,6 +200,19 @@ export function getAllProfiles() {
   return { ...PROFILES };
 }
 
+export function getWorkersByLane(lane) {
+  const key = String(lane || "").toLowerCase().trim();
+  const map = {
+    quality: ["evolution-worker"],
+    implementation: ["evolution-worker"],
+    governance: ["evolution-worker"],
+    integration: ["evolution-worker"],
+    infrastructure: ["evolution-worker"],
+    observation: ["evolution-worker"],
+  };
+  return map[key] || [];
+}
+
 /**
  * Build a human-readable verification checklist for a given role.
  * Injected into worker context so the worker knows what evidence is required.

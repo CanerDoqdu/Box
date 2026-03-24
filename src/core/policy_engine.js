@@ -223,6 +223,37 @@ export async function evaluatePolicyPromotion(currentPolicy, proposedChanges, op
 }
 
 /**
+ * Apply a single composed governance decision with guardrail > freeze > canary precedence.
+ *
+ * Precedence order (highest to lowest):
+ *   1. guardrail — active hardware-level guard takes absolute priority
+ *   2. freeze    — year-end stabilization freeze blocks changes
+ *   3. canary    — active canary breach halts new governance rules
+ *
+ * All three inputs are booleans; the caller is responsible for resolving their
+ * true/false status from the respective sub-systems before calling this function.
+ *
+ * @param {{ guardrailActive?: boolean, freezeActive?: boolean, canaryBreachActive?: boolean }} inputs
+ * @returns {{ blocked: boolean, reason: string, precedenceLevel: number }}
+ */
+export function applyGovernanceDecision({
+  guardrailActive    = false,
+  freezeActive       = false,
+  canaryBreachActive = false
+} = {}) {
+  if (guardrailActive) {
+    return { blocked: true,  reason: "guardrail:active",      precedenceLevel: 1 };
+  }
+  if (freezeActive) {
+    return { blocked: true,  reason: "freeze:active",         precedenceLevel: 2 };
+  }
+  if (canaryBreachActive) {
+    return { blocked: true,  reason: "canary:breach-active",  precedenceLevel: 3 };
+  }
+  return { blocked: false, reason: "all-gates-passed", precedenceLevel: 0 };
+}
+
+/**
  * Determine whether a governance rule should be applied to a given cycle.
  *
  * Uses the governance canary cohort selection algorithm to deterministically

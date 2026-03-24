@@ -98,14 +98,89 @@ export function isOpusJustified(taskHints = {}) {
 }
 
 /**
+ * Routing reason codes for observability.
+ * @enum {string}
+ */
+export const ROUTING_REASON = Object.freeze({
+  ALLOWED:           "ALLOWED",
+  BANNED:            "BANNED",
+  OPUS_DOWNGRADED:   "OPUS_DOWNGRADED",
+  EMPTY_MODEL:       "EMPTY_MODEL",
+});
+
+/**
+ * Complexity tier taxonomy (T1/T2/T3).
+ * Maps task complexity to model selection and token budget strategy.
+ *
+ * @enum {string}
+ */
+export const COMPLEXITY_TIER = Object.freeze({
+  /** T1: routine patch — short context, quick execution. */
+  T1: "T1",
+  /** T2: medium — two-pass reasoning, moderate context. */
+  T2: "T2",
+  /** T3: architectural — deep think budget, critic mandatory. */
+  T3: "T3",
+});
+
+/**
+ * Classify a task into a complexity tier based on task hints.
+ *
+ * @param {{ estimatedLines?: number, estimatedDurationMinutes?: number, complexity?: string }} taskHints
+ * @returns {{ tier: string, reason: string, maxContinuations: number }}
+ */
+export function classifyComplexityTier(taskHints = {}) {
+  const lines = Number(taskHints.estimatedLines || 0);
+  const duration = Number(taskHints.estimatedDurationMinutes || 0);
+  const complexity = String(taskHints.complexity || "").toLowerCase();
+
+  // T3: architectural — needs deep reasoning
+  if (OPUS_ALLOWED_COMPLEXITIES.has(complexity) || lines >= 3000 || duration >= 120) {
+    return { tier: COMPLEXITY_TIER.T3, reason: `complexity=${complexity} lines=${lines} duration=${duration}`, maxContinuations: 5 };
+  }
+
+  // T2: medium — two-pass, moderate scope
+  if (lines >= 500 || duration >= 30 || complexity === "medium") {
+    return { tier: COMPLEXITY_TIER.T2, reason: `complexity=${complexity} lines=${lines} duration=${duration}`, maxContinuations: 3 };
+  }
+
+  // T1: routine — quick patch
+  return { tier: COMPLEXITY_TIER.T1, reason: `complexity=${complexity} lines=${lines} duration=${duration}`, maxContinuations: 1 };
+}
+
+/**
+ * Route model selection by task complexity and uncertainty (Packet 7).
+ * Returns the recommended model based on complexity tier classification.
+ *
+ * @param {{ estimatedLines?: number, estimatedDurationMinutes?: number, complexity?: string }} taskHints
+ * @param {{ defaultModel?: string, strongModel?: string, efficientModel?: string }} modelOptions
+ * @returns {{ model: string, tier: string, reason: string }}
+ */
+export function routeModelByComplexity(taskHints = {}, modelOptions = {}) {
+  const defaultModel = modelOptions.defaultModel || "Claude Sonnet 4.6";
+  const strongModel = modelOptions.strongModel || defaultModel;
+  const efficientModel = modelOptions.efficientModel || defaultModel;
+
+  const { tier, reason } = classifyComplexityTier(taskHints);
+
+  if (tier === COMPLEXITY_TIER.T3) {
+    return { model: strongModel, tier, reason: `T3 (deep reasoning): ${reason}` };
+  }
+  if (tier === COMPLEXITY_TIER.T1) {
+    return { model: efficientModel, tier, reason: `T1 (routine): ${reason}` };
+  }
+  return { model: defaultModel, tier, reason: `T2 (medium): ${reason}` };
+}
+
+/**
  * Enforce model policy: ban forbidden models, gate Opus to large tasks.
  * Returns the safe model to use — either the requested model (if allowed)
  * or a downgraded fallback.
  *
  * @param {string} requestedModel - Model requested by worker/config
- * @param {{ estimatedLines?: number, estimatedDurationMinutes?: number, complexity?: string }} taskHints
+ * @param {{ estimatedLines?: number, estimatedDurationMinutes?: number, complexity?: string, expectedQualityGain?: number }} taskHints
  * @param {string} fallbackModel - Safe fallback model
- * @returns {{ model: string, downgraded: boolean, reason: string }}
+ * @returns {{ model: string, downgraded: boolean, reason: string, routingReasonCode: string }}
  */
 export function enforceModelPolicy(requestedModel, taskHints = {}, fallbackModel = "Claude Sonnet 4.6") {
   const name = String(requestedModel || "").trim();
@@ -116,7 +191,8 @@ export function enforceModelPolicy(requestedModel, taskHints = {}, fallbackModel
     return {
       model: fallbackModel,
       downgraded: true,
-      reason: banCheck.reason
+      reason: banCheck.reason,
+      routingReasonCode: ROUTING_REASON.BANNED
     };
   }
 
@@ -127,7 +203,8 @@ export function enforceModelPolicy(requestedModel, taskHints = {}, fallbackModel
       return {
         model: fallbackModel,
         downgraded: true,
-        reason: `Opus downgraded to ${fallbackModel}: ${justification.reason}`
+        reason: `Opus downgraded to ${fallbackModel}: ${justification.reason}`,
+        routingReasonCode: ROUTING_REASON.OPUS_DOWNGRADED
       };
     }
   }
@@ -136,6 +213,7 @@ export function enforceModelPolicy(requestedModel, taskHints = {}, fallbackModel
   return {
     model: name || fallbackModel,
     downgraded: false,
-    reason: ""
+    reason: "",
+    routingReasonCode: name ? ROUTING_REASON.ALLOWED : ROUTING_REASON.EMPTY_MODEL
   };
 }

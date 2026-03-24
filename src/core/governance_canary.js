@@ -511,9 +511,12 @@ export async function appendGovernanceAuditLog(stateDir, entry) {
   try {
     await fs.mkdir(stateDir, { recursive: true });
     await fs.appendFile(logPath, JSON.stringify(record) + "\n", "utf8");
+    return { ok: true, status: "written" };
   } catch {
     // Audit log write failure must not crash the main path.
     // The missing entry is observable via the absent log line.
+    // Return explicit non-fatal failure signal so callers can observe the gap.
+    return { ok: false, status: "audit-write-failed" };
   }
 }
 

@@ -5,7 +5,9 @@ import {
   decideRework,
   parseResponsiveMatrix,
   parseVerificationReport,
-  validateWorkerContract
+  validateWorkerContract,
+  checkPostMergeArtifact,
+  POST_MERGE_PLACEHOLDER,
 } from "../../src/core/verification_gate.js";
 
 describe("verification_gate parse helpers", () => {
@@ -96,6 +98,8 @@ describe("verification_gate worker contract enforcement", () => {
     const parsedResponse = {
       status: "done",
       fullOutput: [
+        "Merged commit abc123d into main",
+        "# tests 10 # pass 10 # fail 0",
         "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass; SECURITY=pass; API=n/a; RESPONSIVE=n/a",
         "BOX_PR_URL=https://github.com/org/repo/pull/88"
       ].join("\n")
@@ -232,5 +236,91 @@ describe("verification_gate validateWorkerContract — skipped and non-done stat
     assert.equal(result.passed, true);
     assert.equal(result.gaps.length, 0);
     assert.match(result.reason, /exempt/i);
+  });
+});
+
+describe("verification_gate — post-merge artifact (Packet 1/3)", () => {
+  it("exports post-merge placeholder constant", () => {
+    assert.ok(POST_MERGE_PLACEHOLDER);
+  });
+
+  it("checkPostMergeArtifact detects missing SHA in short text", () => {
+    const result = checkPostMergeArtifact("no sha here at all");
+    assert.equal(result.hasSha, false);
+  });
+
+  it("checkPostMergeArtifact detects present SHA and test output", () => {
+    const result = checkPostMergeArtifact("Commit: abc123d\ntests 5 pass 5 fail 0");
+    assert.equal(result.hasSha, true);
+    assert.equal(result.hasTestOutput, true);
+  });
+
+  it("checkPostMergeArtifact detects unfilled placeholder", () => {
+    const result = checkPostMergeArtifact(`Some output with ${POST_MERGE_PLACEHOLDER}`);
+    assert.equal(result.hasUnfilledPlaceholder, true);
+  });
+
+  it("checkPostMergeArtifact returns clean result for complete artifact", () => {
+    const text = "abc123d\n# tests 10 pass";
+    const result = checkPostMergeArtifact(text);
+    assert.equal(result.hasSha, true);
+    assert.equal(result.hasTestOutput, true);
+    assert.equal(result.hasUnfilledPlaceholder, false);
+    assert.equal(result.hasArtifact, true);
+  });
+});
+
+// ── SHA + raw npm output enforced across done-capable lanes ──────────────────
+
+describe("verification_gate — SHA + raw npm output enforced across done-capable lanes", () => {
+  it("should fail done when SHA or raw npm output block is absent for done-capable lanes", () => {
+    // Test worker (quality lane) reports done without a git SHA or npm test output block.
+    // With the extended artifact gate, this must fail even for non-implementation lanes.
+    const result = validateWorkerContract("test", {
+      status: "done",
+      fullOutput: [
+        "VERIFICATION_REPORT: BUILD=n/a; TESTS=pass; EDGE_CASES=pass",
+        // No 7-char hex SHA, no raw npm test output block
+      ].join("\n")
+    });
+
+    assert.equal(result.passed, false, "test worker done without SHA/npm output must fail");
+    const hasArtifactGap = result.gaps.some(
+      g => /sha|npm|post-merge/i.test(g)
+    );
+    assert.ok(hasArtifactGap,
+      `expected a SHA or npm output gap; got: [${result.gaps.join("; ")}]`
+    );
+  });
+
+  it("test worker done with valid SHA and npm output passes the artifact gate", () => {
+    const result = validateWorkerContract("test", {
+      status: "done",
+      fullOutput: [
+        "abc123d merged into main",
+        "# tests 10 # pass 10 # fail 0",
+        "VERIFICATION_REPORT: BUILD=n/a; TESTS=pass; EDGE_CASES=pass"
+      ].join("\n")
+    });
+    // No artifact-related gaps (other gaps like prUrl may exist for different profiles)
+    const artifactGap = result.gaps.find(g => /sha|npm|post-merge/i.test(g));
+    assert.equal(artifactGap, undefined,
+      `unexpected artifact gap when SHA + npm output are present: ${artifactGap}`
+    );
+  });
+
+  it("backend worker done without SHA fails the artifact gate", () => {
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: [
+        "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass; SECURITY=n/a; API=n/a; RESPONSIVE=n/a",
+        "BOX_PR_URL=https://github.com/org/repo/pull/99"
+        // No git SHA present
+      ].join("\n")
+    });
+    assert.equal(result.passed, false);
+    assert.ok(result.gaps.some(g => /sha/i.test(g)),
+      `expected SHA gap; got: [${result.gaps.join("; ")}]`
+    );
   });
 });

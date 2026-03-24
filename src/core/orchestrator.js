@@ -21,10 +21,12 @@ import { appendProgress, appendAlert, ALERT_SEVERITY } from "./state_tracker.js"
 import { readStopRequest, writeDaemonPid, clearDaemonPid, clearStopRequest, readReloadRequest, clearReloadRequest } from "./daemon_control.js";
 import { loadConfig } from "../config.js";
 import { runJesusCycle } from "./jesus_supervisor.js";
-import { runPrometheusAnalysis } from "./prometheus.js";
-import { runAthenaPlanReview, runAthenaPostmortem } from "./athena_reviewer.js";
+import { runPrometheusAnalysis, buildConcretePremortem } from "./prometheus.js";
+import { runAthenaPlanReview, runAthenaPostmortem, PREMORTEM_RISK_LEVEL, checkPlanPremortemGate } from "./athena_reviewer.js";
 import { runWorkerConversation } from "./worker_runner.js";
-import { runSelfImprovementCycle } from "./self_improvement.js";
+import { runSelfImprovementCycle, shouldTriggerSelfImprovement } from "./self_improvement.js";
+import { runRepairAnalysis, runHealthAudit, persistSelfImprovementDecision, escalateRepairFailure, REPAIR_GATE, HEALTH_GATE } from "./self_improvement_repair.js";
+import { collectEvolutionMetrics } from "./evolution_metrics.js";
 import { capturePreWorkBaseline, runProjectCompletion, isProjectAlreadyCompleted } from "./project_lifecycle.js";
 import { warn } from "./logger.js";
 import { readJson, readJsonSafe, writeJson, cleanupStaleTempFiles, READ_JSON_REASON } from "./fs_utils.js";
@@ -42,6 +44,20 @@ import {
 import { runCatastropheDetection, GUARDRAIL_ACTION } from "./catastrophe_detector.js";
 import { executeGuardrailsForDetections, isGuardrailActive } from "./guardrail_executor.js";
 import { evaluateFreezeGate, isFreezeActive } from "./governance_freeze.js";
+import { detectRecurrences, buildRecurrenceEscalations } from "./recurrence_detector.js";
+import { checkClosureSLA } from "./closure_validator.js";
+import { appendCapacityEntry } from "./capacity_scoreboard.js";
+import { computeCapabilityDelta } from "./delta_analytics.js";
+import { evaluateRetune } from "./strategy_retuner.js";
+import { compileLessonsToPolicies } from "./learning_policy_compiler.js";
+import { assignWorkersToPlans, enforceLaneDiversity } from "./capability_pool.js";
+import { packPlansIntoBatches, buildBatchInstruction, buildCombinedPlan, estimateBatchTokens } from "./task_batcher.js";
+import { runDoctor } from "./doctor.js";
+import { validateAllPlans } from "./plan_contract_validator.js";
+import { isSelfImprovementActive, siLogAsync } from "./si_control.js";
+import { shouldApplyGovernanceRule } from "./policy_engine.js";
+import { resolveDependencyGraph, GRAPH_STATUS } from "./dependency_graph_resolver.js";
+import { executeRollback, ROLLBACK_TRIGGER, ROLLBACK_LEVEL } from "./rollback_engine.js";
 
 /**
  * Orchestrator health status enum.
@@ -63,6 +79,106 @@ export async function writeOrchestratorHealth(stateDir, status, reason, details 
 }
 
 /**
+ * Evaluate pre-dispatch governance gates in precedence order:
+ *   1. guardrail (PAUSE_WORKERS) — highest precedence
+ *   2. canary breach (shouldApplyGovernanceRule) — blocks if breach active; triggers rollback
+ *   3. lineage graph (resolveDependencyGraph) — blocks if cycle detected
+ *
+ * Returns { blocked: boolean, reason: string, action?: string, rollbackResult?: object, graphResult?: object }
+ *
+ * Non-fatal: errors in any check are caught; failing checks default to unblocked.
+ * Rollback is invoked (non-fatal) when canary breach is active, and the incident is persisted.
+ *
+ * @param {object} config   - full runtime config
+ * @param {Array}  plans    - plan descriptors to dispatch
+ * @param {string} cycleId  - stable cycle identifier for canary cohort assignment
+ * @returns {Promise<{ blocked: boolean, reason: string, action?: string, rollbackResult?: object, graphResult?: object }>}
+ */
+export async function evaluatePreDispatchGovernanceGate(config, plans, cycleId) {
+  const stateDir = config?.paths?.stateDir || "state";
+
+  // 1. Guardrail gate — PAUSE_WORKERS blocks all dispatch (highest precedence)
+  if (config?.systemGuardian?.enabled !== false) {
+    try {
+      const pauseActive = await isGuardrailActive(config, GUARDRAIL_ACTION.PAUSE_WORKERS);
+      if (pauseActive) {
+        return { blocked: true, reason: "guardrail:PAUSE_WORKERS" };
+      }
+    } catch (err) {
+      warn(`[orchestrator] PAUSE_WORKERS guardrail check failed (non-fatal): ${String(err?.message || err)}`);
+    }
+  }
+
+  // 2. Canary breach gate — if breach active, block and trigger rollback
+  const cycleIdStr = String(cycleId || `cycle-dispatch-${Date.now()}`);
+  let canaryResult;
+  try {
+    canaryResult = await shouldApplyGovernanceRule(config, cycleIdStr);
+  } catch (err) {
+    warn(`[orchestrator] shouldApplyGovernanceRule check failed (non-fatal): ${String(err?.message || err)}`);
+  }
+
+  if (canaryResult?.reason?.startsWith("BREACH_ACTIVE:")) {
+    // Breach active — invoke rollback and persist incident record
+    let rollbackResult;
+    try {
+      rollbackResult = await executeRollback({
+        level:    ROLLBACK_LEVEL.CONFIG_ONLY,
+        trigger:  ROLLBACK_TRIGGER.CANARY_ROLLBACK,
+        config: {
+          ...config,
+          rollbackEngine: {
+            ...(config?.rollbackEngine || {}),
+            incidentLogPath: path.join(stateDir, "rollback_incidents.jsonl"),
+            lockFilePath:    path.join(stateDir, "rollback_lock.json"),
+            baselineRefPath: path.join(stateDir, "project_baseline.json")
+          }
+        },
+        stateDir,
+        evidence: { canaryReason: canaryResult.reason, cycleId: cycleIdStr }
+      });
+    } catch (err) {
+      warn(`[orchestrator] executeRollback on canary breach failed (non-fatal): ${String(err?.message || err)}`);
+    }
+    return {
+      blocked:        true,
+      reason:         `canary:breach-active:${canaryResult.reason}`,
+      action:         "rollback",
+      rollbackResult: rollbackResult || null
+    };
+  }
+
+  // 3. Lineage graph gate — block if dependency cycle detected
+  const planList = Array.isArray(plans) ? plans : [];
+  const graphTasks = planList.map((p, i) => ({
+    id:          String(p.id || p.task || `plan-${i}`),
+    dependsOn:   Array.isArray(p.dependsOn) ? p.dependsOn : [],
+    filesInScope: Array.isArray(p.filesInScope) ? p.filesInScope
+      : Array.isArray(p.targetFiles) ? p.targetFiles
+      : Array.isArray(p.target_files) ? p.target_files
+      : []
+  }));
+
+  let graphResult;
+  try {
+    graphResult = resolveDependencyGraph(graphTasks);
+  } catch (err) {
+    warn(`[orchestrator] dependency graph resolution failed (non-fatal): ${String(err?.message || err)}`);
+  }
+
+  if (graphResult?.status === GRAPH_STATUS.CYCLE_DETECTED) {
+    return {
+      blocked:     true,
+      reason:      `lineage_graph:cycle_detected`,
+      graphResult: graphResult
+    };
+  }
+
+  return { blocked: false, reason: "all-gates-passed" };
+}
+
+
+/**
  * Safe wrapper for updatePipelineProgress.
  *
  * Pipeline progress is observability state — a write failure must NEVER block
@@ -77,6 +193,48 @@ async function safeUpdatePipelineProgress(config, stepId, detail, extra) {
   } catch (err) {
     warn(`[orchestrator] pipeline progress update failed (step=${stepId}): ${String(err?.message || err)}`);
   }
+}
+
+function mergeUniqueStrings(baseList, extraList) {
+  const base = Array.isArray(baseList) ? baseList : [];
+  const extra = Array.isArray(extraList) ? extraList : [];
+  return [...new Set([...base, ...extra].map((v) => String(v || "").trim()).filter(Boolean))];
+}
+
+function mergeRepairConstraints(base, incoming) {
+  const b = (base && typeof base === "object") ? base : {};
+  const i = (incoming && typeof incoming === "object") ? incoming : {};
+  return {
+    ...b,
+    ...i,
+    mustInclude: mergeUniqueStrings(b.mustInclude, i.mustInclude),
+    mustNotRepeat: mergeUniqueStrings(b.mustNotRepeat, i.mustNotRepeat),
+  };
+}
+
+function mergeRepairAnalyses(base, incoming) {
+  const b = base && typeof base === "object" ? base : {};
+  const i = incoming && typeof incoming === "object" ? incoming : {};
+  return {
+    phase: "repair",
+    rootCauses: mergeUniqueStrings((b.rootCauses || []).map((x) => JSON.stringify(x)), (i.rootCauses || []).map((x) => JSON.stringify(x)))
+      .map((x) => {
+        try { return JSON.parse(x); } catch { return x; }
+      }),
+    behaviorPatches: mergeUniqueStrings((b.behaviorPatches || []).map((x) => JSON.stringify(x)), (i.behaviorPatches || []).map((x) => JSON.stringify(x)))
+      .map((x) => {
+        try { return JSON.parse(x); } catch { return x; }
+      }),
+    repairedPlanConstraints: mergeRepairConstraints(b.repairedPlanConstraints, i.repairedPlanConstraints),
+    verificationUpgrades: mergeUniqueStrings((b.verificationUpgrades || []).map((x) => JSON.stringify(x)), (i.verificationUpgrades || []).map((x) => JSON.stringify(x)))
+      .map((x) => {
+        try { return JSON.parse(x); } catch { return x; }
+      }),
+    gateDecision: i.gateDecision || b.gateDecision || REPAIR_GATE.REPLAN_ONCE,
+    gateReason: String(i.gateReason || b.gateReason || ""),
+    systemicFixes: mergeUniqueStrings(b.systemicFixes, i.systemicFixes),
+    resumeDirective: String(i.resumeDirective || b.resumeDirective || ""),
+  };
 }
 
 /**
@@ -242,7 +400,7 @@ export async function runDaemon(config) {
   const staleThresholdMs = workerTimeoutMs * 2;
   const now = Date.now();
   let zombieReset = false;
-  const knownRoles = ["King David", "Esther", "Aaron", "Joseph", "Samuel", "Isaiah", "Noah", "Elijah", "Issachar", "Ezra"];
+  const knownRoles = ["Evolution Worker"];
   for (const roleName of knownRoles) {
     const perWorkerPath = path.join(stateDir, `worker_${roleName.toLowerCase().replace(/\s+/g, "_")}.json`);
     const perWorker = await readJson(perWorkerPath, null);
@@ -479,7 +637,7 @@ async function dispatchWorker(config, plan) {
     task,
     context,
     verification,
-    taskKind: plan.kind || "implementation"
+    taskKind: plan.taskKind || plan.kind || "implementation"
   });
 
   return {
@@ -521,7 +679,7 @@ async function countCompletedPlans(config, plans) {
 
 // ── Single full cycle: Jesus → Prometheus → Athena → Workers → Athena ──────
 
-async function runSingleCycle(config) {
+async function runSingleCycle(config, options = {}) {
   const stateDir = config.paths?.stateDir || "state";
 
   // Clean up any leftover .tmp files from a previous crash before reading state.
@@ -536,6 +694,32 @@ async function runSingleCycle(config) {
   // Audit critical state files at cycle start — writes orchestrator_health.json.
   // This ensures runOnce (used in tests and CLI) also surfaces corrupt state.
   await auditCriticalStateFiles(config, stateDir);
+
+  // ── Preflight capability checks ───────────────────────────────────────────
+  // Validate system readiness before spending premium requests.
+  if (config.runtime?.disablePreflight !== true) {
+    try {
+      const doctorResult = await runDoctor(config);
+      if (!doctorResult.ok) {
+        const failedChecks = Object.entries(doctorResult.checks)
+          .filter(([, v]) => !v).map(([k]) => k).join(", ");
+        await appendProgress(config,
+          `[CYCLE][PREFLIGHT] Capability checks failed: ${failedChecks}. Warnings: ${doctorResult.warnings.join("; ")}`
+        );
+        await appendAlert(config, {
+          severity: ALERT_SEVERITY.HIGH,
+          source: "orchestrator",
+          title: "Preflight capability checks failed",
+          message: `Failed: ${failedChecks}. ${doctorResult.warnings.join("; ")}`
+        });
+        // Non-blocking: log but continue (critical checks would have thrown)
+      } else if (doctorResult.warnings.length > 0) {
+        await appendProgress(config, `[CYCLE][PREFLIGHT] All checks passed. Warnings: ${doctorResult.warnings.join("; ")}`);
+      }
+    } catch (err) {
+      warn(`[orchestrator] preflight check failed (non-fatal): ${String(err?.message || err)}`);
+    }
+  }
 
   // Guardrail gate: if SKIP_CYCLE is active, skip planning to avoid acting on stale state.
   // Gated by systemGuardian.enabled (rollback: set to false to retain detection without enforcement).
@@ -562,19 +746,41 @@ async function runSingleCycle(config) {
 
   // Step 1: Jesus analyzes state and decides what to do (1 request)
   await appendProgress(config, "[CYCLE] ── Step 1: Jesus analyzing system state ──");
+
+  // ── Closure SLA audit: flag stale escalations (advisory) ────────────────
+  try {
+    const escalationQ = await loadEscalationQueue(config);
+    const slaViolations = checkClosureSLA(Array.isArray(escalationQ) ? escalationQ : escalationQ?.entries || []);
+    if (slaViolations.length > 0) {
+      await appendProgress(config, `[CLOSURE_SLA] ${slaViolations.length} escalation(s) exceed SLA: ${slaViolations.map(v => v.title).join(", ")}`);
+    }
+  } catch (err) {
+    warn(`[orchestrator] Closure SLA check failed (non-fatal): ${String(err?.message || err)}`);
+  }
   await safeUpdatePipelineProgress(config, "jesus_awakening", "Jesus starting system state analysis");
   let jesusDecision;
   try {
     await safeUpdatePipelineProgress(config, "jesus_reading", "Jesus reading system state");
     jesusDecision = await runJesusCycle(config);
   } catch (err) {
-    await appendProgress(config, `[CYCLE] Jesus failed: ${String(err?.message || err)}`);
-    warn(`[orchestrator] Jesus cycle error: ${String(err?.message || err)}`);
+    const msg = String(err?.message || err);
+    await appendProgress(config, `[CYCLE] Jesus failed: ${msg}`);
+    warn(`[orchestrator] Jesus cycle error: ${msg}`);
+    if (config.runtime?.stopOnError === true) {
+      throw new Error(`[JESUS_CYCLE_FAILED] ${msg}`, { cause: err });
+    }
     return;
   }
 
   if (!jesusDecision || jesusDecision.wait === true) {
     await appendProgress(config, "[CYCLE] Jesus says: wait — nothing to do");
+    return;
+  }
+
+  const mustForceReplan = typeof options.replanReason === "string" && options.replanReason.length > 0;
+  if (jesusDecision.callPrometheus === false && !mustForceReplan) {
+    await appendProgress(config, "[CYCLE] Jesus decision: callPrometheus=false — skipping Prometheus planning");
+    await safeUpdatePipelineProgress(config, "cycle_complete", "Jesus skipped Prometheus planning for this cycle");
     return;
   }
 
@@ -589,18 +795,45 @@ async function runSingleCycle(config) {
   try {
     await safeUpdatePipelineProgress(config, "prometheus_reading_repo", "Prometheus reading repository");
     prometheusAnalysis = await runPrometheusAnalysis(config, {
-      prompt: jesusDecision.briefForPrometheus || jesusDecision.briefForMoses || jesusDecision.thinking || "Full repository analysis",
-      requestedBy: "Jesus"
+      prompt: jesusDecision.briefForPrometheus || jesusDecision.thinking || "Full repository analysis",
+      requestedBy: "Jesus",
+      bypassCache: options.replanReason === "all_plans_completed",
+      bypassReason: options.replanReason || undefined,
     });
   } catch (err) {
-    await appendProgress(config, `[CYCLE] Prometheus failed: ${String(err?.message || err)}`);
-    warn(`[orchestrator] Prometheus analysis error: ${String(err?.message || err)}`);
+    const msg = String(err?.message || err);
+    await appendProgress(config, `[CYCLE] Prometheus failed: ${msg}`);
+    warn(`[orchestrator] Prometheus analysis error: ${msg}`);
+    if (config.runtime?.stopOnError === true) {
+      throw new Error(`[PROMETHEUS_CYCLE_FAILED] ${msg}`, { cause: err });
+    }
     return;
   }
 
   if (!prometheusAnalysis || !Array.isArray(prometheusAnalysis.plans) || prometheusAnalysis.plans.length === 0) {
     await appendProgress(config, "[CYCLE] Prometheus produced no plans — cycle complete");
     await safeUpdatePipelineProgress(config, "cycle_complete", "Prometheus produced no plans — nothing to dispatch");
+    return;
+  }
+
+  // ── Parser confidence hard-stop gate ──────────────────────────────────────
+  // Block dispatch when Prometheus output confidence is below threshold.
+  const PARSER_CONFIDENCE_THRESHOLD = config.runtime?.parserConfidenceThreshold ?? 0.3;
+  const parsedConfidence = prometheusAnalysis.parserConfidence ?? 1.0;
+  if (parsedConfidence < PARSER_CONFIDENCE_THRESHOLD) {
+    await appendProgress(config,
+      `[CYCLE] Parser confidence too low (${parsedConfidence} < ${PARSER_CONFIDENCE_THRESHOLD}) — blocking dispatch`
+    );
+    await appendAlert(config, {
+      severity: ALERT_SEVERITY.HIGH,
+      source: "orchestrator",
+      title: "Low parser confidence — dispatch blocked",
+      message: `parserConfidence=${parsedConfidence} threshold=${PARSER_CONFIDENCE_THRESHOLD}. Plans not dispatched.`
+    });
+    await safeUpdatePipelineProgress(config, "cycle_complete", `Parser confidence too low (${parsedConfidence}) — dispatch blocked`);
+    if (config.runtime?.stopOnError === true) {
+      throw new Error(`[PARSER_CONFIDENCE_LOW] parserConfidence=${parsedConfidence} threshold=${PARSER_CONFIDENCE_THRESHOLD}`);
+    }
     return;
   }
 
@@ -641,24 +874,374 @@ async function runSingleCycle(config) {
     }
   }
 
+  // ── Step 3.1: Apply Athena in-place repairs if provided ──────────────────
+  if (planReview.approved && Array.isArray(planReview.patchedPlans) && planReview.patchedPlans.length > 0) {
+    const fixCount = Array.isArray(planReview.appliedFixes) ? planReview.appliedFixes.length : 0;
+    prometheusAnalysis.plans = planReview.patchedPlans;
+    await writeJson(path.join(stateDir, "prometheus_analysis.json"), prometheusAnalysis);
+    await appendProgress(config, `[CYCLE] Athena applied ${fixCount} in-place fix(es) — using patched plans for dispatch`);
+  }
+
   if (!planReview.approved) {
     const rejectionReason = planReview.reason || { code: "PLAN_REJECTED", message: planReview.summary || "Rejected by Athena" };
     const correctionsList = planReview.corrections || [];
-    await appendProgress(config, `[CYCLE] Athena REJECTED plan — code=${typeof rejectionReason === "object" ? rejectionReason.code : rejectionReason} corrections: ${correctionsList.join("; ")}`);
-    // Save rejection for Prometheus to read on next cycle
-    await writeJson(path.join(stateDir, "athena_plan_rejection.json"), {
+    await appendProgress(config, `[CYCLE] Athena REJECTED plan (review #1) — code=${typeof rejectionReason === "object" ? rejectionReason.code : rejectionReason} corrections: ${correctionsList.join("; ")}`);
+
+    // Save rejection
+    const athenaRejection = {
       rejectedAt: new Date().toISOString(),
       reason: rejectionReason,
       corrections: correctionsList,
       summary: planReview.summary || ""
-    });
-    return;
+    };
+    await writeJson(path.join(stateDir, "athena_plan_rejection.json"), athenaRejection);
+
+    // ── Step 3.5-fast: Deterministic pre-mortem patch ──────────────────────
+    // If the ONLY rejection reason is MISSING_PREMORTEM, we can fix the plans
+    // programmatically (zero tokens) and re-validate with Athena immediately.
+    const rejCode = typeof rejectionReason === "object" ? rejectionReason.code : rejectionReason;
+    if (rejCode === "MISSING_PREMORTEM" && Array.isArray(prometheusAnalysis?.plans)) {
+      await appendProgress(config, "[CYCLE] ── Step 3.5-fast: deterministic pre-mortem patch ──");
+      let patched = 0;
+      for (const plan of prometheusAnalysis.plans) {
+        if (plan.riskLevel !== PREMORTEM_RISK_LEVEL.HIGH) continue;
+        const files = plan.targetFiles || plan.target_files || [];
+        const scaffold = buildConcretePremortem(plan.task || plan.title || "", files);
+        if (!plan.premortem || typeof plan.premortem !== "object") {
+          plan.premortem = scaffold;
+          patched++;
+        } else {
+          // Merge scaffold defaults into partial premortem
+          const merged = { ...scaffold, ...plan.premortem, riskLevel: PREMORTEM_RISK_LEVEL.HIGH };
+          for (const f of ["failurePaths", "mitigations", "detectionSignals", "guardrails"]) {
+            if (!Array.isArray(merged[f]) || merged[f].length === 0) merged[f] = scaffold[f];
+          }
+          for (const [f, min] of [["scenario", 20], ["rollbackPlan", 10]]) {
+            if (typeof merged[f] !== "string" || merged[f].trim().length < min) merged[f] = scaffold[f];
+          }
+          plan.premortem = merged;
+          patched++;
+        }
+      }
+
+      if (patched > 0) {
+        const remaining = checkPlanPremortemGate(prometheusAnalysis.plans);
+        if (remaining.length === 0) {
+          await appendProgress(config, `[CYCLE] Deterministic patch fixed ${patched} pre-mortem(s) — re-validating with Athena`);
+          let patchReview;
+          try {
+            patchReview = await runAthenaPlanReview(config, prometheusAnalysis);
+          } catch (err) {
+            const msg3 = String(err?.message || err).slice(0, 200);
+            await appendProgress(config, `[CYCLE] Athena re-review after patch failed: ${msg3}`);
+            patchReview = { approved: false };
+          }
+          if (patchReview.approved) {
+            await appendProgress(config, `[CYCLE] Athena APPROVED after deterministic pre-mortem patch — skipping SI, continuing to worker dispatch`);
+            // Apply Athena in-place repairs if provided alongside the pre-mortem patch approval
+            if (Array.isArray(patchReview.patchedPlans) && patchReview.patchedPlans.length > 0) {
+              const fixCount = Array.isArray(patchReview.appliedFixes) ? patchReview.appliedFixes.length : 0;
+              prometheusAnalysis.plans = patchReview.patchedPlans;
+              await writeJson(path.join(stateDir, "prometheus_analysis.json"), prometheusAnalysis);
+              await appendProgress(config, `[CYCLE] Athena applied ${fixCount} in-place fix(es) on pre-mortem patched plan`);
+            }
+            planReview = patchReview;
+          } else {
+            await appendProgress(config, `[CYCLE] Athena still rejected after pre-mortem patch (other issues) — falling through to SI`);
+            planReview = patchReview;
+          }
+        } else {
+          await appendProgress(config, `[CYCLE] Deterministic patch applied ${patched} fixes but ${remaining.length} violation(s) remain — falling through to SI`);
+        }
+      }
+    }
+  }
+
+  if (!planReview.approved) {
+    const rejectionReason = planReview.reason || { code: "PLAN_REJECTED", message: planReview.summary || "Rejected by Athena" };
+    const correctionsList = planReview.corrections || [];
+    const athenaRejection = {
+      rejectedAt: new Date().toISOString(),
+      reason: rejectionReason,
+      corrections: correctionsList,
+      summary: planReview.summary || ""
+    };
+
+    // ── Step 3.5: Self-Improvement Repair ──────────────────────────────────
+    const siGateRepair = await isSelfImprovementActive(config);
+    await siLogAsync(config, "GATE", "Repair gate check: " + siGateRepair.status + " — " + siGateRepair.reason);
+
+    if (!siGateRepair.active) {
+      // SI disabled — fail-closed: escalate directly without repair attempt
+      await appendProgress(config, "[CYCLE] Self-Improvement DISABLED (" + siGateRepair.status + ") — skipping repair, escalating directly");
+      await siLogAsync(config, "INFO", "Repair skipped (disabled) — escalating rejection to operator");
+      await escalateRepairFailure(config, {
+        gateDecision: "STOP_AND_ESCALATE",
+        gateReason: "Self-Improvement disabled (" + siGateRepair.status + "), cannot repair — escalating",
+        rootCauses: [],
+      }, { athenaReviewCount: 1, cycleId: "si-disabled-" + Date.now() });
+      await safeUpdatePipelineProgress(config, "cycle_complete", "Cycle stopped: SI disabled, Athena rejection escalated");
+      if (config.runtime?.stopOnError === true) {
+        throw new Error("[SI_DISABLED_ESCALATED] Athena rejected plan but SI is disabled");
+      }
+      return;
+    }
+
+    await appendProgress(config, "[CYCLE] ── Step 3.5: Self-Improvement repair analysis ──");
+    await safeUpdatePipelineProgress(config, "self_improvement_repair", "Self-improvement analyzing rejection");
+    await siLogAsync(config, "REPAIR", "Starting repair analysis after Athena rejection");
+
+    // Gather system health signals
+    let systemHealth = {};
+    try {
+      const postmortemsRaw = await readJson(path.join(stateDir, "athena_postmortems.json"), null);
+      const healthAuditData = await readJson(path.join(stateDir, "health_audit_findings.json"), null);
+      systemHealth = {
+        recentPostmortems: Array.isArray(postmortemsRaw?.entries) ? postmortemsRaw.entries.slice(-5) : [],
+        healthAudit: healthAuditData || {},
+      };
+    } catch { /* non-fatal */ }
+
+    const maxRepairAttemptsRaw = Number(config.selfImprovement?.maxRepairReplanAttempts ?? 3);
+    const maxRepairAttempts = Number.isFinite(maxRepairAttemptsRaw)
+      ? Math.max(1, Math.min(8, Math.floor(maxRepairAttemptsRaw)))
+      : 3;
+
+    let currentAthenaRejection = athenaRejection;
+    let currentPrometheusPlan = prometheusAnalysis;
+    let mergedRepairAnalysis = null;
+    const repairHistory = [];
+    let approvedByRepair = false;
+
+    for (let repairAttempt = 1; repairAttempt <= maxRepairAttempts; repairAttempt++) {
+      let repairAnalysis = null;
+      try {
+        repairAnalysis = await runRepairAnalysis(config, {
+          jesusDecision,
+          prometheusPlan: currentPrometheusPlan,
+          athenaRejection: currentAthenaRejection,
+          systemHealth,
+          repairHistory,
+          priorRepairGuidance: mergedRepairAnalysis,
+          attemptNumber: repairAttempt,
+          maxAttempts: maxRepairAttempts,
+        });
+        await siLogAsync(config, "REPAIR", "Repair analysis complete: attempt=" + repairAttempt + " gate=" + (repairAnalysis?.gateDecision || "null"));
+      } catch (err) {
+        await siLogAsync(config, "WARN", "Repair analysis failed: " + String(err?.message || err).slice(0, 200));
+        warn(`[orchestrator] self-improvement repair failed: ${String(err?.message || err)}`);
+        await appendProgress(config, `[CYCLE] Self-improvement repair error: ${String(err?.message || err).slice(0, 200)}`);
+      }
+
+      if (!repairAnalysis) {
+        await appendProgress(config, "[CYCLE] Self-improvement produced no analysis — stopping cycle (fail-closed)");
+        await persistSelfImprovementDecision(config, "repair", {
+          gateDecision: "STOP_AND_ESCALATE",
+          gateReason: "Self-improvement agent returned no output",
+          rootCauses: [], behaviorPatches: [], repairedPlanConstraints: {}, verificationUpgrades: [],
+        }, { athenaReviewCount: repairAttempt, repairAttempt, maxRepairAttempts });
+        if (config.runtime?.stopOnError === true) {
+          throw new Error("[SELF_IMPROVEMENT_REPAIR_FAILED] No analysis produced");
+        }
+        return;
+      }
+
+      mergedRepairAnalysis = mergeRepairAnalyses(mergedRepairAnalysis, repairAnalysis);
+
+      await persistSelfImprovementDecision(config, "repair", mergedRepairAnalysis, {
+        athenaReviewCount: repairAttempt,
+        repairAttempt,
+        maxRepairAttempts,
+      });
+      await appendProgress(config, `[CYCLE] Self-improvement gate: ${repairAnalysis.gateDecision} — ${repairAnalysis.gateReason}`);
+
+      if (repairAnalysis.gateDecision === REPAIR_GATE.STOP_AND_ESCALATE) {
+        await appendProgress(config, "[CYCLE] Self-improvement says STOP_AND_ESCALATE — halting cycle");
+        await escalateRepairFailure(config, mergedRepairAnalysis, {
+          athenaReviewCount: repairAttempt,
+          cycleId: `repair-${Date.now()}`,
+        });
+        await safeUpdatePipelineProgress(config, "cycle_complete", "Cycle stopped: self-improvement escalated after Athena rejection");
+        if (config.runtime?.stopOnError === true) {
+          throw new Error(`[SELF_IMPROVEMENT_ESCALATED] ${repairAnalysis.gateReason}`);
+        }
+        return;
+      }
+
+      await appendProgress(config, `[CYCLE] ── Step 3.5b: Prometheus re-plan with repair feedback (attempt ${repairAttempt}/${maxRepairAttempts}) ──`);
+      await safeUpdatePipelineProgress(config, "prometheus_replan", `Prometheus re-planning with self-improvement feedback (attempt ${repairAttempt}/${maxRepairAttempts})`);
+
+      try { await (await import("node:fs/promises")).unlink(path.join(stateDir, "prometheus_analysis.json")); } catch { /* ok */ }
+
+      let replanAnalysis;
+      try {
+        replanAnalysis = await runPrometheusAnalysis(config, {
+          prompt: jesusDecision.briefForPrometheus || jesusDecision.thinking || "Full repository analysis",
+          requestedBy: "self-improvement-repair",
+          bypassCache: true,
+          bypassReason: "athena_rejection_repair",
+          repairFeedback: mergedRepairAnalysis,
+        });
+      } catch (err) {
+        warn(`[orchestrator] Prometheus re-plan failed: ${String(err?.message || err)}`);
+        await appendProgress(config, `[CYCLE] Prometheus re-plan failed: ${String(err?.message || err).slice(0, 200)}`);
+        return;
+      }
+
+      if (!replanAnalysis || !Array.isArray(replanAnalysis.plans) || replanAnalysis.plans.length === 0) {
+        await appendProgress(config, `[CYCLE] Prometheus re-plan produced no plans (attempt ${repairAttempt}/${maxRepairAttempts})`);
+        repairHistory.push({
+          attempt: repairAttempt,
+          rejectionReason: { code: "REPLAN_EMPTY", message: "Prometheus re-plan produced no plans" },
+          corrections: [],
+          gateDecision: repairAnalysis.gateDecision,
+        });
+        continue;
+      }
+
+      await appendProgress(config, `[CYCLE] ── Step 3.5c: Athena review (repair attempt ${repairAttempt}/${maxRepairAttempts}) ──`);
+      await safeUpdatePipelineProgress(config, "athena_repair_review", `Athena reviewing repaired output (attempt ${repairAttempt}/${maxRepairAttempts})`);
+
+      let repairReview;
+      try {
+        repairReview = await runAthenaPlanReview(config, replanAnalysis);
+      } catch (err) {
+        const msg2 = String(err?.message || err).slice(0, 200);
+        await appendProgress(config, `[CYCLE] Athena repair review exception (attempt ${repairAttempt}): ${msg2}`);
+        repairReview = { approved: false, reason: { code: "REVIEW_EXCEPTION", message: msg2 }, corrections: [] };
+      }
+
+      if (repairReview.approved) {
+        await appendProgress(config, `[CYCLE] Athena APPROVED repaired output (attempt ${repairAttempt}) — continuing to worker dispatch`);
+        prometheusAnalysis = replanAnalysis;
+        // Apply Athena in-place repairs on the repaired plan if provided
+        if (Array.isArray(repairReview.patchedPlans) && repairReview.patchedPlans.length > 0) {
+          const fixCount = Array.isArray(repairReview.appliedFixes) ? repairReview.appliedFixes.length : 0;
+          prometheusAnalysis.plans = repairReview.patchedPlans;
+          await appendProgress(config, `[CYCLE] Athena applied ${fixCount} in-place fix(es) on repaired plan`);
+        }
+        await writeJson(path.join(stateDir, "prometheus_analysis.json"), prometheusAnalysis);
+        approvedByRepair = true;
+        break;
+      }
+
+      const repairRejectionReason = repairReview.reason || { code: "PLAN_REJECTED", message: "Rejected after repair attempt" };
+      const repairCorrections = repairReview.corrections || [];
+      currentAthenaRejection = {
+        rejectedAt: new Date().toISOString(),
+        reason: repairRejectionReason,
+        corrections: repairCorrections,
+        summary: repairReview.summary || "",
+      };
+      currentPrometheusPlan = replanAnalysis;
+
+      repairHistory.push({
+        attempt: repairAttempt,
+        rejectionReason: currentAthenaRejection.reason,
+        corrections: repairCorrections,
+        summary: currentAthenaRejection.summary,
+        gateDecision: repairAnalysis.gateDecision,
+      });
+
+      await writeJson(path.join(stateDir, "athena_plan_rejection.json"), {
+        ...currentAthenaRejection,
+        reviewNumber: repairAttempt + 1,
+        finalRejection: repairAttempt >= maxRepairAttempts,
+      });
+
+      await appendProgress(config, `[CYCLE] Athena rejected repaired plan (attempt ${repairAttempt}/${maxRepairAttempts}) — code=${typeof repairRejectionReason === "object" ? repairRejectionReason.code : repairRejectionReason}`);
+    }
+
+    if (!approvedByRepair) {
+      const lastEntry = repairHistory[repairHistory.length - 1] || {};
+      const lastCorrections = Array.isArray(lastEntry.corrections) ? lastEntry.corrections : [];
+
+      await persistSelfImprovementDecision(config, "repair", {
+        ...(mergedRepairAnalysis || {}),
+        gateDecision: "STOP_AND_ESCALATE",
+        gateReason: `Repair attempts exhausted (${maxRepairAttempts}) without Athena approval`,
+      }, {
+        athenaReviewCount: maxRepairAttempts + 1,
+        repairAttempt: maxRepairAttempts,
+        maxRepairAttempts,
+      });
+
+      await escalateRepairFailure(config, {
+        gateDecision: "STOP_AND_ESCALATE",
+        gateReason: `Repair attempts exhausted (${maxRepairAttempts}). Last corrections: ${lastCorrections.join("; ").slice(0, 300)}`,
+        rootCauses: mergedRepairAnalysis?.rootCauses || [],
+      }, {
+        athenaReviewCount: maxRepairAttempts + 1,
+        cycleId: `repair-exhausted-${Date.now()}`,
+      });
+
+      await safeUpdatePipelineProgress(config, "cycle_complete", `Cycle stopped: repair attempts exhausted (${maxRepairAttempts})`);
+      if (config.runtime?.stopOnError === true) {
+        throw new Error(`[PLAN_REPAIR_EXHAUSTED] attempts=${maxRepairAttempts}`);
+      }
+      return;
+    }
   }
 
   await safeUpdatePipelineProgress(config, "athena_approved", "Athena approved the plan");
 
   // Step 4: Dispatch workers sequentially (1 request per worker)
   const plans = prometheusAnalysis.plans;
+
+  // ── Capability pool: assign workers based on task capability matching ──────
+  try {
+    const poolResult = assignWorkersToPlans(plans, config);
+    if (poolResult.diversityIndex > 0) {
+      await appendProgress(config, `[CAPABILITY_POOL] Worker diversity index: ${poolResult.diversityIndex} (0=single-worker, 1=fully diversified)`);
+    }
+    // Apply pool assignment — update plan.role if a better worker is available (and not fallback-only)
+    for (const { plan, selection } of poolResult.assignments) {
+      if (!selection.isFallback && selection.role !== plan.role) {
+        plan._originalRole = plan.role;
+        plan._capabilityLane = selection.lane;
+      }
+    }
+  } catch (err) {
+    warn(`[orchestrator] Capability pool assignment failed (non-fatal): ${String(err?.message || err)}`);
+  }
+
+  // ── Plan quality gate (Packet 12): skip plans failing contract validation ──
+  try {
+    const contractReport = validateAllPlans(plans);
+    if (contractReport.passRate < 1) {
+      await appendProgress(config,
+        `[PLAN_QUALITY] Contract pass rate: ${(contractReport.passRate * 100).toFixed(0)}% — ${contractReport.results.filter(r => !r.valid).length} plan(s) have violations`
+      );
+      for (const r of contractReport.results) {
+        if (!r.valid) {
+          const critical = r.violations.filter(v => v.severity === "critical");
+          if (critical.length > 0) {
+            warn(`[orchestrator] Plan for ${r.plan?.role || "unknown"} has ${critical.length} critical contract violation(s) — removing from dispatch`);
+            const idx = plans.indexOf(r.plan);
+            if (idx !== -1) plans.splice(idx, 1);
+          }
+        }
+      }
+      if (plans.length === 0) {
+        await appendProgress(config, "[CYCLE] All plans removed by contract quality gate — cycle complete");
+        await safeUpdatePipelineProgress(config, "cycle_complete", "All plans failed contract quality gate");
+        return;
+      }
+    }
+  } catch (err) {
+    warn(`[orchestrator] Plan quality gate failed (non-fatal): ${String(err?.message || err)}`);
+  }
+
+  // ── Lane diversity gate (Packet 6) ──
+  try {
+    const diversityResult = enforceLaneDiversity(plans);
+    if (!diversityResult.ok) {
+      await appendProgress(config, `[LANE_DIVERSITY] Warning: ${diversityResult.reason}`);
+    }
+  } catch (err) {
+    warn(`[orchestrator] Lane diversity check failed (non-fatal): ${String(err?.message || err)}`);
+  }
+
   await appendProgress(config, `[CYCLE] ── Step 4: Dispatching ${plans.length} workers ──`);
 
   // Guardrail gate: if PAUSE_WORKERS is active, skip all worker dispatch.
@@ -731,58 +1314,116 @@ async function runSingleCycle(config) {
     }
   }
 
-  await safeUpdatePipelineProgress(config, "workers_dispatching", `Dispatching ${plans.length} worker(s)`, {
-    workersTotal: plans.length,
-    workersDone: 0
+  // ── Composed governance pre-dispatch gate: canary breach + lineage graph ────
+  // Checks canary breach (triggers rollback if active) and dependency graph cycles.
+  // Guardrail is already checked above; freeze is checked per-plan above.
+  // Non-fatal: gate errors are logged but do not block the cycle unless blocked=true.
+  {
+    const cycleId = String(Date.now());
+    try {
+      const gateResult = await evaluatePreDispatchGovernanceGate(config, plans, cycleId);
+      if (gateResult.blocked) {
+        await appendProgress(config,
+          `[CYCLE] Pre-dispatch governance gate blocked dispatch: reason=${gateResult.reason} action=${gateResult.action || "block"}`
+        );
+        await appendAlert(config, {
+          severity: ALERT_SEVERITY.HIGH,
+          source: "orchestrator",
+          title: "Worker dispatch blocked by governance gate",
+          message: `reason=${gateResult.reason}`
+        });
+        await safeUpdatePipelineProgress(config, "cycle_complete",
+          `Dispatch blocked by governance gate: ${gateResult.reason}`
+        );
+        return;
+      }
+    } catch (err) {
+      warn(`[orchestrator] pre-dispatch governance gate failed (non-fatal): ${String(err?.message || err)}`);
+    }
+  }
+
+  // ── Token-budget-based batch dispatch ──────────────────────────────────────
+  // Instead of 1 worker per task (N workers = N premium requests), we pack
+  // all tasks into minimal batches based on token budget. Within a single
+  // Copilot CLI session, all tool calls (edits, terminal, etc.) are FREE.
+  // Target: 1 batch = 1 worker call = 1 premium request for all tasks.
+  const tokenLimit = Number(config.runtime?.workerContextTokenLimit) || 100000;
+  const totalTokens = estimateBatchTokens(plans);
+  const batches = packPlansIntoBatches(plans, tokenLimit);
+
+  await appendProgress(config,
+    `[CYCLE] ── Step 4: Batch dispatch — ${plans.length} task(s), ~${totalTokens} tokens, packed into ${batches.length} batch(es) ──`
+  );
+  await safeUpdatePipelineProgress(config, "workers_dispatching", `Batch dispatch: ${plans.length} task(s) → ${batches.length} batch(es)`, {
+    workersTotal: batches.length,
+    workersDone: 0,
+    totalTasks: plans.length,
+    estimatedTokens: totalTokens
   });
 
-  let workersDone = 0;
-  for (const plan of plans) {
-    // Check for stop request between each worker
+  let batchesDone = 0;
+
+  for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+    const batch = batches[batchIdx];
+
     const stopReq = await readStopRequest(config);
     if (stopReq?.requestedAt) {
       await appendProgress(config, `[CYCLE] Stop requested — halting dispatch`);
       return;
     }
 
-    await safeUpdatePipelineProgress(config, "workers_running", `Running worker: ${plan.role}`, {
-      workersTotal: plans.length,
-      workersDone,
-      currentWorker: plan.role
+    const batchLabel = `Batch ${batchIdx + 1}/${batches.length} (${batch.length} task(s))`;
+    await appendProgress(config, `[CYCLE] ${batchLabel}: dispatching single worker for ${batch.length} task(s)`);
+    await safeUpdatePipelineProgress(config, "workers_running", batchLabel, {
+      workersTotal: batches.length,
+      workersDone: batchesDone,
+      currentBatch: batchIdx + 1,
+      tasksInBatch: batch.length
     });
 
+    // Build combined instruction and dispatch a single worker for the batch
+    const batchInstruction = buildBatchInstruction(batch);
+    const batchRole = batch[0]?.role || "evolution-worker";
     let workerResult;
     try {
-      workerResult = await dispatchWorker(config, plan);
+      workerResult = await dispatchWorker(config, {
+        role: batchRole,
+        task: batchInstruction.task,
+        context: batchInstruction.context,
+        verification: batchInstruction.verification,
+        taskKind: batchInstruction.taskKind
+      });
     } catch (err) {
       const msg = String(err?.message || err).slice(0, 200);
-      await appendProgress(config, `[CYCLE] Worker ${plan.role} failed: ${msg}`);
-      warn(`[orchestrator] worker dispatch error: ${msg}`);
-      workerResult = { roleName: plan.role, status: "error", summary: msg };
+      await appendProgress(config, `[CYCLE] ${batchLabel} worker failed: ${msg}`);
+      warn(`[orchestrator] batch worker dispatch error: ${msg}`);
+      workerResult = { roleName: batchRole, status: "error", summary: msg };
     }
 
-    // Step 5: Athena postmortem for each worker (1 request per worker)
-    await appendProgress(config, `[CYCLE] ── Step 5: Athena postmortem for ${plan.role} ──`);
+    // Single Athena postmortem per batch (not per task)
+    const combinedPlan = buildCombinedPlan(batch);
+    await appendProgress(config, `[CYCLE] ── Step 5: Athena postmortem for ${batchLabel} ──`);
     try {
-      await runAthenaPostmortem(config, workerResult, plan);
+      await runAthenaPostmortem(config, workerResult, combinedPlan);
     } catch (err) {
-      await appendProgress(config, `[CYCLE] Athena postmortem failed for ${plan.role}: ${String(err?.message || err)}`);
+      await appendProgress(config, `[CYCLE] Athena postmortem failed for ${batchLabel}: ${String(err?.message || err)}`);
     }
 
-    workersDone += 1;
-    // Wait for worker to fully finish (PR created, etc.)
+    batchesDone += 1;
     await waitForWorkersToFinish(config);
   }
 
-  await safeUpdatePipelineProgress(config, "workers_finishing", "All workers finishing up", {
-    workersTotal: plans.length,
-    workersDone: plans.length
+  await safeUpdatePipelineProgress(config, "workers_finishing", "All batches finishing up", {
+    workersTotal: batches.length,
+    workersDone: batches.length,
+    totalTasks: plans.length
   });
 
-  await appendProgress(config, "[CYCLE] ── All workers dispatched and reviewed — cycle complete ──");
-  await safeUpdatePipelineProgress(config, "cycle_complete", `Cycle complete — ${plans.length} worker(s) processed`, {
-    workersTotal: plans.length,
-    workersDone: plans.length
+  await appendProgress(config, `[CYCLE] ── All ${batches.length} batch(es) dispatched and reviewed — cycle complete ──`);
+  await safeUpdatePipelineProgress(config, "cycle_complete", `Cycle complete — ${plans.length} task(s) in ${batches.length} batch(es)`, {
+    workersTotal: batches.length,
+    workersDone: batches.length,
+    totalTasks: plans.length
   });
 
   // ── SLO check: compute and persist cycle-level SLO metrics ─────────────────
@@ -920,6 +1561,99 @@ async function runSingleCycle(config) {
     warn(`[orchestrator] Catastrophe detection error (non-fatal): ${String(err?.message || err)}`);
     await appendProgress(config, `[CATASTROPHE] Detection error (non-fatal): ${String(err?.message || err)}`);
   }
+
+  // ── Recurrence detection: scan postmortems for repeated defect patterns ───
+  try {
+    const postmortemsRaw = await readJson(path.join(stateDir, "athena_postmortems.json"), null);
+    const pmEntries = Array.isArray(postmortemsRaw?.entries) ? postmortemsRaw.entries : [];
+    if (pmEntries.length > 0) {
+      const recurrences = detectRecurrences(pmEntries);
+      if (recurrences.length > 0) {
+        const escalations = buildRecurrenceEscalations(recurrences);
+        await appendProgress(config, `[RECURRENCE] ${recurrences.length} recurring pattern(s) detected: ${recurrences.map(r => r.pattern).join("; ")}`);
+        for (const esc of escalations) {
+          await appendAlert(config, {
+            severity: esc.severity === "critical" ? ALERT_SEVERITY.CRITICAL : ALERT_SEVERITY.HIGH,
+            source: "recurrence_detector",
+            title: esc.title,
+            message: esc.reason
+          });
+        }
+      }
+    }
+  } catch (err) {
+    warn(`[orchestrator] Recurrence detection failed (non-fatal): ${String(err?.message || err)}`);
+  }
+
+  // ── Learning-to-policy compilation: convert lessons into enforced checks ──
+  try {
+    const postmortemsRaw2 = await readJson(path.join(stateDir, "athena_postmortems.json"), null);
+    const pmEntries2 = Array.isArray(postmortemsRaw2?.entries) ? postmortemsRaw2.entries : [];
+    if (pmEntries2.length > 0) {
+      const policies = compileLessonsToPolicies(pmEntries2);
+      if (policies.length > 0) {
+        await writeJson(path.join(stateDir, "learned_policies.json"), policies);
+        await appendProgress(config, `[POLICY_COMPILER] ${policies.length} lesson-based policies compiled: ${policies.map(p => p.id).join(", ")}`);
+      }
+    }
+  } catch (err) {
+    warn(`[orchestrator] Learning policy compilation failed (non-fatal): ${String(err?.message || err)}`);
+  }
+
+  // ── Capacity scoreboard: persist KPIs for trend analysis ──────────────────
+  try {
+    await appendCapacityEntry(config, {
+      parserConfidence: prometheusAnalysis?.parserConfidence ?? null,
+      planCount: Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans.length : 0,
+      projectHealth: prometheusAnalysis?.projectHealth ?? "unknown",
+      optimizerStatus: "ok",
+      budgetUsed: prometheusAnalysis?.requestBudget?.estimatedPremiumRequestsTotal ?? 0,
+      budgetLimit: prometheusAnalysis?.requestBudget?.hardCapTotal ?? 0,
+      workersDone: batches.length,
+    });
+  } catch (err) {
+    warn(`[orchestrator] Capacity scoreboard update failed (non-fatal): ${String(err?.message || err)}`);
+  }
+
+  // ── Delta analytics + strategy retune (Wave 6) ───────────────────────────
+  try {
+    const delta = await computeCapabilityDelta(config);
+    if (delta.summary.hasEnoughData) {
+      await appendProgress(config, `[DELTA] Capability score=${delta.overallScore}/100 improving=[${delta.summary.improving.join(",")}] degrading=[${delta.summary.degrading.join(",")}]`);
+
+      const retune = evaluateRetune(config, delta);
+      if (retune.shouldRetune) {
+        await appendProgress(config, `[RETUNE] ${retune.actions.length} retune action(s) recommended: ${retune.actions.map(a => a.parameter).join(", ")}`);
+        // Write retune recommendations to state for Jesus to consider
+        await writeJson(path.join(stateDir, "retune_recommendations.json"), {
+          generatedAt: new Date().toISOString(),
+          actions: retune.actions,
+          deltaReport: delta,
+        });
+      }
+    }
+  } catch (err) {
+    warn(`[orchestrator] Delta analytics/retune failed (non-fatal): ${String(err?.message || err)}`);
+  }
+}
+
+async function runSingleCycleWithFailStop(config, options = {}) {
+  try {
+    await runSingleCycle(config, options);
+    return true;
+  } catch (err) {
+    const msg = String(err?.message || err).slice(0, 500);
+    await appendProgress(config, `[BOX] Fatal cycle error — stopping daemon (stopOnError=true): ${msg}`);
+    await appendAlert(config, {
+      severity: ALERT_SEVERITY.CRITICAL,
+      source: "orchestrator",
+      title: "Daemon stopped due to cycle error",
+      message: msg
+    });
+    await safeUpdatePipelineProgress(config, "idle", "System stopped after fatal cycle error");
+    await clearDaemonPid(config);
+    return false;
+  }
 }
 
 // ── Main loop: Jesus → Prometheus → Athena → Worker → Athena → repeat ──────
@@ -967,7 +1701,7 @@ async function mainLoop(config) {
         await appendProgress(config, `[LOOP] Escalation to Jesus: ${escalation.reason || "(no reason)"}`);
         await writeJson(path.join(stateDir, "jesus_escalation.json"), {});
         // Escalation triggers a fresh full cycle
-        await runSingleCycle(config);
+        if (!(await runSingleCycleWithFailStop(config))) break;
         continue;
       }
     } catch { /* escalation file may not exist */ }
@@ -1006,7 +1740,7 @@ async function mainLoop(config) {
         // There's remaining work — run a new full cycle
         // Jesus will see the current state and decide appropriately
         await appendProgress(config, `[LOOP] ${completed.length}/${totalPlans} plans done, ${pending.length} remaining — starting new cycle`);
-        await runSingleCycle(config);
+        if (!(await runSingleCycleWithFailStop(config))) break;
         await sleep(RE_EVAL_SLEEP_MS);
         continue;
       }
@@ -1024,10 +1758,94 @@ async function mainLoop(config) {
         }
       }
 
+      // ── Self-Improvement: Health Audit (Phase B) + Legacy cycle ────────────
+      const siGateHealth = await isSelfImprovementActive(config);
+      await siLogAsync(config, "GATE", "Health audit gate check: " + siGateHealth.status + " — " + siGateHealth.reason);
+
+      if (!siGateHealth.active) {
+        await appendProgress(config, "[SELF-IMPROVEMENT] DISABLED (" + siGateHealth.status + ") — skipping health audit + legacy SI");
+        await siLogAsync(config, "INFO", "Health audit + legacy SI skipped (disabled)");
+      } else {
       try {
-        await runSelfImprovementCycle(config);
+        const siStateDir = config.paths?.stateDir || "state";
+
+        // Gather worker results and postmortems for health audit
+        const postmortemsRaw = await readJson(path.join(siStateDir, "athena_postmortems.json"), null);
+        const recentPostmortems = Array.isArray(postmortemsRaw?.entries)
+          ? postmortemsRaw.entries.slice(-10) : [];
+        const evolutionProgress = await readJson(path.join(siStateDir, "evolution_progress.json"), null);
+        const healthAuditData = await readJson(path.join(siStateDir, "health_audit_findings.json"), null);
+        const athenaPlanReview = await readJson(path.join(siStateDir, "athena_plan_review.json"), null);
+
+        const workerResults = {
+          totalPlans: totalPlans,
+          evolutionProgress: evolutionProgress || {},
+          athenaPlanReview: athenaPlanReview || null,
+        };
+        const healthSignals = {
+          healthAudit: healthAuditData || {},
+          athenaPlanReview: athenaPlanReview || null,
+        };
+
+        await appendProgress(config, "[SELF-IMPROVEMENT] Running post-completion health audit (Phase B)...");
+        await siLogAsync(config, "HEALTH", "Starting post-completion health audit");
+        const healthResult = await runHealthAudit(config, {
+          workerResults,
+          postmortems: recentPostmortems,
+          systemHealth: healthSignals,
+        });
+
+        if (healthResult) {
+          await siLogAsync(config, "HEALTH", "Health audit result: " + healthResult.gateDecision + " — " + healthResult.gateReason);
+          await persistSelfImprovementDecision(config, "health_audit", healthResult, {
+            totalPlans,
+            completedAt: new Date().toISOString(),
+          });
+          await appendProgress(config, `[SELF-IMPROVEMENT] Health audit: ${healthResult.gateDecision} — ${healthResult.gateReason}`);
+
+          if (healthResult.gateDecision === HEALTH_GATE.UNHEALTHY) {
+            await appendProgress(config, "[SELF-IMPROVEMENT] UNHEALTHY verdict — escalating");
+            await escalateRepairFailure(config, {
+              gateDecision: healthResult.gateDecision,
+              gateReason: healthResult.gateReason,
+              rootCauses: (healthResult.workerHealth?.problemWorkers || []).map(w => ({
+                cause: w.issue, severity: w.severity, affectedComponent: w.worker
+              })),
+            }, { cycleId: `health-${Date.now()}` });
+          }
+        } else {
+          await appendProgress(config, "[SELF-IMPROVEMENT] Health audit returned no result — skipping");
+        }
+
+        // Also run legacy self-improvement cycle if quality gate passes
+        const siGate = await shouldTriggerSelfImprovement(config, siStateDir);
+        if (siGate.shouldRun) {
+          await appendProgress(config, `[SELF-IMPROVEMENT] Legacy quality gate passed: ${siGate.reason}`);
+          await runSelfImprovementCycle(config);
+          await writeJson(path.join(siStateDir, "self_improvement_state.json"), {
+            lastRunAt: new Date().toISOString(),
+            cyclesSinceLastRun: 0
+          });
+        } else {
+          await appendProgress(config, `[SELF-IMPROVEMENT] Legacy skipped (quality gate): ${siGate.reason}`);
+          const siState = await readJson(path.join(siStateDir, "self_improvement_state.json"), {});
+          await writeJson(path.join(siStateDir, "self_improvement_state.json"), {
+            ...siState,
+            cyclesSinceLastRun: (siState.cyclesSinceLastRun || 0) + 1
+          });
+        }
       } catch (err) {
+        await siLogAsync(config, "WARN", "Self-improvement error: " + String(err?.message || err).slice(0, 200));
         warn(`[orchestrator] self-improvement error: ${String(err?.message || err)}`);
+      }
+      } // end siGateHealth.active
+
+      // ── Evolution metrics: persist proof-of-improvement data ──────────────
+      try {
+        const evoMetrics = await collectEvolutionMetrics(config);
+        await appendProgress(config, `[EVOLUTION_METRICS] Collected — deterministicRate=${evoMetrics.deterministicPostmortem?.rate ?? "N/A"} premiumReqs24h=${evoMetrics.premiumRequestsPerDay}`);
+      } catch (err) {
+        warn(`[orchestrator] evolution metrics error (non-fatal): ${String(err?.message || err)}`);
       }
 
       // ── Governance canary: process running policy-rule canary experiments ──
@@ -1053,12 +1871,12 @@ async function mainLoop(config) {
         warn(`[orchestrator] governance canary processing error (non-fatal): ${String(err?.message || err)}`);
       }
 
-      // Start a new Prometheus cycle to find new work
-      await appendProgress(config, "[LOOP] Post-completion done — running Prometheus for next iteration");
-      await runSingleCycle(config);
+      // Start a new Prometheus cycle to find new work — bypass cache since all plans completed
+      await appendProgress(config, "[LOOP] Post-completion done — triggering Prometheus replan (cache bypass: all plans completed)");
+      if (!(await runSingleCycleWithFailStop(config, { replanReason: "all_plans_completed" }))) break;
     } else {
       // No plans at all — first run or fresh start
-      await runSingleCycle(config);
+      if (!(await runSingleCycleWithFailStop(config))) break;
     }
 
     await safeUpdatePipelineProgress(config, "idle", "Cycle complete — waiting before next iteration");

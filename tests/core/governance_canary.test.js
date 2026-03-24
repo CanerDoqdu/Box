@@ -896,3 +896,43 @@ describe("GOVERNANCE_AUDIT_REQUIRED_FIELDS (AC6 / AC5)", () => {
     }
   });
 });
+
+// ── Audit write failure — explicit non-fatal signal ───────────────────────────
+
+describe("appendGovernanceAuditLog — audit-write-failed status", () => {
+  it("should return audit-write-failed status when appendFile fails", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-audit-fail-"));
+    try {
+      // Make the audit log path a directory so fs.appendFile fails
+      const auditLogPath = path.join(tmpDir, "governance_canary_audit.jsonl");
+      await fs.mkdir(auditLogPath, { recursive: true });
+
+      const result = await appendGovernanceAuditLog(tmpDir, {
+        event:     GOVERNANCE_AUDIT_EVENT.CANARY_STARTED,
+        canaryId:  "govcanary-test-fail",
+        timestamp: new Date().toISOString()
+      });
+
+      assert.equal(result.ok, false, "ok must be false when appendFile fails");
+      assert.equal(result.status, "audit-write-failed",
+        "status must be audit-write-failed on write failure");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns ok=true and status=written on successful append", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-audit-ok-"));
+    try {
+      const result = await appendGovernanceAuditLog(tmpDir, {
+        event:     GOVERNANCE_AUDIT_EVENT.CANARY_STARTED,
+        canaryId:  "govcanary-test-ok",
+        timestamp: new Date().toISOString()
+      });
+      assert.equal(result.ok, true);
+      assert.equal(result.status, "written");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+});

@@ -16,13 +16,7 @@
     "requiredStatusContexts": []
   },
   "runtime": {
-    "claudeEnabled": false,
-    "reviewerProvider": "none",
-    "copilotAutoCompact": true,
-    "copilotRehydrateOnFail": true,
-    "copilotMaxRetries": 2,
-    "claudeEscalationOnly": false,
-    "claudeSupervisorOnly": false,
+    "reviewerProvider": "copilot",
     "autonomousMaxAttemptsPerTask": 3,
     "autonomousTaskSplitOnFailure": true,
     "maxQueuedTasks": 30,
@@ -48,6 +42,9 @@
       ".next/",
       "node_modules/"
     ],
+    "disableWaveParallelDispatch": false,
+    "prometheusAnalysisFreshnessMinutes": 60,
+    "jesusDirectiveFreshnessMinutes": 30,
     "plannerMaxGenerations": 3,
     "maxTacticalCycles": 6,
     "maxDescendantDepth": 3,
@@ -101,7 +98,8 @@
       "maxTasksPerCycle": 12,
       "maxWorkerSpawnsPerCycle": 12,
       "maxSplitsPerCycle": 8
-    }
+    },
+    "workerContextTokenLimit": 100000
   },
   "roadmap": {
     "strategy": "roadmap-first",
@@ -119,34 +117,24 @@
     },
     "deepPlanner": {
       "id": "deep-planner",
-      "name": "Trump",
+      "name": "Prometheus",
       "model": "GPT-5.3-Codex",
       "provider": "copilot"
     },
-    "leadWorker": {
-      "id": "lead-worker",
-      "name": "Moses",
+    "qualityReviewer": {
+      "id": "quality-reviewer",
+      "name": "Athena",
       "model": "Claude Sonnet 4.6",
       "provider": "copilot"
     },
     "workers": {
-      "backend": { "id": "worker-backend", "name": "King David", "model": "Claude Sonnet 4.6" },
-      "frontend": { "id": "worker-frontend", "name": "Esther", "model": "GPT-5.3-Codex" },
-      "api": { "id": "worker-api", "name": "Aaron", "model": "Claude Sonnet 4.6" },
-      "integration": { "id": "worker-integration", "name": "Joseph", "model": "Claude Sonnet 4.6" },
-      "test": { "id": "worker-test", "name": "Samuel", "model": "GPT-5.3-Codex" },
-      "qa": { "id": "worker-qa", "name": "Isaiah", "model": "GPT-5.3-Codex" },
-      "devops": { "id": "worker-devops", "name": "Noah", "model": "Claude Sonnet 4.6" },
-      "security": { "id": "worker-security", "name": "Elijah", "model": "Claude Sonnet 4.6" },
-      "scanA": { "id": "worker-scan-a", "name": "Issachar", "model": "Claude Sonnet 4.6" },
-      "scanB": { "id": "worker-scan-b", "name": "Ezra", "model": "Claude Sonnet 4.6" }
+      "evolution": { "id": "worker-evolution", "name": "Evolution Worker", "model": "GPT-5.3-Codex" }
     }
   },
   "planner": {
-    "useClaudeForPlanning": false,
     "useReviewerForPlanning": true,
-    "maxTasks": 5,
-    "enforceTrumpExecutionStrategy": true,
+    "maxTasks": 0,
+    "enforcePrometheusExecutionStrategy": true,
     "defaultMaxWorkersPerWave": 10,
     "preferFewestWorkers": true,
     "allowSameCycleFollowUps": false,
@@ -154,6 +142,7 @@
   },
   "selfImprovement": {
     "enabled": true,
+    "forceEveryComplete": false,
     "maxReports": 200,
     "maxImprovementTasksPerCycle": 3,
     "enforceCoreModuleGuard": true,
@@ -164,19 +153,15 @@
     ],
     "knowledgeMemoryEnabled": true,
     "experimentEngineEnabled": true,
-    "experimentEnforcement": "soft",
-    "scheduler": {
-      "maxTotalActiveExperiments": 3,
-      "highImpactScoreThreshold": 0.7,
-      "maxActiveExperimentsPerTier": {
-        "critical": 1,
-        "high": 1,
-        "medium": 2,
-        "low": 3
-      },
-      "baselineMetricsPath": "state/hypothesis_baselines.json",
-      "rationaleOutputPath": "state/scheduler_rationale.json"
+    "shadowPolicy": {
+      "enabled": true,
+      "threshold": 0.10,
+      "cycleWindow": 20,
+      "minSampleSize": 3
     }
+  },
+  "athena": {
+    "forceAiPostmortem": false
   },
   "canary": {
     "enabled": true,
@@ -220,22 +205,6 @@
     "requireSecurityScan": true,
     "minCoveragePercent": 80
   },
-  "claude": {
-    "model": "claude-sonnet-4-6",
-    "pricing": {
-      "inputUsdPerMToken": 3,
-      "outputUsdPerMToken": 15,
-      "cacheReadUsdPerMToken": 0.3,
-      "cacheCreationUsdPerMToken": 3.75
-    },
-    "reviewMaxRetries": 2,
-    "reviewMaxTokens": 800,
-    "planMaxTokens": 1400,
-    "thinking": {
-      "type": "adaptive",
-      "effort": "medium"
-    }
-  },
   "copilot": {
     "strategy": "task-best",
     "defaultModel": "Claude Sonnet 4.6",
@@ -254,20 +223,10 @@
       "production": ["Claude Sonnet 4.6", "GPT-5.3-Codex"]
     },
     "preferredModelsByRole": {
-      "Trump": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
-      "Moses": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
-      "Jesus": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
-      "King David": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
-      "Esther": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
-      "Aaron": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
-      "Joseph": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
-      "Samuel": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
-      "Isaiah": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
-      "Noah": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
-      "Elijah": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
-      "Issachar": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
-      "Ezra": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
-      "Moses": ["Claude Sonnet 4.6", "GPT-5.3-Codex"]
+      "Jesus": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
+      "Prometheus": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
+      "Athena": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
+      "Evolution Worker": ["GPT-5.3-Codex", "Claude Sonnet 4.6"]
     },
     "opusModel": "Claude Sonnet 4.6",
     "allowOpusEscalation": false,
@@ -363,16 +322,16 @@
       }
     }
   },
-  "interventionOptimizer": {
+  "slo": {
     "enabled": true,
-    "sparseDataThreshold": 3,
-    "defaultSuccessProbability": 0.8,
-    "defaultImpact": 0.7,
-    "defaultRiskCost": 0.3,
-    "defaultSampleCount": 3,
-    "budgetUnit": "workerSpawns"
-  },
-  "rollbackEngine": {
+    "thresholds": {
+      "decisionLatencyMs": 120000,
+      "dispatchLatencyMs": 30000,
+      "verificationCompletionMs": 3600000
+    },
+    "breachSeverity": {
+      "decisionLatencyMs": "high",
+      "rollbackEngine": {
     "enabled": true,
     "oneCycleSlaMs": 5000,
     "incidentLogPath": "state/rollback_incidents.jsonl",
@@ -381,10 +340,10 @@
     "configFilePath": "box.config.json",
     "policyFilePath": "policy.json"
   },
-  "athenaCalibration": {
-    "fixturesDir": "tests/fixtures/calibration",
-    "maxDeviationScore": 0.25,
-    "stateFile": "state/athena_calibration_run.json"
+  "dispatchLatencyMs": "high",
+      "verificationCompletionMs": "critical"
+    },
+    "degradedOnBreach": true
   },
   "governanceFreeze": {
     "enabled": false,
@@ -415,11 +374,16 @@
     "cautionFiles": [
       "src/core/task_queue.js",
       "src/core/self_improvement.js",
-      "src/core/moses_coordinator.js",
+      "src/core/athena_reviewer.js",
       "src/core/jesus_supervisor.js",
-      "src/core/trump.js",
+      "src/core/prometheus.js",
       "box.config.json",
       "package.json"
     ]
+  },
+  "athenaCalibration": {
+    "maxDeviationScore": 0.25,
+    "fixturesDir": "tests/fixtures/calibration",
+    "stateFile": "state/athena_calibration_run.json"
   }
 }

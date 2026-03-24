@@ -1,20 +1,22 @@
 /**
- * Prometheus — Self-Evolution Engine & Key Planner (Autonomous Mode)
+ * Prometheus — Self-Evolution Engine & Key Planner (Simplified)
  *
  * Prometheus is activated by Jesus for deep repository analysis.
- * Uses single-prompt mode: one request per invocation, no autopilot continuations.
- * Prometheus scans the repo, reads files, analyzes code, and produces worker plans.
+ * Uses single-prompt mode: one request per invocation.
+ * The Copilot CLI agent reads the repo itself — no chunk export needed.
+ * Behavior is defined in .github/agents/prometheus.agent.md.
  *
- * Output: detailed worker assignments in state/prometheus_analysis.json
+ * Output: deep analysis artifact in state/prometheus_analysis.json
+ * Live log: state/live_worker_prometheus.log (streamed in real-time)
  */
 
 import path from "node:path";
 import fs from "node:fs/promises";
-import { writeJson, spawnAsync } from "./fs_utils.js";
+import { appendFileSync } from "node:fs";
+import { readJson, writeJson, spawnAsync } from "./fs_utils.js";
 import { appendAlert, appendProgress, appendInterventionOptimizerEntry } from "./state_tracker.js";
 import { getRoleRegistry } from "./role_registry.js";
-import { buildAgentArgs, parseAgentOutput, logAgentThinking } from "./agent_loader.js";
-import { chatLog } from "./logger.js";
+import { buildAgentArgs, parseAgentOutput } from "./agent_loader.js";
 import { addSchemaVersion, STATE_FILE_TYPE } from "./schema_registry.js";
 import { PREMORTEM_RISK_LEVEL } from "./athena_reviewer.js";
 import {
@@ -28,11 +30,14 @@ import {
   persistGraphDiagnostics,
   GRAPH_STATUS,
 } from "./dependency_graph_resolver.js";
+import { runCriticPass } from "./plan_critic.js";
+import { enrichPlansWithAC } from "./ac_compiler.js";
 import {
   validateLeadershipContract,
   LEADERSHIP_CONTRACT_TYPE,
   TRUST_BOUNDARY_ERROR,
 } from "./trust_boundary.js";
+import { validateAllPlans } from "./plan_contract_validator.js";
 
 export function detectModelFallback(rawText) {
   const text = String(rawText || "");
@@ -56,29 +61,93 @@ export function buildPrometheusPlanningPolicy(config) {
   };
 }
 
-export function normalizeRepoPath(filePath) {
-  return String(filePath || "")
-    .replace(/\\/g, "/")
-    .replace(/^\.\//, "")
-    .replace(/^\//, "")
-    .trim()
-    .toLowerCase();
+export function buildConcretePremortem(taskText, targetFiles = []) {
+  const task = String(taskText || "target change").trim() || "target change";
+  const targets = Array.isArray(targetFiles)
+    ? targetFiles.map(v => String(v || "").trim()).filter(Boolean)
+    : [];
+  const targetSummary = targets.join(", ") || "targeted files";
+
+  return {
+    riskLevel: PREMORTEM_RISK_LEVEL.HIGH,
+    scenario: `A high-risk change in ${targetSummary} could regress behavior while implementing ${task}.`,
+    failurePaths: [
+      `Dependency or routing changes in ${targetSummary} break an existing execution path.`,
+      `The implementation for ${task} introduces incorrect dispatch under valid input.`
+    ],
+    mitigations: [
+      `Keep behavior behind deterministic validation and targeted tests for ${targetSummary}.`,
+      "Preserve rollback-safe defaults if any verification gate fails."
+    ],
+    detectionSignals: [
+      `Targeted tests for ${targetSummary} fail immediately after the change.`,
+      `Cycle telemetry indicates regression in the stage affected by ${task}.`
+    ],
+    guardrails: [
+      `Require explicit verification before dispatch for changes touching ${targetSummary}.`,
+      "Block promotion when outputs are ambiguous or degraded."
+    ],
+    rollbackPlan: `Revert changes in ${targetSummary} and restore the previous deterministic path.`
+  };
+}
+
+function normalizeFollowUpTaskKey(text) {
+  const s = String(text || "").toLowerCase();
+  return s
+    .replace(/[`'"()[\]{}]/g, " ")
+    .replace(/create\s+and\s+complete\s+a\s+task\s+to\s+/g, "")
+    .replace(/create\s+a\s+dedicated\s+task\s+to\s+/g, "")
+    .replace(/this\s+is\s+now\s+a\s+gate\s*-?\s*blocking\s+item[^.]*\.?/g, "")
+    .replace(/athena\s+must\s+(block|reject)[^.]*\.?/g, "")
+    .replace(/this\s+fix\s+must\s+ship[^.]*\.?/g, "")
+    .replace(/blocking\s+defect[^:]*:\s*/g, "")
+    .replace(/\b(five|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen)\s+consecutive\s+postmortem\s+audit\s+records\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function liveLogPath(stateDir) {
+  return path.join(stateDir, "live_worker_prometheus.log");
+}
+
+function appendLiveLogSync(stateDir, text) {
+  try {
+    appendFileSync(liveLogPath(stateDir), text, "utf8");
+  } catch { /* best-effort */ }
+}
+
+function appendPromptPreviewSync(stateDir, promptText) {
+  const prompt = String(promptText || "").trim();
+  if (!prompt) return;
+  appendLiveLogSync(
+    stateDir,
+    [
+      "",
+      "[prometheus_runtime_prompt_start]",
+      prompt,
+      "[prometheus_runtime_prompt_end]",
+      ""
+    ].join("\n")
+  );
+}
+
+async function appendPrometheusLiveLog(stateDir, section, text) {
+  const message = String(text || "").trim();
+  if (!message) return;
+  const line = `\n[${section}]\n${message}\n`;
+  try {
+    await fs.appendFile(liveLogPath(stateDir), line, "utf8");
+  } catch { /* best-effort */ }
 }
 
 /**
  * Risk threshold for pre-mortem requirement.
- * Only plans with riskLevel matching this value require a pre-mortem section.
  * Aligned with PREMORTEM_RISK_LEVEL.HIGH from athena_reviewer.js.
  */
 export const PREMORTEM_RISK_THRESHOLD = PREMORTEM_RISK_LEVEL.HIGH;
 
 /**
  * Build an empty pre-mortem scaffold for a high-risk plan.
- * This scaffold is intended to be filled by the Prometheus AI prompt.
- * Use as a reference structure when constructing plan prompts.
- *
- * @param {object} plan - Prometheus plan object
- * @returns {object} pre-mortem scaffold
  */
 export function buildPremortemScaffold(plan) {
   return {
@@ -94,571 +163,828 @@ export function buildPremortemScaffold(plan) {
   };
 }
 
-async function collectScanTargets(repoRoot) {
-  const ignoreDirs = new Set([".git", "node_modules", "state", ".box-work", "coverage", "dist"]);
-  const targets = new Set();
-  const broadSourcePrefixes = ["src/", "tests/", "docs/", "scripts/", "docker/"];
-  const metadataPrefixes = [".github/"];
-  const allowedExt = new Set([".js", ".mjs", ".cjs", ".json", ".md", ".yml", ".yaml", ".txt", ".ps1", ".sh"]);
+function inferProjectHealth(text) {
+  const s = String(text || "").toLowerCase();
+  if (s.includes("critical")) return "critical";
+  if (s.includes("needs-work") || s.includes("needs work")) return "needs-work";
+  if (s.includes("good") || s.includes("healthy")) return "good";
+  return "needs-work";
+}
 
-  async function walk(absDir, relDir = "") {
-    const entries = await fs.readdir(absDir, { withFileTypes: true }).catch(() => null);
-    if (!entries) {
-      return;
+function normalizeWaveValue(value, fallback = 1) {
+  if (Number.isFinite(Number(value)) && Number(value) >= 1) {
+    return Math.floor(Number(value));
+  }
+  const asText = String(value || "").trim();
+  return asText || fallback;
+}
+
+function normalizePlanFromTask(task, index, fallbackWave = 1) {
+  const src = (task && typeof task === "object") ? task : {};
+  const taskText = String(src.task || src.title || src.task_id || src.id || `Task-${index + 1}`).trim();
+  const verificationCommands = Array.isArray(src.verification_commands)
+    ? src.verification_commands.map(v => String(v || "").trim()).filter(Boolean)
+    : [];
+  const verification = String(src.verification || verificationCommands[0] || "npm test").trim() || "npm test";
+  const wave = normalizeWaveValue(src.wave, fallbackWave);
+
+  return {
+    ...src,
+    role: String(src.role || "evolution-worker").trim() || "evolution-worker",
+    task: taskText,
+    priority: Number.isFinite(Number(src.priority)) ? Number(src.priority) : index + 1,
+    wave,
+    verification,
+    title: String(src.title || taskText).trim(),
+    scope: String(src.scope || "").trim(),
+    task_id: String(src.task_id || src.id || taskText).trim(),
+    description: String(src.description || "").trim(),
+    waveLabel: String(src.waveLabel || "").trim(),
+    verification_commands: verificationCommands.length > 0 ? verificationCommands : [verification],
+    acceptance_criteria: Array.isArray(src.acceptance_criteria)
+      ? src.acceptance_criteria.map(v => String(v || "").trim()).filter(Boolean)
+      : [],
+    dependencies: Array.isArray(src.dependencies)
+      ? src.dependencies.map(v => String(v || "").trim()).filter(Boolean)
+      : []
+  };
+}
+
+function buildPlansFromAlternativeShape(input = {}) {
+  if (!input || typeof input !== "object") return [];
+
+  const taskIndexByKey = new Map();
+  const tasks = Array.isArray(input.tasks) ? input.tasks : [];
+  for (let i = 0; i < tasks.length; i++) {
+    const t = tasks[i] && typeof tasks[i] === "object" ? tasks[i] : {};
+    const keys = [t.task_id, t.id, t.title, t.task].map(v => String(v || "").trim()).filter(Boolean);
+    for (const key of keys) {
+      if (!taskIndexByKey.has(key)) taskIndexByKey.set(key, i);
     }
+  }
 
-    for (const entry of entries) {
-      const relPath = relDir ? `${relDir}/${entry.name}` : entry.name;
-      const normalized = normalizeRepoPath(relPath);
-      const absPath = path.join(absDir, entry.name);
-
-      if (entry.isDirectory()) {
-        if (ignoreDirs.has(entry.name)) continue;
-        await walk(absPath, relPath);
+  const waveByTaskIndex = new Map();
+  const waves = Array.isArray(input.waves) ? input.waves : [];
+  for (let i = 0; i < waves.length; i++) {
+    const waveObj = (waves[i] && typeof waves[i] === "object") ? waves[i] : {};
+    const waveValue = normalizeWaveValue(waveObj.wave, i + 1);
+    const waveTasks = Array.isArray(waveObj.tasks) ? waveObj.tasks : [];
+    for (const waveTask of waveTasks) {
+      if (waveTask && typeof waveTask === "object") {
+        const asTask = normalizePlanFromTask(waveTask, tasks.length, waveValue);
+        tasks.push(asTask);
+        const idx = tasks.length - 1;
+        taskIndexByKey.set(asTask.task_id, idx);
+        taskIndexByKey.set(asTask.task, idx);
         continue;
       }
+      const key = String(waveTask || "").trim();
+      if (!key) continue;
+      const idx = taskIndexByKey.get(key);
+      if (Number.isInteger(idx)) waveByTaskIndex.set(idx, waveValue);
+    }
+  }
 
-      const ext = path.extname(entry.name).toLowerCase();
-      const isDockerfile = /dockerfile/i.test(entry.name);
-      const inBroadScope = broadSourcePrefixes.some((prefix) => normalized.startsWith(prefix));
-      const inMetadataScope = metadataPrefixes.some((prefix) => normalized.startsWith(prefix));
+  if (tasks.length > 0) {
+    return tasks.map((task, i) => normalizePlanFromTask(task, i, waveByTaskIndex.get(i) || 1));
+  }
 
-      if (inBroadScope || inMetadataScope) {
-        if (allowedExt.has(ext) || isDockerfile) {
-          targets.add(normalized);
+  return [];
+}
+
+/**
+ * Build plans from the GPT analytical format: topBottlenecks[] + waves[].tasks (strings).
+ * This is the format GPT-5.3-Codex produces when asked for a bottleneck analysis.
+ */
+function buildPlansFromBottlenecksShape(input) {
+  const SEVERITY_PRIORITY = { critical: 1, high: 2, medium: 3, low: 4 };
+  const waves = Array.isArray(input.waves) ? input.waves : [];
+  const bottlenecks = Array.isArray(input.topBottlenecks) ? input.topBottlenecks : [];
+  const proofMetrics = Array.isArray(input.proofMetrics) ? input.proofMetrics : [];
+
+  const plans = [];
+
+  for (const waveObj of waves) {
+    if (!waveObj || typeof waveObj !== "object") continue;
+    const waveNum = normalizeWaveValue(waveObj.wave, 1);
+    const taskStrings = Array.isArray(waveObj.tasks) ? waveObj.tasks : [];
+
+    for (const taskStr of taskStrings) {
+      const taskText = String(taskStr || "").trim();
+      if (!taskText) continue;
+      const lowerTask = taskText.toLowerCase();
+
+      // Find a matching bottleneck by keyword overlap (split on all non-alphanumeric incl. underscores)
+      const taskWords = lowerTask.split(/[^a-z0-9]+/).filter(w => w.length >= 4);
+      const matchedBn = bottlenecks.find(bn => {
+        const titleWords = String(bn.title || "").toLowerCase()
+          .split(/[^a-z0-9]+/).filter(w => w.length >= 4);
+        return titleWords.some(w => taskWords.includes(w));
+      });
+
+      // Find a matching proof metric
+      const verificationMetric = proofMetrics.find(m => {
+        const metricWords = String(m || "").toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 4);
+        return taskWords.some(w => metricWords.includes(w));
+      }) || "npm test";
+
+      const severity = matchedBn?.severity || "medium";
+      plans.push({
+        role: "evolution-worker",
+        task: taskText,
+        priority: SEVERITY_PRIORITY[severity] ?? plans.length + 1,
+        wave: waveNum,
+        verification: verificationMetric,
+        title: taskText,
+        scope: String(matchedBn?.evidence || "").slice(0, 200),
+        task_id: taskText,
+        verification_commands: [verificationMetric],
+        acceptance_criteria: [],
+        dependencies: [],
+        _fromBottleneck: matchedBn?.id || null,
+      });
+    }
+  }
+
+  // If no waves, fall back to one plan per bottleneck
+  if (plans.length === 0) {
+    for (let i = 0; i < bottlenecks.length; i++) {
+      const bn = bottlenecks[i];
+      const taskText = String(bn.title || `Fix-${bn.id}`).trim();
+      plans.push({
+        role: "evolution-worker",
+        task: taskText,
+        priority: SEVERITY_PRIORITY[bn.severity] ?? i + 1,
+        wave: i + 1,
+        verification: proofMetrics[i] || "npm test",
+        title: taskText,
+        scope: String(bn.evidence || "").slice(0, 200),
+        task_id: String(bn.id || `bn-${i}`),
+        verification_commands: [proofMetrics[i] || "npm test"],
+        acceptance_criteria: [],
+        dependencies: [],
+        _fromBottleneck: bn.id || null,
+      });
+    }
+  }
+
+  return plans;
+}
+
+function buildPlansFromNarrative(analysisText) {
+  const lines = String(analysisText || "").split(/\r?\n/);
+  const plans = [];
+  let currentWave = 1;
+  let currentWaveLabel = "";
+  let currentSection = "";
+  let inWaveSection = false;
+
+  const normalizeSectionTitle = (value) => String(value || "")
+    .toLowerCase()
+    .replace(/[*`:#]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const isActionSection = (section) => {
+    const s = normalizeSectionTitle(section);
+    if (!s) return false;
+    return [
+      "system redesign directions",
+      "worker model redesign",
+      "model capacity utilization",
+      "what to stop / simplify / remove",
+      "what to stop simplify remove",
+      "architecture evolution roadmap",
+      "recommendations",
+      "next steps",
+      "execution roadmap",
+      "master plan"
+    ].some(label => s.includes(label));
+  };
+
+  const isDiagnosticSection = (section) => {
+    const s = normalizeSectionTitle(section);
+    if (!s) return false;
+    return [
+      "mandatory answers",
+      "evolution diagnosis",
+      "strategic diagnosis",
+      "prometheus self-critique",
+      "metrics for a smarter next cycle",
+      "final recommendation",
+      "governance and rollback policy"
+    ].some(label => s.includes(label));
+  };
+
+  const looksLikeActionablePlanLine = (text) => {
+    const s = String(text || "").trim().toLowerCase();
+    if (!s) return false;
+    if (/^(strengths?|core bottleneck|recurrent defect|scaling risk|premium efficiency ceiling|why|exit criteria|rollback triggers?)\b/.test(s)) {
+      return false;
+    }
+    return /^(task\s+\d|ship\b|fix\b|patch\b|replace\b|add\b|create\b|promote\b|keep\b|split\b|feed\b|require\b|validate\b|tighten\b|introduce\b|use\b|reduce\b|enforce\b|enable\b|remove\b|simplify\b|stop\b|upgrade\b|migrate\b|implement\b|refactor\b|extract\b|wire\b|emit\b|build\b|setup\b|configure\b|integrate\b)/.test(s);
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = String(lines[i] || "").trim();
+    if (!line) continue;
+
+    const headingMatch = line.match(/^#+\s+(.+)$/);
+    if (headingMatch) {
+      currentSection = headingMatch[1];
+      // Exit wave-collection mode when entering a diagnostic/analysis section
+      // so Q&A answers are not mistaken for actionable tasks.
+      if (isDiagnosticSection(currentSection)) inWaveSection = false;
+    }
+
+    // Wave header — capture wave number AND full label/description
+    // Handles: "**Wave 0**", "### Wave 0 — Gate unblocker (must ship first)",
+    //          "**Wave 0 (Gate blocker, must ship first)**"
+    const waveMatch = line.match(/(?:^#+\s*)?(?:\*\*)?wave\s+(\d+)[:\s—\-\u2013\u2014(]*(.*?)(?:\*\*)?$/i);
+    if (waveMatch) {
+      currentWave = Math.max(1, Number(waveMatch[1]) || 1);
+      inWaveSection = true;
+      currentWaveLabel = String(waveMatch[2] || "")
+        .replace(/\*\*/g, "")
+        .replace(/[()]/g, "")
+        .replace(/^\s*[-—\u2013\u2014]\s*/, "")
+        .trim();
+      continue;
+    }
+
+    // Numbered tasks: "1) Task", "2. **Task**: detail"
+    const numberedMatch = line.match(/^\d+[).:-]\s*(.+)$/);
+    if (numberedMatch) {
+      const taskText = numberedMatch[1]
+        .replace(/\*\*/g, "")
+        .replace(/`/g, "")
+        .trim();
+      const canCaptureNumbered = (inWaveSection || isActionSection(currentSection)) && !isDiagnosticSection(currentSection);
+      if (taskText && canCaptureNumbered && looksLikeActionablePlanLine(taskText)) {
+        // Collect continuation lines that follow until the next list item / wave header
+        const continuationParts = [];
+        while (i + 1 < lines.length) {
+          const nextRaw = String(lines[i + 1] || "").trim();
+          if (!nextRaw) { i++; continue; }
+          if (/^\d+[).:-]\s/.test(nextRaw) || /^[-*]\s/.test(nextRaw) ||
+              /(?:^#+\s*)?(?:\*\*)?wave\s+\d+/i.test(nextRaw) || /^#+\s/.test(nextRaw) ||
+              /^===|^---/.test(nextRaw)) break;
+          continuationParts.push(nextRaw.replace(/\*\*/g, "").replace(/`/g, "").trim());
+          i++;
         }
+        plans.push({
+          task: taskText,
+          wave: currentWave,
+          waveLabel: currentWaveLabel,
+          description: continuationParts.join(" "),
+          verification: "npm test"
+        });
+      }
+      continue;
+    }
+
+    // Bulleted tasks under waves: "- **Task**: ..."
+    const bulletMatch = line.match(/^[-*]\s+(.+)$/);
+    if (bulletMatch) {
+      const taskText = bulletMatch[1]
+        .replace(/\*\*/g, "")
+        .replace(/`/g, "")
+        .trim();
+      const canCaptureBullet = inWaveSection || (isActionSection(currentSection) && !isDiagnosticSection(currentSection));
+      if (taskText.length >= 8 && canCaptureBullet && looksLikeActionablePlanLine(taskText)) {
+        const continuationParts = [];
+        while (i + 1 < lines.length) {
+          const nextRaw = String(lines[i + 1] || "").trim();
+          if (!nextRaw) { i++; continue; }
+          if (/^\d+[).:-]\s/.test(nextRaw) || /^[-*]\s/.test(nextRaw) ||
+              /(?:^#+\s*)?(?:\*\*)?wave\s+\d+/i.test(nextRaw) || /^#+\s/.test(nextRaw) ||
+              /^===|^---/.test(nextRaw)) break;
+          continuationParts.push(nextRaw.replace(/\*\*/g, "").replace(/`/g, "").trim());
+          i++;
+        }
+        plans.push({
+          task: taskText,
+          wave: currentWave,
+          waveLabel: currentWaveLabel,
+          description: continuationParts.join(" "),
+          verification: "npm test"
+        });
       }
     }
   }
 
-  await walk(repoRoot);
-
-  try {
-    const rootEntries = await fs.readdir(repoRoot, { withFileTypes: true });
-    for (const entry of rootEntries) {
-      if (!entry.isFile()) continue;
-      const fileName = entry.name;
-      const ext = path.extname(fileName).toLowerCase();
-      const normalized = normalizeRepoPath(fileName);
-      const isDockerfile = /dockerfile/i.test(fileName);
-      if (allowedExt.has(ext) || isDockerfile) {
-        targets.add(normalized);
-      }
-    }
-  } catch {
-    // Root scan is best-effort.
+  // Deduplicate by normalized task text while keeping insertion order.
+  const seen = new Set();
+  const unique = [];
+  for (const p of plans) {
+    const key = String(p.task || "").toLowerCase().replace(/\s+/g, " ").trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    unique.push(p);
   }
 
-  return Array.from(targets).sort();
+  return unique;
 }
 
-function detectFenceLanguage(filePath) {
-  const ext = path.extname(String(filePath || "")).toLowerCase();
-  if (ext === ".js" || ext === ".mjs") return "js";
-  if (ext === ".json") return "json";
-  if (ext === ".yml" || ext === ".yaml") return "yaml";
-  if (ext === ".md") return "md";
-  return "text";
-}
+export function normalizePrometheusParsedOutput(parsed, aiResult = {}) {
+  const input = (parsed && typeof parsed === "object") ? parsed : {};
+  // Build analysis text — also cover topBottlenecks narrative as fallback
+  const bnNarrative = Array.isArray(input.topBottlenecks) && input.topBottlenecks.length > 0
+    ? input.topBottlenecks.map(bn => `[${bn.id}] ${bn.title}: ${bn.evidence}`).join("\n")
+    : "";
+  const analysisText = String(
+    input.analysis
+      || input.strategicNarrative
+      || input.cycleObjective
+      || aiResult?.thinking
+      || bnNarrative
+      || aiResult?.raw
+      || ""
+  ).trim();
 
-async function createPrometheusRepoExport(repoRoot, stateDir, scanTargets, criticalFiles, chunkCharLimit = 120000) {
-  const stateDirAbs = path.isAbsolute(stateDir) ? stateDir : path.join(repoRoot, stateDir);
-  const exportDir = path.join(stateDirAbs, "prometheus_repo_export");
-  await fs.rm(exportDir, { recursive: true, force: true });
-  await fs.mkdir(exportDir, { recursive: true });
+  const rawPlans = Array.isArray(input.plans) ? input.plans : [];
+  let plans = rawPlans.length > 0
+    ? rawPlans.map((plan, i) => normalizePlanFromTask(plan, i, plan?.wave || 1))
+    : buildPlansFromAlternativeShape(input);
 
-  const chunkPaths = [];
-  const chunkFiles = [];
-  let currentChunk = [];
-  let currentSize = 0;
-  let readErrors = [];
-
-  async function flushChunk() {
-    if (currentChunk.length === 0) return;
-    const chunkIndex = chunkFiles.length + 1;
-    const fileName = `chunk-${String(chunkIndex).padStart(2, "0")}.md`;
-    const relativePath = normalizeRepoPath(path.relative(repoRoot, path.join(exportDir, fileName)));
-    const absolutePath = path.join(exportDir, fileName);
-    await fs.writeFile(absolutePath, currentChunk.join("\n\n"), "utf8");
-    chunkPaths.push(relativePath);
-    chunkFiles.push({ path: relativePath, fileCount: currentChunk.length });
-    currentChunk = [];
-    currentSize = 0;
+  // Third shape: GPT analytical format — topBottlenecks[] + waves[].tasks (strings)
+  if (plans.length === 0 && (Array.isArray(input.topBottlenecks) || Array.isArray(input.waves))) {
+    plans = buildPlansFromBottlenecksShape(input);
   }
 
-  for (const target of scanTargets) {
-    const absPath = path.join(repoRoot, target);
-    const contentResult = await fs.readFile(absPath, "utf8")
-      .then((value) => ({ content: value, reason: null }))
-      .catch((err) => ({ content: null, reason: String(err?.message || err) }));
-
-    let content = contentResult.content;
-    if (contentResult.reason) {
-      const reason = contentResult.reason;
-      readErrors.push({ file: target, reason });
-      content = `READ_ERROR: ${reason}`;
-    }
-
-    const lineCount = content.split(/\r?\n/).length;
-    const section = [
-      `## FILE: ${target}`,
-      `LINES: ${lineCount}`,
-      `BYTES: ${Buffer.byteLength(content, "utf8")}`,
-      `\`\`\`${detectFenceLanguage(target)}`,
-      content,
-      "```"
-    ].join("\n");
-
-    if (currentSize > 0 && (currentSize + section.length) > chunkCharLimit) {
-      await flushChunk();
-    }
-
-    currentChunk.push(section);
-    currentSize += section.length;
+  // Final fallback: parse wave + numbered narrative plans from free-form output.
+  if (plans.length === 0 && analysisText.length > 0) {
+    plans = buildPlansFromNarrative(analysisText)
+      .map((plan, i) => normalizePlanFromTask(plan, i, plan?.wave || 1));
   }
 
-  await flushChunk();
+  const health = String(input.projectHealth || "").trim();
+  const projectHealth = ["good", "needs-work", "critical"].includes(health)
+    ? health
+    : inferProjectHealth(analysisText);
 
-  const manifestPath = normalizeRepoPath(path.relative(repoRoot, path.join(exportDir, "manifest.md")));
-  const manifestBody = [
-    "# Prometheus Repo Export",
-    `GeneratedAt: ${new Date().toISOString()}`,
-    `SourceTargetCount: ${scanTargets.length}`,
-    `ChunkCount: ${chunkPaths.length}`,
-    "",
-    "## Instructions",
-    "1. Read THIS manifest first.",
-    "2. Read EVERY chunk file listed below using read_file.",
-    "3. Base your analysis on exported file contents, not on snapshot guesses.",
-    "",
-    "## Critical Source Files",
-    ...criticalFiles.map((file) => `- ${file}`),
-    "",
-    "## Chunk Files",
-    ...chunkPaths.map((chunkPath, index) => `${index + 1}. ${chunkPath}`),
-    "",
-    "## Read Errors",
-    ...(readErrors.length > 0 ? readErrors.map((entry) => `- ${entry.file}: ${entry.reason}`) : ["- none"])
-  ].join("\n");
+  const executionStrategy = (input.executionStrategy && typeof input.executionStrategy === "object")
+    ? input.executionStrategy
+    : { waves: Array.isArray(input.waves) ? input.waves : [] };
 
-  await fs.writeFile(path.join(exportDir, "manifest.md"), manifestBody, "utf8");
+  const requestBudget = (input.requestBudget && Number.isFinite(Number(input.requestBudget.estimatedPremiumRequestsTotal)))
+    ? {
+      ...input.requestBudget,
+      hardCapTotal: Number.isFinite(Number(input.requestBudget.hardCapTotal))
+        ? Number(input.requestBudget.hardCapTotal)
+        : Math.max(1, Math.ceil((plans.length || 1) * 1.25)),
+    }
+    : {
+      estimatedPremiumRequestsTotal: Math.max(1, plans.length || 1),
+      errorMarginPercent: 25,
+      hardCapTotal: Math.max(1, Math.ceil((plans.length || 1) * 1.25)),
+      confidence: "low",
+      byWave: [],
+      byRole: [],
+      _fallback: true,
+    };
+
+  // Parser confidence: score 0-1 indicating how structured the AI output was.
+  // 1.0 = JSON plans parsed directly; 0.5 = narrative fallback used; lower = less signal
+  let parserConfidence = 1.0;
+  if (rawPlans.length === 0 && plans.length > 0) {
+    // Plans came from narrative/alternative shape parsing
+    parserConfidence = 0.5;
+  }
+  if (plans.length === 0) {
+    parserConfidence = 0.1;
+  }
+  if (!health || !["good", "needs-work", "critical"].includes(health)) {
+    parserConfidence = Math.max(0.1, parserConfidence - 0.2);
+  }
+  if (requestBudget._fallback) {
+    parserConfidence = Math.max(0.1, parserConfidence - 0.1);
+  }
 
   return {
-    manifestPath,
-    chunkPaths,
-    readErrors,
-    sourceTargetCount: scanTargets.length,
-    chunkCount: chunkPaths.length
+    ...input,
+    analysis: analysisText || "Prometheus analysis available but narrative was empty.",
+    projectHealth,
+    executionStrategy,
+    requestBudget,
+    parserConfidence: Math.round(parserConfidence * 100) / 100,
+    plans
   };
 }
 
-export function extractReadTargetsFromThinking(thinking) {
-  const text = String(thinking || "");
-  const out = new Set();
-  const lines = text.split(/\r?\n/);
-
-  for (const line of lines) {
-    const match = line.match(/[|│]\s+([^\r\n]+)/);
-    if (!match) continue;
-    let candidate = match[1].trim();
-    candidate = candidate.replace(/\s+\(.*line[s]? read\)\s*$/i, "").trim();
-    candidate = candidate.replace(/\s+\(.*\)\s*$/i, "").trim();
-    if (!candidate) continue;
-    if (!(/[\\/]/.test(candidate) || /\.[a-z0-9]+$/i.test(candidate))) continue;
-
-    out.add(normalizeRepoPath(candidate));
-  }
-
-  return Array.from(out);
-}
-
-function extractAnchoredPaths(text) {
-  const source = String(text || "");
-  const matches = source.match(
-    /(?:^|[\s`("'[,{])((?:src|tests|docs|docker|scripts|state|\.github)\/[A-Za-z0-9_./-]+|README\.md|package\.json|box\.config\.json|policy\.json|docker-compose\.yml)(?=$|[\s`)"'\],:;])/gm
-  ) || [];
-
-  return Array.from(new Set(matches.map((entry) => {
-    const normalized = String(entry || "")
-      .trim()
-      .replace(/^[\s`("'[,{]+/, "")
-      .replace(/[\s`)"'\],:;]+$/, "");
-    return normalizeRepoPath(normalized);
-  }).filter(Boolean)));
-}
-
-function countLineAnchors(text) {
-  const source = String(text || "");
-  const matches = source.match(/\b(?:L\d+(?::\d+)?|lines?\s+\d+(?:\s*[-:]\s*\d+)?)\b/gi);
-  return Array.isArray(matches) ? matches.length : 0;
-}
-
-function collectPlanEvidenceErrors(plans) {
-  const list = Array.isArray(plans) ? plans : [];
-  const errors = [];
-
-  list.forEach((plan, index) => {
-    const context = String(plan?.context || "");
-    if (!context.trim()) {
-      errors.push(`plan ${index + 1} is missing context`);
-      return;
-    }
-
-    if (extractAnchoredPaths(context).length === 0) {
-      errors.push(`plan ${index + 1} context lacks file anchors`);
-    }
-    if (countLineAnchors(context) === 0) {
-      errors.push(`plan ${index + 1} context lacks line anchors`);
-    }
-  });
-
-  return errors;
-}
-
-export function evaluatePrometheusReadCoverage({ thinking, parsed, targets, criticalFiles, requiredCoverage = 1 }) {
-  const targetList = Array.isArray(targets) ? targets.map(normalizeRepoPath) : [];
-  const criticalList = Array.isArray(criticalFiles) ? criticalFiles.map(normalizeRepoPath) : [];
-  const readTargets = extractReadTargetsFromThinking(thinking);
-  const readSet = new Set(readTargets);
-
-  const matchedTargets = targetList.filter((target) => {
-    if (readSet.has(target)) return true;
-    const suffix = `/${target}`;
-    for (const readPath of readSet) {
-      if (readPath.endsWith(suffix)) return true;
-    }
-    return false;
-  });
-
-  const matchedSet = new Set(matchedTargets);
-  const missingCritical = criticalList.filter((file) => !matchedSet.has(file));
-  const totalTargets = targetList.length;
-  const coverage = totalTargets > 0 ? matchedTargets.length / totalTargets : 0;
-
-  const mergedText = [
-    String(thinking || ""),
-    String(parsed?.analysis || ""),
-    String(parsed?.strategicNarrative || ""),
-    String(parsed?.keyFindings || ""),
-    ...(Array.isArray(parsed?.plans) ? parsed.plans.map((plan) => String(plan?.context || "")) : [])
-  ].join("\n");
-  const loweredMergedText = mergedText.toLowerCase();
-  const anchoredPaths = extractAnchoredPaths(mergedText);
-  const lineAnchorCount = countLineAnchors(mergedText);
-
-  const errors = [];
-  if (loweredMergedText.includes("snapshot signals")) {
-    errors.push("snapshot-only analysis detected");
-  }
-  if (readTargets.length < 10) {
-    errors.push("insufficient read_file evidence in Prometheus thinking log");
-  }
-  if (coverage < requiredCoverage) {
-    errors.push(`read coverage too low (${matchedTargets.length}/${totalTargets}, required ${(requiredCoverage * 100).toFixed(0)}%)`);
-  }
-  if (missingCritical.length > 0) {
-    errors.push(`missing critical reads: ${missingCritical.slice(0, 6).join(", ")}${missingCritical.length > 6 ? " ..." : ""}`);
-  }
-  if (anchoredPaths.length < 5) {
-    errors.push(`analysis lacks concrete file anchors (${anchoredPaths.length}/5)`);
-  }
-  if (lineAnchorCount < 3) {
-    errors.push(`analysis lacks concrete line anchors (${lineAnchorCount}/3)`);
-  }
-  errors.push(...collectPlanEvidenceErrors(parsed?.plans));
+function buildNarrativeFallbackParsed(aiResult) {
+  const thinking = String(aiResult?.thinking || "").trim();
+  const raw = String(aiResult?.raw || "").trim();
+  const narrative = (thinking || raw || "Prometheus produced narrative-only output.").slice(0, 20000);
+  const strategic = narrative.slice(0, 4000);
 
   return {
-    ok: errors.length === 0,
-    errors,
-    readTargets,
-    matchedTargets,
-    anchoredPaths,
-    lineAnchorCount,
-    missingTargets: targetList.filter((file) => !matchedSet.has(file)),
-    missingCritical,
-    totalTargets,
-    matchedCount: matchedTargets.length,
-    coverage
+    analysis: narrative,
+    strategicNarrative: strategic,
+    projectHealth: inferProjectHealth(narrative),
+    keyFindings: "Narrative-only analysis mode enabled; convert key findings from analysis text.",
+    productionReadinessCoverage: [],
+    dependencyModel: {
+      criticalPath: [],
+      parallelizableTracks: [],
+      blockedBy: []
+    },
+    executionStrategy: {
+      waves: []
+    },
+    requestBudget: {
+      estimatedPremiumRequestsTotal: 1,
+      errorMarginPercent: 30,
+      hardCapTotal: 2,
+      confidence: "low",
+      byWave: [],
+      byRole: [],
+      _fallback: true
+    },
+    plans: []
   };
 }
 
-async function callCopilotAgent(command, agentSlug, contextPrompt, config, model) {
-  const args = buildAgentArgs({
-    agentSlug,
-    prompt: contextPrompt,
-    model,
-    allowAll: false,
-    maxContinues: undefined
-  });
-  const result = await spawnAsync(command, args, { env: process.env });
-  const stdout = String(result?.stdout || "");
-  const stderr = String(result?.stderr || "");
-  const raw = stdout || stderr;
-  const combinedRaw = `${stdout}\n${stderr}`.trim();
-  if (result.status !== 0) {
-    return { ok: false, raw, combinedRaw, parsed: null, thinking: "", error: `exited ${result.status}: ${(stderr || stdout).slice(0, 300)}` };
-  }
-  const parsed = parseAgentOutput(raw);
-  return { ...parsed, raw, combinedRaw };
-}
-
-// ── Main Prometheus Analysis ─────────────────────────────────────────────────
+// ── Main Prometheus Analysis (simplified) ────────────────────────────────────
 
 export async function runPrometheusAnalysis(config, options = {}) {
   const stateDir = config.paths?.stateDir || "state";
+
+  // ── Freshness cache: skip if recent analysis exists ───────────────────────
+  const freshnessMins = Number(config.runtime?.prometheusAnalysisFreshnessMinutes);
+  if (Number.isFinite(freshnessMins) && freshnessMins > 0) {
+    try {
+      const existing = await readJson(path.join(stateDir, "prometheus_analysis.json"), null);
+      if (existing?.analyzedAt) {
+        const ageMs = Date.now() - new Date(existing.analyzedAt).getTime();
+        if (ageMs < freshnessMins * 60_000) {
+          // If cached file already has plans, return it as-is
+          if (Array.isArray(existing.plans) && existing.plans.length > 0) {
+            await appendProgress(config, `[PROMETHEUS] Fresh analysis exists (${Math.round(ageMs / 60_000)}m old, threshold=${freshnessMins}m) — reusing cached result`);
+            return existing;
+          }
+          // Cached file has no plans — attempt normalization to recover plans
+          const recovered = normalizePrometheusParsedOutput(existing, {});
+          if (Array.isArray(recovered.plans) && recovered.plans.length > 0) {
+            await appendProgress(config, `[PROMETHEUS] Cached analysis normalized: ${recovered.plans.length} plan(s) recovered — rebuilding dependency graph`);
+            // Rebuild dependency graph for the recovered plans
+            try {
+              const graphTasks = recovered.plans.map((plan, i) => ({
+                id: String(plan.task || `plan-${i}`),
+                dependsOn: Array.isArray(plan.dependencies) ? plan.dependencies.map(String) : [],
+                filesInScope: [],
+              }));
+              const graphResult = resolveDependencyGraph(graphTasks);
+              recovered.dependencyGraph = {
+                status:          graphResult.status,
+                reasonCode:      graphResult.reasonCode,
+                waveCount:       graphResult.waves.length,
+                parallelTasks:   graphResult.parallelTasks,
+                serializedTasks: graphResult.serializedTasks,
+                conflictCount:   graphResult.conflictPairs.length,
+                cycleCount:      graphResult.cycles.length,
+                waves:           graphResult.waves,
+                errorMessage:    graphResult.errorMessage ?? null,
+              };
+            } catch (graphErr) {
+              recovered.dependencyGraph = { status: "degraded", errorMessage: String(graphErr?.message || graphErr) };
+            }
+            // Persist normalized result so subsequent reads don't need re-normalization
+            await writeJson(path.join(stateDir, "prometheus_analysis.json"), recovered).catch(() => {});
+            return recovered;
+          }
+          // Cache exists but normalization also produced no plans — re-run
+          await appendProgress(config, `[PROMETHEUS] Cached analysis has no actionable plans (${Math.round(ageMs / 60_000)}m old) — re-running`);
+        }
+      }
+    } catch { /* no cached analysis — proceed normally */ }
+  }
+
   const repoRoot = process.cwd();
   const registry = getRoleRegistry(config);
   const prometheusName = registry?.deepPlanner?.name || "Prometheus";
   const prometheusModel = registry?.deepPlanner?.model || "GPT-5.3-Codex";
   const command = config.env?.copilotCliCommand || "copilot";
-  const maxAttempts = Math.max(1, Number(config?.runtime?.prometheusAnalysisMaxAttempts || 4));
-  const requiredCoverage = Math.max(0, Math.min(1, Number(config?.runtime?.prometheusRequiredReadCoverage ?? 1)));
 
   const userPrompt = options.prompt || options.prometheusReason || "Full repository self-evolution analysis";
   const requestedBy = options.requestedBy || "Jesus";
 
-  const scanTargets = await collectScanTargets(repoRoot);
-  const criticalFiles = [
-    "src/core/orchestrator.js",
-    "src/core/prometheus.js",
-    "src/core/athena_reviewer.js",
-    "src/core/worker_runner.js",
-    "src/core/jesus_supervisor.js",
-    "src/dashboard/live_dashboard.js",
-    "src/config.js",
-    "src/cli.js"
-  ].filter((file) => scanTargets.includes(normalizeRepoPath(file)));
-  const repoExport = await createPrometheusRepoExport(
-    repoRoot,
-    stateDir,
-    scanTargets,
-    criticalFiles,
-    Number(config?.runtime?.prometheusRepoExportChunkChars || 120000)
-  );
-  const exportTargets = [repoExport.manifestPath, ...repoExport.chunkPaths];
+  const ts = () => new Date().toISOString().replace("T", " ").slice(0, 19);
 
-  await appendProgress(config, `[PROMETHEUS] ${prometheusName} awakening — starting deep repository analysis`);
-  await appendProgress(config, `[PROMETHEUS] Repo export prepared: sourceTargets=${scanTargets.length}, chunks=${repoExport.chunkCount}, readErrors=${repoExport.readErrors.length}`);
-  await appendProgress(config, `[PROMETHEUS] Read-coverage gate enabled: exportTargets=${exportTargets.length}, required=${Math.round(requiredCoverage * 100)}%`);
-  chatLog(stateDir, prometheusName, "Awakening — full repository scan starting...");
+  // ── Log start ─────────────────────────────────────────────────────────────
+  await appendProgress(config, `[PROMETHEUS] ${prometheusName} awakening — starting deep repository analysis (simplified mode)`);
+  await appendPrometheusLiveLog(stateDir, "leadership_live", `[${ts()}] ${prometheusName.padEnd(20)} Awakening — direct Copilot CLI scan starting...`);
 
   const planningPolicy = buildPrometheusPlanningPolicy(config);
 
-  const workersList = Object.entries(registry?.workers || {})
-    .map(([kind, w]) => `  - "${w.name}" (kind: ${kind}, model: ${w.model})`)
-    .join("\n") || "  (none configured)";
+  // ── Extract behavior patterns from postmortems ────────────────────────────
+  let behaviorPatternsSection = "";
+  let carryForwardSection = "";
+  try {
+    const postmortems = await readJson(path.join(stateDir, "athena_postmortems.json"), null);
+    const entries = Array.isArray(postmortems?.entries) ? postmortems.entries : [];
+    
+    if (entries.length > 0) {
+      // Extract patterns: recurring issues, worker problems, quality trends
+      const last20 = entries.slice(-20);
+      
+      // Count issue patterns
+      const issuePatterns = {};
+      const workerProblems = {};
+      let totalQualityScore = 0;
+      let lowQualityCount = 0;
+      
+      for (const entry of last20) {
+        // Track worker performance
+        const worker = entry.workerName || "unknown";
+        if (!workerProblems[worker]) workerProblems[worker] = { count: 0, failureReasons: [] };
+        workerProblems[worker].count++;
+        
+        // Track quality score
+        const score = Number(entry.qualityScore) || 0;
+        totalQualityScore += score;
+        if (score < 6) lowQualityCount++;
+        
+        // Extract issue keywords from lesson learned
+        const deviation = entry.deviation || "unknown";
+        
+        if (deviation === "major" || score < 5) {
+          if (!issuePatterns[worker]) issuePatterns[worker] = [];
+          issuePatterns[worker].push({
+            issue: entry.expectedOutcome?.slice(0, 80) || "unclear",
+            score: score,
+            deviation: deviation
+          });
+        }
+      }
+      
+      // Build pattern analysis
+      const patterns = [];
+      for (const [worker, problems] of Object.entries(workerProblems)) {
+        if (problems.count >= 2) {
+          patterns.push(`- **${worker}**: appeared in ${problems.count}/${last20.length} recent postmortems`);
+          if (issuePatterns[worker]) {
+            for (const p of issuePatterns[worker].slice(0, 2)) {
+              patterns.push(`  - Issue: ${p.issue} (quality=${p.score}, deviation=${p.deviation})`);
+            }
+          }
+        }
+      }
+      
+      if (patterns.length > 0) {
+        const avgQuality = (totalQualityScore / last20.length).toFixed(2);
+        behaviorPatternsSection = `\n\n## BEHAVIOR PATTERNS FROM RECENT POSTMORTEMS (last ${last20.length} cycles)
+Average decision quality: ${avgQuality}/10
+Low-quality outcomes: ${lowQualityCount}/${last20.length}
 
-  let rejectionHint = "";
-  let accepted = null;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const contextPrompt = `TARGET REPO: ${config.env?.targetRepo || "unknown"}
-REPO PATH: ${process.cwd()}
-  SOURCE TARGET COUNT: ${scanTargets.length}
-  EXPORT MANIFEST: ${repoExport.manifestPath}
+Recurring issues and worker performance:
+${patterns.join("\n")}
 
-## YOUR MISSION
-You are Prometheus — BOX Self-Evolution Engine & Key Planner. Your job is to:
-  1. READ the parent-generated repository export manifest and every chunk file it lists.
-  2. ANALYZE code quality, architecture, security, testing, CI/CD, performance — then identify self-evolution opportunities.
-  3. Use only list_dir/read_file/grep_search/file_search. Do NOT use shell/task tools.
-  4. If any operation returns permission denied, continue scanning with allowed read-only tools.
-  5. Do not claim snapshot-only analysis. Use concrete file reads.
-  6. Analyze across all dimensions: architecture, security, testing, performance, CI/CD, docs, UI/UX, observability.
-  7. Every major finding must cite exact file paths and line anchors.
-  8. Every plans[].context entry must include exact file paths, line anchors, and concrete implementation guidance.
-  9. Write your full analysis narrative, then produce structured JSON between markers.
+**Strategic implications:** Your plan should address why these patterns persist despite code changes.
+Consider whether the root causes are:
+1. Insufficient optimization (algorithm complexity, not just code cleanup)
+2. External constraints (I/O, database, infrastructure limits)
+3. Scaling challenges (metrics degrade with input size growth)`;
+      }
+      
+      // Carry-forward follow-ups
+      const pending = entries.filter(e => e.followUpNeeded && e.followUpTask);
+      if (pending.length > 0) {
+        const seenFollowUps = new Set();
+        const deduped = [];
+        // Traverse from newest to oldest so repeated tasks keep their latest wording/date.
+        for (let i = pending.length - 1; i >= 0; i--) {
+          const e = pending[i];
+          const key = normalizeFollowUpTaskKey(e.followUpTask);
+          if (!key || seenFollowUps.has(key)) continue;
+          seenFollowUps.add(key);
+          deduped.push(e);
+        }
+        deduped.reverse();
+        const items = deduped.slice(-10).map((e, i) =>
+          `${i + 1}. [worker=${e.workerName || "unknown"}, reviewed=${e.reviewedAt || "?"}] ${e.followUpTask}`
+        ).join("\n");
+        carryForwardSection = `\n\n## MANDATORY_CARRY_FORWARD\nThe following follow-up tasks from previous Athena postmortems have NOT been addressed yet.\nYou MUST include these in your plan unless they are already resolved in the codebase:\n${items}\n`;
+      }
+    }
+  } catch { /* non-fatal — proceed without pattern analysis */ }
+
+  // ── Build prompt — Copilot reads the repo itself ──────────────────────────
+  const contextPrompt = `TARGET REPO: ${config.env?.targetRepo || "unknown"}
+REPO PATH: ${repoRoot}
 
 ## OPERATOR OBJECTIVE
 ${userPrompt}
 
-## GROUNDED INPUT SOURCE
-  - BOX already exported the full repository into chunk files using direct filesystem access.
-  - Read manifest first: ${repoExport.manifestPath}
-  - Then read EVERY listed chunk file. Those chunks contain full contents of ${scanTargets.length} source/config/test/agent files.
-  - You may inspect raw repo paths for spot checks, but your primary grounding must be the export chunks.
+## EVOLUTION DIRECTIVE
+You are NOT a risk-reducing planner. You are NOT a security-first hardening auditor.
+You are the system's META-IMPROVER: your primary objective is TOTAL SYSTEM CAPACITY INCREASE.
+"Capacity" means: more capability delivered per cycle, deeper reasoning, faster adaptation, better learning, higher task quality, smarter model usage — across every dimension simultaneously.
+Risk reduction is a side-effect of capacity increase, never the goal itself.
+You must treat every component of BOX — including Prometheus itself — as an improvement target.
 
-## MANDATORY READ EVIDENCE
-- Critical files that MUST appear in your reads: ${criticalFiles.join(", ") || "(none)"}
-  - Export files that MUST appear in your reads: ${exportTargets.join(", ")}
-  - System enforces minimum read coverage of ${(requiredCoverage * 100).toFixed(0)}% over ${exportTargets.length} export files.
-  - If you skip export reads, your analysis will be rejected and retried.
+## EQUAL DIMENSION SET
+The following dimensions are ALL equally important. No single dimension dominates.
+You MUST analyze and propose improvements for EACH of these:
+1. Architecture (system topology, module design, data flow)
+2. Speed (cycle throughput, latency, parallelism)
+3. Task quality (correctness, depth, completeness of delivered work)
+4. Prompt quality (instruction clarity, model utilization, reasoning depth)
+5. Parser / normalization quality (output parsing, plan normalization, fence handling)
+6. Worker specialization (role design, capability matching, multi-worker topology)
+7. Model-task fit (routing complexity to the right model, token budget allocation)
+8. Learning loop (postmortem-to-policy conversion, pattern detection, carry-forward)
+9. Cost efficiency (premium requests per useful outcome, waste reduction)
+10. Security (vulnerability prevention, access control, governance — ONE dimension among equals)
 
-## PLANNING POLICY (NO ARTIFICIAL CAP)
+## MANDATORY SELF-CRITIQUE SECTIONS
+You MUST include a dedicated self-critique section for EACH of the following components.
+Each section must answer: "What is this component doing well?", "What is it doing poorly?", and "How specifically should it improve next cycle?"
+Do NOT just say "there is a problem" — produce a concrete improvement proposal for each.
+
+1. **Jesus Self-Critique** — Is Jesus making good strategic decisions? Is it reading the right signals? How should its decision logic improve?
+2. **Prometheus Self-Critique** — Is Prometheus producing actionable plans or strategic fluff? How should its reasoning, prompt structure, and output format improve?
+3. **Athena Self-Critique** — Is Athena catching real issues or generating noise? Are postmortems driving actual change? How should review quality improve?
+4. **Worker Structure Self-Critique** — Is the worker topology enabling or blocking progress? Are workers specialized enough? How should worker roles evolve?
+5. **Parser / Normalization Self-Critique** — Is plan parsing reliable? Are fence blocks handled correctly? What parsing failures recur and how to fix them?
+6. **Prompt Layer Self-Critique** — Are runtime prompts getting the most out of model capacity? What prompt patterns waste tokens or produce shallow output?
+7. **Verification System Self-Critique** — Is verification catching real failures or generating false signals? Are verification commands reliable across platforms?
+
+## MANDATORY_OPERATOR_QUESTIONS
+You MUST answer these explicitly in a dedicated section titled "Mandatory Answers" before the rest of the plan:
+1. Is wave-based plan distribution truly the most efficient model for this system?
+2. Should it be preserved, improved, or removed?
+3. If it changes, what should replace it and how should the transition be executed?
+4. Is Prometheus currently evolving the system, or mostly auditing and distributing tasks?
+5. How should Prometheus improve its own reasoning structure, planning quality, and model-capacity utilization?
+6. Does the worker behavior model and code structure help self-improvement, or block it?
+7. In this cycle, what are the highest-leverage changes that make the system not only safer, but also smarter and deeper in reasoning?
+
+## PLANNING POLICY
 - maxTasks: ${planningPolicy.maxTasks > 0 ? planningPolicy.maxTasks : "UNLIMITED"}
 - maxWorkersPerWave: ${planningPolicy.maxWorkersPerWave}
 - preferFewestWorkers: ${planningPolicy.preferFewestWorkers}
-- allowSameCycleFollowUps: ${planningPolicy.allowSameCycleFollowUps}
 - requireDependencyAwareWaves: ${planningPolicy.requireDependencyAwareWaves}
-- enforcePrometheusExecutionStrategy: ${planningPolicy.enforcePrometheusExecutionStrategy}
-- If maxTasks is UNLIMITED, include ALL materially distinct actionable tasks you find (no arbitrary 3/5/10 cap).
-- Do not optimize for brevity. Optimize for completeness, depth, and implementation-ready detail.
-
-## AVAILABLE WORKERS
-${workersList}
-
-${rejectionHint}
-
+- If maxTasks is UNLIMITED, include ALL materially distinct actionable tasks you find.
+${behaviorPatternsSection}${carryForwardSection}
 ## OUTPUT FORMAT
-Write a substantial senior-level narrative first. Then output structured JSON:
+Write a substantial senior-level narrative master plan.
+The plan must be centered on TOTAL SYSTEM CAPACITY INCREASE, not generic hardening.
+First analyze how BOX can increase its capacity in every dimension, then derive what should change.
+
+Include ALL of these sections (in this order):
+1. Mandatory Answers
+2. Evolution Diagnosis
+3. Equal Dimension Analysis (one subsection per dimension from the EQUAL DIMENSION SET)
+4. Mandatory Self-Critique: Jesus
+5. Mandatory Self-Critique: Prometheus
+6. Mandatory Self-Critique: Athena
+7. Mandatory Self-Critique: Worker Structure
+8. Mandatory Self-Critique: Parser / Normalization
+9. Mandatory Self-Critique: Prompt Layer
+10. Mandatory Self-Critique: Verification System
+11. System Redesign Directions (ranked by capacity-increase leverage)
+12. Worker Model Redesign
+13. Model Capacity Utilization
+14. Metrics For A Smarter Next Cycle
+15. Actionable Improvement Packets
+
+## ACTIONABLE IMPROVEMENT PACKET FORMAT
+Every concrete task you propose MUST be formatted as an Actionable Improvement Packet.
+Do NOT produce vague strategic recommendations without this structure.
+Each packet must contain:
+- **title**: Clear one-line description of the change
+- **owner**: Which component/agent/worker should execute this (e.g., evolution-worker, prometheus, athena, orchestrator)
+- **dependencies**: What must be completed first (list packet titles or "none")
+- **acceptance_criteria**: Measurable conditions that prove this is done (not subjective)
+- **verification**: Exact command(s) or check(s) to validate completion
+- **leverage_rank**: Which dimension(s) from the EQUAL DIMENSION SET this improves
+
+Write the entire response in English only.
+If you include recommendations, rank them by capacity-increase leverage, not by fear or surface risk alone.
+Security or governance recommendations must explain how they contribute to capacity increase rather than being presented as the default center of gravity.
+You MUST emit a structured JSON companion block at the end of your response.
+The JSON block must contain at minimum: { "projectHealth": "<healthy|warning|critical>", "totalPackets": <number>, "plans": [{ "title": "...", "owner": "...", "wave": <number> }] }
+Keep diagnostic findings in analysis or strategicNarrative and include only actionable redesign work in plans.
+Wrap the JSON companion with markers:
 
 ===DECISION===
-{
-  "analysis": "<comprehensive summary>",
-  "strategicNarrative": "<execution strategy>",
-  "projectHealth": "good | needs-work | critical",
-  "keyFindings": "<top 3-5 findings>",
-  "productionReadinessCoverage": [{"domain": "...", "status": "adequate|missing|not-applicable", "why": "..."}],
-  "dependencyModel": {"criticalPath": [...], "parallelizableTracks": [...], "blockedBy": [...]},
-  "executionStrategy": {"waves": [{"id": "wave-1", "workers": [...], "gate": "...", "estimatedRequests": 0}]},
-  "requestBudget": {"estimatedPremiumRequestsTotal": 0, "errorMarginPercent": 20, "hardCapTotal": 0, "confidence": "medium", "byWave": [], "byRole": []},
-  "plans": [
-    {
-      "role": "<worker name>",
-      "kind": "<worker kind>",
-      "priority": 1,
-      "wave": "wave-1",
-      "task": "<short task description>",
-      "context": "<detailed 500-2000 word implementation checklist>",
-      "verification": "<how to verify>",
-      "riskLevel": "low | medium | high",
-      "dependencies": [],
-      "downstream": "<what this enables>",
-      "_premortem_note": "REQUIRED for riskLevel=high: include premortem object below",
-      "premortem": {
-        "_note": "Include ONLY when riskLevel=high. Omit for low/medium risk plans.",
-        "riskLevel": "high",
-        "scenario": "<min 20 chars — what could go wrong in this intervention>",
-        "failurePaths": ["<failure mode 1>", "<failure mode 2>"],
-        "mitigations": ["<mitigation for failure mode 1>", "<mitigation for failure mode 2>"],
-        "detectionSignals": ["<observable signal that failure is occurring>"],
-        "guardrails": ["<check or gate that prevents cascading failure>"],
-        "rollbackPlan": "<min 10 chars — how to safely undo this change>"
-      }
+{ ...optional companion json... }
+===END===`;
+
+  appendPromptPreviewSync(stateDir, contextPrompt);
+
+  await appendPrometheusLiveLog(stateDir, "leadership_live", `[${ts()}] ${prometheusName.padEnd(20)} Calling Copilot CLI (agent=prometheus)...`);
+
+  // ── Call Copilot CLI with real-time streaming to live log ──────────────────
+  const args = buildAgentArgs({
+    agentSlug: "prometheus",
+    prompt: contextPrompt,
+    model: prometheusModel,
+    allowAll: false,
+    maxContinues: undefined
+  });
+
+  appendLiveLogSync(stateDir, `\n[copilot_stream_start] ${ts()}\n`);
+
+  const result = await spawnAsync(command, args, {
+    env: process.env,
+    onStdout(chunk) {
+      appendLiveLogSync(stateDir, chunk.toString("utf8"));
+    },
+    onStderr(chunk) {
+      appendLiveLogSync(stateDir, chunk.toString("utf8"));
     }
-  ]
-}
-===END===
+  });
 
-CRITICAL: JSON must be between ===DECISION=== and ===END=== markers exactly.
-CRITICAL: Any plan with riskLevel=high MUST include a fully-populated premortem object. Omitting it will block Athena plan review.`;
+  appendLiveLogSync(stateDir, `\n[copilot_stream_end] ${ts()} exit=${result.status}\n`);
 
-    chatLog(stateDir, prometheusName, `Calling AI for deep repository analysis (single-prompt), attempt ${attempt}/${maxAttempts}...`);
-    const aiResult = await callCopilotAgent(command, "prometheus", contextPrompt, config, prometheusModel);
+  const stdout = String(result?.stdout || "");
+  const stderr = String(result?.stderr || "");
+  const raw = stdout || stderr;
+  const combinedRaw = `${stdout}\n${stderr}`.trim();
 
-    // Check for model fallback
-    const fallback = detectModelFallback(aiResult?.combinedRaw || aiResult?.raw || "");
-    if (fallback) {
-      const warningMessage = `Prometheus model fallback: requested=${fallback.requestedModel}, active=${fallback.fallbackModel}`;
-      await appendProgress(config, `[PROMETHEUS][WARN] ${warningMessage}`);
-      try {
-        await appendAlert(config, { severity: "warning", source: "prometheus", title: "Prometheus model fallback", message: warningMessage });
-      } catch { /* non-fatal */ }
-    }
-
-    if (!aiResult?.ok || !aiResult?.parsed) {
-      await appendProgress(config, `[PROMETHEUS][WARN] Attempt ${attempt}/${maxAttempts} failed — ${aiResult?.error || "no valid JSON"}`);
-      if (attempt >= maxAttempts) {
-        await appendProgress(config, `[PROMETHEUS] Analysis failed — ${aiResult?.error || "no valid JSON"}`);
-        chatLog(stateDir, prometheusName, `Analysis failed: ${aiResult?.error || "no JSON"}`);
-        return null;
-      }
-      rejectionHint = `## PREVIOUS ATTEMPT REJECTED\n- Reason: ${String(aiResult?.error || "no valid JSON")}\n- Fix: perform full read_file scan and return valid JSON markers.`;
-      continue;
-    }
-
-    const coverage = evaluatePrometheusReadCoverage({
-      thinking: aiResult.thinking,
-      parsed: aiResult.parsed,
-      targets: exportTargets,
-      criticalFiles: exportTargets,
-      requiredCoverage
-    });
-
+  // ── Check for model fallback ──────────────────────────────────────────────
+  const fallback = detectModelFallback(combinedRaw);
+  if (fallback) {
+    const warningMessage = `Prometheus model fallback: requested=${fallback.requestedModel}, active=${fallback.fallbackModel}`;
+    await appendProgress(config, `[PROMETHEUS][WARN] ${warningMessage}`);
     try {
-      await writeJson(path.join(stateDir, "prometheus_read_audit.json"), {
-        analyzedAt: new Date().toISOString(),
-        attempt,
-        maxAttempts,
-        ok: coverage.ok,
-        matchedCount: coverage.matchedCount,
-        totalTargets: coverage.totalTargets,
-        coverage: coverage.coverage,
-        missingCritical: coverage.missingCritical,
-        sourceTargetCount: scanTargets.length,
-        exportTargets,
-        exportReadErrors: repoExport.readErrors,
-        anchoredPaths: coverage.anchoredPaths,
-        lineAnchorCount: coverage.lineAnchorCount,
-        errors: coverage.errors,
-        missingTargetsSample: coverage.missingTargets.slice(0, 50)
-      });
+      await appendAlert(config, { severity: "warning", source: "prometheus", title: "Prometheus model fallback", message: warningMessage });
     } catch { /* non-fatal */ }
-
-    if (!coverage.ok) {
-      const reason = coverage.errors.join(" | ");
-      await appendProgress(config, `[PROMETHEUS][WARN] Attempt ${attempt}/${maxAttempts} rejected by read-coverage gate — ${reason}`);
-      if (attempt >= maxAttempts) {
-        await appendProgress(config, `[PROMETHEUS] Analysis failed — read-coverage gate not satisfied`);
-        chatLog(stateDir, prometheusName, `Read-coverage gate failed: ${reason}`);
-        return null;
-      }
-      rejectionHint = `## PREVIOUS ATTEMPT REJECTED\n- Reason: ${reason}\n- Required: read ALL targets, include critical file reads in thinking/tool trace, and cite exact file paths plus line anchors in the narrative and every plan context.`;
-      continue;
-    }
-
-    await appendProgress(config, `[PROMETHEUS] Read coverage OK: ${coverage.matchedCount}/${coverage.totalTargets} (${(coverage.coverage * 100).toFixed(1)}%)`);
-
-    // ── Trust boundary validation (must pass before accepting result) ────────
-    const tbMode = config?.runtime?.trustBoundaryMode === "warn" ? "warn" : "enforce";
-    const trustCheck = validateLeadershipContract(
-      LEADERSHIP_CONTRACT_TYPE.PLANNER, aiResult.parsed, { mode: tbMode }
-    );
-    if (!trustCheck.ok && tbMode === "enforce") {
-      const tbErrors = trustCheck.errors.map(e => `${e.payloadPath}: ${e.message}`).join(" | ");
-      await appendProgress(config, `[PROMETHEUS][TRUST_BOUNDARY] Attempt ${attempt}/${maxAttempts} failed contract validation — class=${TRUST_BOUNDARY_ERROR} errors=${tbErrors}`);
-      try {
-        await appendAlert(config, {
-          severity: "critical",
-          source: "prometheus",
-          title: "Planner output failed trust-boundary validation",
-          message: `class=${TRUST_BOUNDARY_ERROR} reasonCode=${trustCheck.reasonCode} errors=${tbErrors}`
-        });
-      } catch { /* non-fatal */ }
-      if (attempt >= maxAttempts) {
-        await appendProgress(config, `[PROMETHEUS] Analysis failed — trust-boundary gate not satisfied after ${maxAttempts} attempts`);
-        chatLog(stateDir, prometheusName, `Trust-boundary gate failed: ${tbErrors}`);
-        return null;
-      }
-      rejectionHint = `## PREVIOUS ATTEMPT REJECTED — TRUST BOUNDARY VIOLATION\n- class: ${TRUST_BOUNDARY_ERROR}\n- Errors: ${tbErrors}\n- Fix: ensure all required fields are present and valid in the JSON output.`;
-      continue;
-    }
-    if (trustCheck.errors.length > 0 && tbMode === "warn") {
-      const tbErrors = trustCheck.errors.map(e => `${e.payloadPath}: ${e.message}`).join(" | ");
-      await appendProgress(config, `[PROMETHEUS][TRUST_BOUNDARY][WARN] Contract violations (warn mode, not blocking): ${tbErrors}`);
-    }
-
-    accepted = { aiResult, coverage };
-    break;
   }
 
-  if (!accepted) {
-    await appendProgress(config, "[PROMETHEUS] Analysis failed — unknown gate failure");
+  // ── Handle failure ────────────────────────────────────────────────────────
+  if (result.status !== 0) {
+    const error = `exited ${result.status}: ${(stderr || stdout).slice(0, 500)}`;
+    await appendProgress(config, `[PROMETHEUS] Analysis failed — ${error}`);
+    await appendPrometheusLiveLog(stateDir, "leadership_live", `[${ts()}] ${prometheusName.padEnd(20)} Analysis failed: ${error}`);
     return null;
   }
 
-  const { aiResult, coverage } = accepted;
+  // ── Parse output ──────────────────────────────────────────────────────────
+  const aiResult = parseAgentOutput(raw);
+  const parsedForValidation = normalizePrometheusParsedOutput(
+    aiResult?.parsed || buildNarrativeFallbackParsed({ ...aiResult, raw }),
+    { ...aiResult, raw }
+  );
 
-  logAgentThinking(stateDir, prometheusName, aiResult.thinking);
-
-  // Save dossier if thinking is substantial
-  if (aiResult.thinking && aiResult.thinking.length > 500) {
-    try {
-      await fs.writeFile(path.join(stateDir, "prometheus_dossier.md"), `${aiResult.thinking}\n`, "utf8");
-    } catch { /* non-fatal */ }
+  // ── Schema v2 plan validation ─────────────────────────────────────────────
+  // Validate each plan has the required schema fields. Non-conforming plans are
+  // tagged but kept (Athena makes the final accept/reject decision).
+  const REQUIRED_PLAN_FIELDS = ["task", "role"];
+  if (Array.isArray(parsedForValidation.plans)) {
+    let invalidCount = 0;
+    for (const plan of parsedForValidation.plans) {
+      const missing = REQUIRED_PLAN_FIELDS.filter(f => !plan[f] || String(plan[f]).trim().length === 0);
+      if (missing.length > 0) {
+        plan._schemaViolations = missing;
+        invalidCount++;
+      }
+      // Tag verification quality: plans without verification are schema-weak
+      if (!plan.verification || String(plan.verification).trim().length === 0) {
+        plan._schemaViolations = [...(plan._schemaViolations || []), "verification"];
+      }
+    }
+    if (invalidCount > 0) {
+      await appendProgress(config,
+        `[PROMETHEUS][SCHEMA] ${invalidCount}/${parsedForValidation.plans.length} plan(s) missing required fields`
+      );
+    }
   }
 
-  // ── Enforce mandatory requestBudget ──────────────────────────────────────
-  const parsed = aiResult.parsed;
+  // ── Trust boundary validation ─────────────────────────────────────────────
+  const tbMode = config?.runtime?.trustBoundaryMode === "warn" ? "warn" : "enforce";
+  const trustCheck = validateLeadershipContract(
+    LEADERSHIP_CONTRACT_TYPE.PLANNER, parsedForValidation, { mode: tbMode }
+  );
+  if (!trustCheck.ok && tbMode === "enforce") {
+    const tbErrors = trustCheck.errors.map(e => `${e.payloadPath}: ${e.message}`).join(" | ");
+    await appendProgress(config, `[PROMETHEUS][TRUST_BOUNDARY] Contract validation failed — class=${TRUST_BOUNDARY_ERROR} errors=${tbErrors}`);
+    try {
+      await appendAlert(config, {
+        severity: "critical",
+        source: "prometheus",
+        title: "Planner output failed trust-boundary validation",
+        message: `class=${TRUST_BOUNDARY_ERROR} reasonCode=${trustCheck.reasonCode} errors=${tbErrors}`
+      });
+    } catch { /* non-fatal */ }
+    // Block on trust-boundary violation (fail-closed)
+    await appendProgress(config, `[PROMETHEUS][TRUST_BOUNDARY] Blocking analysis — returning null (fail-closed)`);
+    return null;
+  }
+  if (trustCheck.errors.length > 0 && tbMode === "warn") {
+    const tbErrors = trustCheck.errors.map(e => `${e.payloadPath}: ${e.message}`).join(" | ");
+    await appendProgress(config, `[PROMETHEUS][TRUST_BOUNDARY][WARN] Contract violations (warn mode): ${tbErrors}`);
+  }
+
+  // ── Log thinking/dossier ──────────────────────────────────────────────────
+  if (aiResult.thinking) {
+    await appendPrometheusLiveLog(stateDir, "prometheus_dossier", aiResult.thinking);
+  }
+
+  // ── Enforce mandatory requestBudget ───────────────────────────────────────
+  const parsed = parsedForValidation;
   if (!parsed.requestBudget || !Number.isFinite(Number(parsed.requestBudget.estimatedPremiumRequestsTotal))) {
     const planCount = Array.isArray(parsed.plans) ? parsed.plans.length : 4;
     const margin = 25;
@@ -681,19 +1007,56 @@ CRITICAL: Any plan with riskLevel=high MUST include a fully-populated premortem 
     }
   }
 
+  // ── Contract-first plan validation (Packet 2) ────────────────────────────
+  // Every plan must pass schema contract before persistence.
+  if (Array.isArray(parsed.plans) && parsed.plans.length > 0) {
+    const contractResult = validateAllPlans(parsed.plans);
+    if (contractResult.invalidCount > 0) {
+      await appendProgress(config,
+        `[PROMETHEUS][CONTRACT] ${contractResult.invalidCount}/${contractResult.totalPlans} plan(s) have contract violations (passRate=${contractResult.passRate})`
+      );
+    }
+    // Tag each plan with contract validation results
+    for (const r of contractResult.results) {
+      parsed.plans[r.planIndex]._contractValid = r.valid;
+      parsed.plans[r.planIndex]._contractViolations = r.violations;
+    }
+    parsed._planContractPassRate = contractResult.passRate;
+  }
+
+  // ── Dual-pass planning: Pass-B critic gate ─────────────────────────────────
+  // Deterministic critic evaluates plans before Athena review (no AI call).
+  // Rejected plans are logged but still included (Athena makes final decision).
+  if (Array.isArray(parsed.plans) && parsed.plans.length > 0) {
+    const criticResult = runCriticPass(parsed.plans);
+    if (criticResult.rejected.length > 0) {
+      await appendProgress(config,
+        `[PROMETHEUS][CRITIC] ${criticResult.rejected.length} plan(s) flagged by critic: ${criticResult.results.filter(r => !r.passed).map(r => r.issues.join("; ")).join(" | ")}`
+      );
+    }
+    // Tag plans with critic scores for Athena visibility
+    for (let i = 0; i < parsed.plans.length; i++) {
+      parsed.plans[i]._criticScore = criticResult.results[i]?.score ?? null;
+      parsed.plans[i]._criticIssues = criticResult.results[i]?.issues ?? [];
+    }
+  }
+
+  // ── AC measurability enrichment ───────────────────────────────────────────
+  // Enrich plans lacking concrete acceptance criteria with compiled ACs.
+  if (Array.isArray(parsed.plans) && parsed.plans.length > 0) {
+    const acResult = enrichPlansWithAC(parsed.plans);
+    if (acResult.enrichedCount > 0) {
+      await appendProgress(config,
+        `[PROMETHEUS][AC] Enriched ${acResult.enrichedCount} plan(s) with compiled acceptance criteria`
+      );
+    }
+    parsed.plans = acResult.plans;
+  }
+
+  // ── Build analysis result ─────────────────────────────────────────────────
   const analysis = {
     ...parsed,
-    readAudit: {
-      coverage: coverage.coverage,
-      matchedCount: coverage.matchedCount,
-      totalTargets: coverage.totalTargets,
-      missingCritical: coverage.missingCritical,
-      sourceTargetCount: scanTargets.length,
-      exportManifest: repoExport.manifestPath,
-      exportChunkCount: repoExport.chunkCount,
-      exportReadErrors: repoExport.readErrors.length
-    },
-    dossierPath: path.join(stateDir, "prometheus_dossier.md"),
+    dossierPath: null,
     analyzedAt: new Date().toISOString(),
     model: prometheusModel,
     repo: config.env?.targetRepo,
@@ -704,24 +1067,20 @@ CRITICAL: Any plan with riskLevel=high MUST include a fully-populated premortem 
 
   const planCount = Array.isArray(analysis.plans) ? analysis.plans.length : 0;
   await appendProgress(config, `[PROMETHEUS] Analysis complete — ${planCount} work items | health=${analysis.projectHealth}`);
-  chatLog(stateDir, prometheusName, `Analysis ready: ${planCount} plans | health=${analysis.projectHealth}`);
+  await appendPrometheusLiveLog(stateDir, "leadership_live", `[${ts()}] ${prometheusName.padEnd(20)} Analysis ready: ${planCount} plans | health=${analysis.projectHealth}`);
 
   // ── Budget-aware intervention optimizer (non-blocking) ────────────────────
-  // Converts prometheus plans to Interventions and runs the optimizer.
-  // Failures here NEVER propagate to the caller — orchestration must continue.
   if (config?.interventionOptimizer?.enabled !== false && Array.isArray(analysis.plans) && analysis.plans.length > 0) {
     try {
       const interventions = buildInterventionsFromPlan(analysis.plans, config);
       const budget = buildBudgetFromConfig(analysis.requestBudget, config);
       const optimizerResult = runInterventionOptimizer(interventions, budget);
 
-      // Persist selection rationale (non-blocking)
       await appendInterventionOptimizerEntry(config, {
         ...optimizerResult,
         correlationId: `prometheus-${Date.now()}`,
         prometheusAnalyzedAt: analysis.analyzedAt,
       }).catch((err) => {
-        // Persist failure is non-fatal; log it for observability
         appendProgress(config, `[PROMETHEUS][WARN] Optimizer log persist failed: ${String(err?.message || err)}`).catch(() => {});
       });
 
@@ -737,7 +1096,6 @@ CRITICAL: Any plan with riskLevel=high MUST include a fully-populated premortem 
         ).catch(() => {});
       }
 
-      // Attach optimizer result to analysis for downstream consumers
       analysis.interventionOptimizer = {
         status:           optimizerResult.status,
         reasonCode:       optimizerResult.reasonCode,
@@ -748,7 +1106,6 @@ CRITICAL: Any plan with riskLevel=high MUST include a fully-populated premortem 
         budgetUnit:       optimizerResult.budgetUnit,
       };
     } catch (err) {
-      // Optimizer error must never fail the analysis pipeline
       analysis.interventionOptimizer = {
         status:       "error",
         reasonCode:   "OPTIMIZER_INTERNAL_ERROR",
@@ -759,18 +1116,11 @@ CRITICAL: Any plan with riskLevel=high MUST include a fully-populated premortem 
   }
 
   // ── Dependency graph resolver (non-blocking) ─────────────────────────────
-  // Converts prometheus plans to GraphTask descriptors, resolves cross-task
-  // dependencies, detects conflicts, and assigns parallel execution waves.
-  // Failures here NEVER propagate to the caller — orchestration must continue.
-  // Risk level: HIGH — touches scheduling core. See dependency_graph_resolver.js.
   if (Array.isArray(analysis.plans) && analysis.plans.length > 0) {
     try {
       const graphTasks = analysis.plans.map((plan, i) => ({
         id: String(plan.task || `plan-${i}`),
         dependsOn: Array.isArray(plan.dependencies) ? plan.dependencies.map(String) : [],
-        // filesInScope is not part of the Prometheus plan schema; use empty array.
-        // Downstream callers that have richer task data should call resolveDependencyGraph
-        // directly with populated filesInScope arrays.
         filesInScope: [],
       }));
 
@@ -793,7 +1143,6 @@ CRITICAL: Any plan with riskLevel=high MUST include a fully-populated premortem 
         ).catch(() => {});
       }
 
-      // Attach resolver result to analysis for downstream consumers
       analysis.dependencyGraph = {
         status:          graphResult.status,
         reasonCode:      graphResult.reasonCode,
@@ -806,7 +1155,6 @@ CRITICAL: Any plan with riskLevel=high MUST include a fully-populated premortem 
         errorMessage:    graphResult.errorMessage ?? null,
       };
     } catch (err) {
-      // Resolver error must never fail the analysis pipeline
       analysis.dependencyGraph = {
         status:       GRAPH_STATUS.DEGRADED,
         reasonCode:   "RESOLVER_INTERNAL_ERROR",

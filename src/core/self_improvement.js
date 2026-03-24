@@ -108,6 +108,13 @@ export const OUTCOME_DEGRADED_REASON = Object.freeze({
   NO_ACTIVE_DATA:     "NO_ACTIVE_DATA"
 });
 
+export async function shouldTriggerSelfImprovement(_config, _stateDir) {
+  return {
+    shouldRun: false,
+    reason: "gate-not-configured"
+  };
+}
+
 // ── Pre-mortem Quality Scoring ────────────────────────────────────────────────
 
 /**
