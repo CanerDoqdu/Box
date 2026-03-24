@@ -3,6 +3,7 @@ import path from "node:path";
 import { ensureParent, readJson, writeJson } from "./fs_utils.js";
 import { emitEvent } from "./logger.js";
 import { EVENTS, EVENT_DOMAIN } from "./event_schema.js";
+import { validateLineageEntry, buildFailureClusters, detectLoop, LINEAGE_ERROR_CODE, LINEAGE_THRESHOLDS } from "./lineage_graph.js";
 import { OPTIMIZER_LOG_SCHEMA_VERSION } from "./intervention_optimizer.js";
 
 // ── Alert severity enum — deterministic constants for all alert records ───────
@@ -318,6 +319,139 @@ export async function appendAlert(config, alert) {
     source: entry.source,
     title: entry.title,
   });
+}
+
+// ── Lineage graph — append-only task fingerprint graph ────────────────────────
+
+/**
+ * Append a single LineageEntry to the lineage graph file (append-only, immutable).
+ *
+ * Validation:
+ *   - Missing input (null/undefined entry) → returns { ok: false, code: MISSING_INPUT, ... }
+ *   - Schema-invalid entry               → returns { ok: false, code: <field error>, ... }
+ *   - Valid entry that creates a loop     → returns { ok: false, code: LOOP_*, isLoop: true, ... }
+ *   - Valid, no loop                      → appends and returns { ok: true, loopCheck, entry }
+ *
+ * The graph is stored at state/lineage_graph.json as { entries: [...], updatedAt, schemaVersion }.
+ * Entries are never deleted or modified — this is an append-only log.
+ *
+ * @param {object} config
+ * @param {object} entry — must pass validateLineageEntry
+ * @returns {Promise<{ ok: boolean, code: string, message: string, entry?: object, loopCheck?: object, isLoop?: boolean }>}
+ */
+export async function appendLineageEntry(config, entry) {
+  // Distinguish missing from invalid input
+  if (entry === null || entry === undefined) {
+    return { ok: false, code: LINEAGE_ERROR_CODE.MISSING_INPUT, message: "entry is required (got null/undefined)" };
+  }
+
+  const validation = validateLineageEntry(entry);
+  if (!validation.ok) {
+    return { ok: false, code: validation.code, message: validation.message };
+  }
+
+  const graphFile = path.join(config.paths.stateDir, "lineage_graph.json");
+  const state = await readJson(graphFile, {
+    schemaVersion: "1.0",
+    entries: [],
+    updatedAt: new Date().toISOString()
+  });
+
+  if (!Array.isArray(state.entries)) {
+    // Degraded state: entries field is corrupt; reset to empty array with explicit status
+    state.entries = [];
+    state.degraded = true;
+    state.degradedReason = "entries_corrupt_reset";
+  }
+
+  // Run loop detection before appending
+  const loopCheck = detectLoop(state.entries, entry);
+  if (loopCheck.isLoop) {
+    return {
+      ok: false,
+      code: loopCheck.code,
+      message: loopCheck.message,
+      isLoop: true,
+      loopCheck
+    };
+  }
+
+  // Append immutably — the entry itself is never mutated after this point
+  state.entries.push(Object.freeze ? Object.assign({}, entry) : entry);
+
+  // Trim to last 5000 entries to prevent unbounded file growth
+  if (state.entries.length > 5000) {
+    state.entries = state.entries.slice(-5000);
+  }
+
+  state.updatedAt = new Date().toISOString();
+  await writeJson(graphFile, state);
+
+  return { ok: true, code: LINEAGE_ERROR_CODE.NO_LOOP, message: "entry appended", entry, loopCheck };
+}
+
+/**
+ * Compute failure clusters from the lineage graph and persist the top clusters
+ * to state/lineage_clusters.json (the "dashboard" surface for AC5).
+ *
+ * Output file schema:
+ *   {
+ *     schemaVersion: "1.0",
+ *     generatedAt:   <ISO string>,
+ *     thresholds:    { CLUSTER_MIN_SIZE, TOP_CLUSTERS_COUNT },
+ *     totalEntries:  <number>,
+ *     clusters:      <FailureCluster[]>   — at most TOP_CLUSTERS_COUNT items
+ *   }
+ *
+ * Returns the clusters array. If the graph file does not exist, returns [].
+ * Never throws — on read/write failure, sets status=degraded in return value.
+ *
+ * @param {object} config
+ * @returns {Promise<{ ok: boolean, clusters: object[], code?: string, message?: string }>}
+ */
+export async function getFailureClusterReport(config) {
+  const graphFile = path.join(config.paths.stateDir, "lineage_graph.json");
+  const clustersFile = path.join(config.paths.stateDir, "lineage_clusters.json");
+
+  let state;
+  try {
+    state = await readJson(graphFile, { entries: [] });
+  } catch (err) {
+    return {
+      ok: false,
+      code: "READ_ERROR",
+      message: `lineage_graph.json unreadable: ${String(err?.message || err)}`,
+      clusters: []
+    };
+  }
+
+  const entries = Array.isArray(state?.entries) ? state.entries : [];
+  const clusters = buildFailureClusters(entries);
+
+  const report = {
+    schemaVersion: "1.0",
+    generatedAt: new Date().toISOString(),
+    thresholds: {
+      CLUSTER_MIN_SIZE: LINEAGE_THRESHOLDS.CLUSTER_MIN_SIZE,
+      TOP_CLUSTERS_COUNT: LINEAGE_THRESHOLDS.TOP_CLUSTERS_COUNT,
+    },
+    totalEntries: entries.length,
+    clusters
+  };
+
+  try {
+    await writeJson(clustersFile, report);
+  } catch (err) {
+    // Write failure is non-fatal — return clusters even if persistence failed
+    return {
+      ok: false,
+      code: "WRITE_ERROR",
+      message: `lineage_clusters.json write failed: ${String(err?.message || err)}`,
+      clusters
+    };
+  }
+
+  return { ok: true, clusters, code: null, message: `${clusters.length} clusters written` };
 }
 
 // ── Intervention optimizer log ────────────────────────────────────────────────

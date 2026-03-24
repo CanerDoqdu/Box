@@ -5,7 +5,8 @@ import {
   isProtectedPath,
   getProtectedPathMatches,
   validateRoleInstruction,
-  getRolePathViolations
+  getRolePathViolations,
+  applyGovernanceDecision
 } from "../../src/core/policy_engine.js";
 
 describe("policy_engine", () => {
@@ -375,3 +376,57 @@ describe("policy_engine", () => {
   });
 });
 
+// ── Composed governance decision path (guardrail > freeze > canary precedence) ─
+
+describe("applyGovernanceDecision — guardrail > freeze > canary precedence", () => {
+  it("should apply guardrail>freeze>canary precedence deterministically", () => {
+    // guardrail wins when all three are active
+    const r1 = applyGovernanceDecision({
+      guardrailActive: true, freezeActive: true, canaryBreachActive: true
+    });
+    assert.equal(r1.blocked, true);
+    assert.ok(r1.reason.includes("guardrail"), `expected guardrail in reason, got: ${r1.reason}`);
+    assert.equal(r1.precedenceLevel, 1);
+
+    // freeze wins when guardrail is off but freeze + canary are on
+    const r2 = applyGovernanceDecision({
+      guardrailActive: false, freezeActive: true, canaryBreachActive: true
+    });
+    assert.equal(r2.blocked, true);
+    assert.ok(r2.reason.includes("freeze"), `expected freeze in reason, got: ${r2.reason}`);
+    assert.equal(r2.precedenceLevel, 2);
+
+    // canary wins when only canary is active
+    const r3 = applyGovernanceDecision({
+      guardrailActive: false, freezeActive: false, canaryBreachActive: true
+    });
+    assert.equal(r3.blocked, true);
+    assert.ok(r3.reason.includes("canary"), `expected canary in reason, got: ${r3.reason}`);
+    assert.equal(r3.precedenceLevel, 3);
+
+    // nothing active → not blocked
+    const r4 = applyGovernanceDecision({
+      guardrailActive: false, freezeActive: false, canaryBreachActive: false
+    });
+    assert.equal(r4.blocked, false);
+    assert.equal(r4.precedenceLevel, 0);
+  });
+
+  it("returns blocked=false with precedenceLevel=0 when called with no arguments", () => {
+    const result = applyGovernanceDecision();
+    assert.equal(result.blocked, false);
+    assert.equal(result.precedenceLevel, 0);
+  });
+
+  it("guardrail alone blocks regardless of freeze and canary state", () => {
+    const r = applyGovernanceDecision({ guardrailActive: true });
+    assert.equal(r.blocked, true);
+    assert.equal(r.precedenceLevel, 1);
+  });
+
+  it("freeze alone blocks when guardrail is off", () => {
+    const r = applyGovernanceDecision({ freezeActive: true });
+    assert.equal(r.blocked, true);
+    assert.equal(r.precedenceLevel, 2);
+  });
+});
