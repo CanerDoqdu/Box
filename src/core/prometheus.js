@@ -61,10 +61,40 @@ export function buildPrometheusPlanningPolicy(config) {
   };
 }
 
+export function buildConcretePremortem(taskText, targetFiles = []) {
+  const task = String(taskText || "target change").trim() || "target change";
+  const targets = Array.isArray(targetFiles)
+    ? targetFiles.map(v => String(v || "").trim()).filter(Boolean)
+    : [];
+  const targetSummary = targets.join(", ") || "targeted files";
+
+  return {
+    riskLevel: PREMORTEM_RISK_LEVEL.HIGH,
+    scenario: `A high-risk change in ${targetSummary} could regress behavior while implementing ${task}.`,
+    failurePaths: [
+      `Dependency or routing changes in ${targetSummary} break an existing execution path.`,
+      `The implementation for ${task} introduces incorrect dispatch under valid input.`
+    ],
+    mitigations: [
+      `Keep behavior behind deterministic validation and targeted tests for ${targetSummary}.`,
+      "Preserve rollback-safe defaults if any verification gate fails."
+    ],
+    detectionSignals: [
+      `Targeted tests for ${targetSummary} fail immediately after the change.`,
+      `Cycle telemetry indicates regression in the stage affected by ${task}.`
+    ],
+    guardrails: [
+      `Require explicit verification before dispatch for changes touching ${targetSummary}.`,
+      "Block promotion when outputs are ambiguous or degraded."
+    ],
+    rollbackPlan: `Revert changes in ${targetSummary} and restore the previous deterministic path.`
+  };
+}
+
 function normalizeFollowUpTaskKey(text) {
   const s = String(text || "").toLowerCase();
   return s
-    .replace(/[`'"()\[\]{}]/g, " ")
+    .replace(/[`'"()[\]{}]/g, " ")
     .replace(/create\s+and\s+complete\s+a\s+task\s+to\s+/g, "")
     .replace(/create\s+a\s+dedicated\s+task\s+to\s+/g, "")
     .replace(/this\s+is\s+now\s+a\s+gate\s*-?\s*blocking\s+item[^.]*\.?/g, "")
@@ -383,7 +413,7 @@ function buildPlansFromNarrative(analysisText) {
     }
 
     // Numbered tasks: "1) Task", "2. **Task**: detail"
-    const numberedMatch = line.match(/^\d+[\).:-]\s*(.+)$/);
+    const numberedMatch = line.match(/^\d+[).:-]\s*(.+)$/);
     if (numberedMatch) {
       const taskText = numberedMatch[1]
         .replace(/\*\*/g, "")
@@ -396,7 +426,7 @@ function buildPlansFromNarrative(analysisText) {
         while (i + 1 < lines.length) {
           const nextRaw = String(lines[i + 1] || "").trim();
           if (!nextRaw) { i++; continue; }
-          if (/^\d+[\).:-]\s/.test(nextRaw) || /^[-*]\s/.test(nextRaw) ||
+          if (/^\d+[).:-]\s/.test(nextRaw) || /^[-*]\s/.test(nextRaw) ||
               /(?:^#+\s*)?(?:\*\*)?wave\s+\d+/i.test(nextRaw) || /^#+\s/.test(nextRaw) ||
               /^===|^---/.test(nextRaw)) break;
           continuationParts.push(nextRaw.replace(/\*\*/g, "").replace(/`/g, "").trim());
@@ -426,7 +456,7 @@ function buildPlansFromNarrative(analysisText) {
         while (i + 1 < lines.length) {
           const nextRaw = String(lines[i + 1] || "").trim();
           if (!nextRaw) { i++; continue; }
-          if (/^\d+[\).:-]\s/.test(nextRaw) || /^[-*]\s/.test(nextRaw) ||
+          if (/^\d+[).:-]\s/.test(nextRaw) || /^[-*]\s/.test(nextRaw) ||
               /(?:^#+\s*)?(?:\*\*)?wave\s+\d+/i.test(nextRaw) || /^#+\s/.test(nextRaw) ||
               /^===|^---/.test(nextRaw)) break;
           continuationParts.push(nextRaw.replace(/\*\*/g, "").replace(/`/g, "").trim());

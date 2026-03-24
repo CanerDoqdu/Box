@@ -54,7 +54,7 @@ import { assignWorkersToPlans, enforceLaneDiversity } from "./capability_pool.js
 import { packPlansIntoBatches, buildBatchInstruction, buildCombinedPlan, estimateBatchTokens } from "./task_batcher.js";
 import { runDoctor } from "./doctor.js";
 import { validateAllPlans } from "./plan_contract_validator.js";
-import { isSelfImprovementActive, siLog, siLogAsync } from "./si_control.js";
+import { isSelfImprovementActive, siLogAsync } from "./si_control.js";
 import { shouldApplyGovernanceRule } from "./policy_engine.js";
 import { resolveDependencyGraph, GRAPH_STATUS } from "./dependency_graph_resolver.js";
 import { executeRollback, ROLLBACK_TRIGGER, ROLLBACK_LEVEL } from "./rollback_engine.js";
