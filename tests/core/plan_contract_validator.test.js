@@ -85,6 +85,34 @@ describe("plan_contract_validator", () => {
       const result = validatePlanContract(plan);
       assert.equal(result.valid, true);
     });
+
+    it("rejects empty acceptance_criteria as CRITICAL (Packet 8)", () => {
+      const plan = {
+        task: "Implement something reasonably long",
+        role: "worker",
+        wave: 1,
+        verification: "npm test",
+        dependencies: [],
+        acceptance_criteria: [],
+      };
+      const result = validatePlanContract(plan);
+      assert.equal(result.valid, false);
+      assert.ok(result.violations.some(v => v.field === "acceptance_criteria" && v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL));
+    });
+
+    it("detects forbidden command via centralized check (Packet 5)", () => {
+      const plan = {
+        task: "Implement something long enough here",
+        role: "worker",
+        wave: 1,
+        verification: "node --test src/**/*.test.js",
+        dependencies: [],
+        acceptance_criteria: ["pass"],
+      };
+      const result = validatePlanContract(plan);
+      assert.equal(result.valid, false);
+      assert.ok(result.violations.some(v => v.field === "verification" && v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL));
+    });
   });
 
   describe("validateAllPlans", () => {

@@ -17,6 +17,7 @@
   },
   "runtime": {
     "reviewerProvider": "copilot",
+    "stopOnError": true,
     "autonomousMaxAttemptsPerTask": 3,
     "autonomousTaskSplitOnFailure": true,
     "maxQueuedTasks": 30,

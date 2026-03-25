@@ -29,5 +29,10 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Typecheck
+        run: npm run typecheck
+
       - name: Test
+        # Sync: package.json "test" script is the single source of truth.
+        # Do NOT add glob patterns here — use npm test only.
         run: npm test

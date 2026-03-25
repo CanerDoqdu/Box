@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 
+import dotenv from "dotenv";
+
+dotenv.config();
+
 const username = process.argv[2] || process.env.GITHUB_USERNAME || "CanerDoqdu";
 const year = Number(process.argv[3] || new Date().getUTCFullYear());
 const month = Number(process.argv[4] || (new Date().getUTCMonth() + 1));

@@ -6,19 +6,21 @@
   "description": "Repo-agnostic autonomous engineering orchestrator starter",
   "scripts": {
     "lint": "eslint src/",
-    "test": "node --test",
-    "box:on": "node src/cli.js on",
-    "box:off": "node src/cli.js off",
+    "test": "node --import tsx --test",
+    "typecheck": "tsc --noEmit",
+    "box:on": "node --import tsx src/cli.ts on",
+    "box:off": "node --import tsx src/cli.ts off",
     "box:up": "pwsh -NoProfile -File scripts/box-up.ps1",
     "box:down": "pwsh -NoProfile -File scripts/box-down.ps1",
-    "box:start": "node src/cli.js start",
-    "box:stop": "node src/cli.js stop",
-    "box:rebase": "node src/cli.js rebase",
+    "box:start": "node --import tsx src/cli.ts start",
+    "box:stop": "node --import tsx src/cli.ts stop",
+    "box:rebase": "node --import tsx src/cli.ts rebase",
     "box:park": "node scripts/box_park.mjs",
-    "box:once": "node src/cli.js once",
-    "box:dashboard": "node src/dashboard/live_dashboard.js",
-    "worker:run": "node src/workers/run_task.js",
-    "doctor": "node src/cli.js doctor"
+    "box:once": "node --import tsx src/cli.ts once",
+    "box:dashboard": "node --import tsx src/dashboard/live_dashboard.ts",
+    "prometheus:watch": "node scripts/watch_prometheus_live.mjs",
+    "worker:run": "node --import tsx src/workers/run_task.ts",
+    "doctor": "node --import tsx src/cli.ts doctor"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -28,7 +30,11 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/node": "^25.5.0",
     "eslint": "^10.0.3",
-    "globals": "^17.4.0"
+    "globals": "^17.4.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.57.2"
   }
 }

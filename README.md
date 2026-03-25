@@ -4,11 +4,11 @@
 
 ## What is in this repository
 
-- Runtime entrypoint: `src/cli.js`
-- Config loader: `src/config.js`
-- Main orchestration loop: `src/core/orchestrator.js`
-- Leadership coordination: `src/core/jesus_supervisor.js`, `src/core/moses_coordinator.js`
-- Worker conversation runner: `src/core/worker_runner.js`
+- Runtime entrypoint: `src/cli.ts`
+- Config loader: `src/config.ts`
+- Main orchestration loop: `src/core/orchestrator.ts`
+- Leadership coordination: `src/core/jesus_supervisor.ts`, `src/core/moses_coordinator.ts`
+- Worker conversation runner: `src/core/worker_runner.ts`
 
 ## Requirements
 
@@ -53,12 +53,12 @@ npm run box:stop
 - `box:once`: run one startup cycle.
 - `box:rebase`: compatibility command (currently returns not-applicable result).
 - `box:dashboard`: run live dashboard process.
-- `worker:run`: runs `src/workers/run_task.js` — the containerised worker entry point. Requires env vars `WORKER_ROLE`, `TASK_PAYLOAD`, `TARGET_REPO`, `GITHUB_TOKEN`. See `docker/worker/Dockerfile` for the container contract.
+- `worker:run`: runs `src/workers/run_task.ts` — the containerised worker entry point. Requires env vars `WORKER_ROLE`, `TASK_PAYLOAD`, `TARGET_REPO`, `GITHUB_TOKEN`. See `docker/worker/Dockerfile` for the container contract.
 - `doctor`: checks basic tool and env readiness.
 
 ## Environment variables
 
-Authoritative source is `src/config.js`; `.env.example` mirrors the currently supported env surface.
+Authoritative source is `src/config.ts`; `.env.example` mirrors the currently supported env surface.
 
 Practical minimum for real GitHub operations:
 
@@ -93,5 +93,5 @@ npm audit --omit=dev
 
 ## Notes from docs audit
 
-- `src/config.js` supports legacy env key `GITHUB_FINEGRADED` (spelling preserved for backward compatibility). Prefer `COPILOT_GITHUB_TOKEN` in new setups.
+- `src/config.ts` supports legacy env key `GITHUB_FINEGRADED` (spelling preserved for backward compatibility). Prefer `COPILOT_GITHUB_TOKEN` in new setups.
 - Some historical README sections referenced files that are not present in this repo snapshot; this README now reflects current paths and scripts only.

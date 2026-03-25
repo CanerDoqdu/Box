@@ -5,7 +5,7 @@
  *   AC1:  Outcome collector no longer relies on absent Moses artifacts.
  *   AC2:  Metrics derive from active orchestration state files
  *         (prometheus_analysis.json, evolution_progress.json, worker_sessions.json).
- *   AC3:  No null/empty learning cycles due to missing moses_coordination.json.
+ *   AC3:  No null/empty learning cycles due to missing state files.
  *   AC5:  Tests cover no-Moses runtime (criterion 5 from task).
  *   AC7:  Negative path — missing ALL state files → degraded=true with reason code.
  *   AC8:  Newly returned JSON fields (metricsSource, degraded, degradedReason) are present.
@@ -13,14 +13,13 @@
  *   AC10: No silent fallback — degraded state sets explicit status and reason.
  *
  * Scenarios:
- *   1. No-Moses runtime: prometheus + evolution files present, no moses_coordination.json
+ *   1. Active runtime: prometheus + evolution files present
  *      → metrics derived from active state files, degraded=false
  *   2. Only evolution_progress present, prometheus absent (ENOENT)
  *      → degraded=true, degradedReason=PROMETHEUS_ABSENT
  *   3. prometheus_analysis present but invalid JSON
  *      → degraded=true, degradedReason=PROMETHEUS_INVALID
- *   4. Legacy adapter: moses_coordination.json present alongside active files
- *      → completedTasks merges both sources; metricsSource includes "moses_coordination(legacy)"
+ *   4. moses_coordination.json present → ignored (legacy adapter removed)
  *   5. No state files at all
  *      → degraded=true, totalPlans=0, completedCount=0
  *   6. evolution_progress invalid JSON (distinct from missing)
@@ -97,6 +96,17 @@ const WORKER_SESSIONS = {
   "evolution-worker": { status: "idle", startedAt: new Date().toISOString() }
 };
 
+const ATHENA_PLAN_REVIEW = {
+  approved: true,
+  overallScore: 8,
+  summary: "Plan approved with follow-up corrections.",
+  corrections: [
+    "MANDATORY — Enumerate the denylist explicitly.",
+    "ADVISORY — Define the interface snapshot before refactor."
+  ],
+  reviewedAt: new Date().toISOString()
+};
+
 // ── OUTCOME_DEGRADED_REASON enum ──────────────────────────────────────────────
 
 describe("OUTCOME_DEGRADED_REASON", () => {
@@ -121,6 +131,7 @@ describe("collectCycleOutcomes — no-Moses runtime", () => {
     await writeTestJson(tmpDir, "prometheus_analysis.json", PROMETHEUS_ANALYSIS);
     await writeTestJson(tmpDir, "evolution_progress.json", EVOLUTION_PROGRESS);
     await writeTestJson(tmpDir, "worker_sessions.json", WORKER_SESSIONS);
+    await writeTestJson(tmpDir, "athena_plan_review.json", ATHENA_PLAN_REVIEW);
     // Intentionally NO moses_coordination.json
     result = await collectCycleOutcomes(makeConfig(tmpDir));
   });
@@ -164,10 +175,17 @@ describe("collectCycleOutcomes — no-Moses runtime", () => {
 
   it("result includes required schema fields", () => {
     for (const field of ["totalPlans", "completedCount", "projectHealth", "workerOutcomes",
-      "waves", "dispatches", "requestBudget", "decisionQuality", "timestamp",
+      "waves", "dispatches", "requestBudget", "decisionQuality", "athenaPlanReview", "timestamp",
       "metricsSource", "degraded", "degradedReason"]) {
       assert.ok(field in result, `result must include field: ${field}`);
     }
+  });
+
+  it("includes Athena plan review feedback for end-of-loop SI", () => {
+    assert.equal(result.athenaPlanReview?.approved, true);
+    assert.equal(result.athenaPlanReview?.overallScore, 8);
+    assert.equal(result.athenaPlanReview?.corrections.length, 2);
+    assert.match(result.athenaPlanReview?.summary || "", /follow-up corrections/i);
   });
 });
 
@@ -259,9 +277,9 @@ describe("collectCycleOutcomes — prometheus_analysis missing plans array", () 
   });
 });
 
-// ── Scenario 5: Legacy adapter — moses_coordination.json present (AC1 rollback) ─
+// ── Scenario 5: moses_coordination.json present but ignored (adapter removed) ─
 
-describe("collectCycleOutcomes — legacy adapter (moses_coordination.json present)", () => {
+describe("collectCycleOutcomes — moses_coordination.json present but ignored", () => {
   let tmpDir;
   let result;
 
@@ -270,7 +288,7 @@ describe("collectCycleOutcomes — legacy adapter (moses_coordination.json prese
     await writeTestJson(tmpDir, "prometheus_analysis.json", PROMETHEUS_ANALYSIS);
     await writeTestJson(tmpDir, "evolution_progress.json", EVOLUTION_PROGRESS);
     await writeTestJson(tmpDir, "worker_sessions.json", WORKER_SESSIONS);
-    // Legacy Moses file still present on disk
+    // Legacy Moses file still present on disk — should be ignored
     await writeTestJson(tmpDir, "moses_coordination.json", {
       completedTasks: ["T-001", "T-LEGACY-001"],
       dispatchLog: [{ role: "old-worker", task: "T-LEGACY-001", status: "done" }]
@@ -282,17 +300,17 @@ describe("collectCycleOutcomes — legacy adapter (moses_coordination.json prese
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  it("merges legacy completedTasks with evolution-derived completed tasks", () => {
-    // evolution has T-001 completed; legacy adds T-LEGACY-001
-    assert.ok(result.completedCount >= 2, "must include both evolution and legacy completed tasks");
+  it("completedCount only reflects evolution_progress (Moses ignored)", () => {
+    // evolution has only T-001 completed; legacy T-LEGACY-001 is NOT merged
+    assert.equal(result.completedCount, 1, "must only count evolution-derived completed tasks");
   });
 
-  it("metricsSource includes moses_coordination(legacy)", () => {
-    assert.ok(result.metricsSource.includes("moses_coordination(legacy)"),
-      "must tag legacy source in metricsSource");
+  it("metricsSource does NOT include moses_coordination", () => {
+    assert.ok(!result.metricsSource.includes("moses_coordination"),
+      "must not reference moses_coordination in metricsSource");
   });
 
-  it("degraded=false — primary sources are present, Moses is additive", () => {
+  it("degraded=false — primary sources are present", () => {
     assert.equal(result.degraded, false);
   });
 });

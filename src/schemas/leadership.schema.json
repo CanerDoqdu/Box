@@ -36,7 +36,7 @@
         "role":         { "type": "string",  "minLength": 1 },
         "task":         { "type": "string",  "minLength": 1 },
         "priority":     { "type": "number"                  },
-        "wave":         { "type": "string",  "minLength": 1 },
+        "wave":         { "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "integer", "minimum": 1 }] },
         "verification": { "type": "string",  "minLength": 1 }
       }
     },
@@ -60,7 +60,7 @@
     },
     "supervisor": {
       "$comment": "Jesus supervisor directive output contract.",
-      "requiredFields": ["decision", "wakeMoses", "callTrump", "briefForMoses", "systemHealth"],
+      "requiredFields": ["decision", "wakeMoses", "callPrometheus", "briefForPrometheus", "systemHealth"],
       "fields": {
         "decision": {
           "type": "string",
@@ -71,14 +71,14 @@
           "type": "boolean",
           "description": "Whether Moses should be activated this cycle"
         },
-        "callTrump": {
+        "callPrometheus": {
           "type": "boolean",
-          "description": "Whether Trump repo scan should be triggered"
+          "description": "Whether Prometheus deep analysis should be triggered"
         },
-        "briefForMoses": {
+        "briefForPrometheus": {
           "type": "string",
           "minLength": 1,
-          "description": "Instructions for Moses on what to execute"
+          "description": "Instructions for Prometheus on what to analyze and plan"
         },
         "systemHealth": {
           "type": "string",

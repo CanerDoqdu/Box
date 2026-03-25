@@ -6,6 +6,9 @@ import {
   estimateTokens,
   estimatePromptTokens,
   COMMON_SECTIONS,
+  PROMPT_TIERS,
+  stripFluff,
+  compileTieredPrompt,
 } from "../../src/core/prompt_compiler.js";
 
 describe("prompt_compiler", () => {
@@ -113,6 +116,84 @@ describe("prompt_compiler", () => {
       assert.ok(COMMON_SECTIONS.singlePromptMode);
       assert.ok(COMMON_SECTIONS.jsonOutputMarkers);
       assert.ok(COMMON_SECTIONS.noVagueGoals);
+    });
+  });
+
+  describe("PROMPT_TIERS (Packet 18)", () => {
+    it("has T1, T2, T3 tiers", () => {
+      assert.ok(PROMPT_TIERS.T1);
+      assert.ok(PROMPT_TIERS.T2);
+      assert.ok(PROMPT_TIERS.T3);
+    });
+
+    it("T1 has lowest maxTokens", () => {
+      assert.ok(PROMPT_TIERS.T1.maxTokens < PROMPT_TIERS.T2.maxTokens);
+      assert.ok(PROMPT_TIERS.T2.maxTokens < PROMPT_TIERS.T3.maxTokens);
+    });
+
+    it("T1 has antiFluff disabled", () => {
+      assert.equal(PROMPT_TIERS.T1.antiFluff, false);
+    });
+
+    it("T2/T3 have antiFluff enabled", () => {
+      assert.equal(PROMPT_TIERS.T2.antiFluff, true);
+      assert.equal(PROMPT_TIERS.T3.antiFluff, true);
+    });
+  });
+
+  describe("stripFluff (Packet 18)", () => {
+    it("strips 'significantly improve'", () => {
+      const text = "We should significantly improve performance.";
+      const result = stripFluff(text);
+      assert.ok(!result.includes("significantly improve"));
+    });
+
+    it("strips 'try to enhance'", () => {
+      const result = stripFluff("try to enhance the system");
+      assert.ok(!result.includes("try to enhance"));
+    });
+
+    it("preserves clean text", () => {
+      const text = "Add input validation to config parser.";
+      assert.equal(stripFluff(text), text);
+    });
+
+    it("returns empty for null", () => {
+      assert.equal(stripFluff(null), "");
+    });
+  });
+
+  describe("compileTieredPrompt (Packet 18)", () => {
+    it("applies token budget from tier", () => {
+      const longText = "x".repeat(4000); // ~1000 tokens
+      const result = compileTieredPrompt(
+        [section("big", longText)],
+        { tier: "T1" }, // T1 has 800 token budget
+      );
+      assert.ok(result.length < longText.length);
+    });
+
+    it("applies anti-fluff for T2", () => {
+      const result = compileTieredPrompt(
+        [section("mission", "We should significantly improve the codebase and try to enhance quality.")],
+        { tier: "T2" },
+      );
+      assert.ok(!result.includes("significantly improve"));
+    });
+
+    it("does not apply anti-fluff for T1", () => {
+      const result = compileTieredPrompt(
+        [section("mission", "We should significantly improve the codebase.")],
+        { tier: "T1" },
+      );
+      assert.ok(result.includes("significantly improve"));
+    });
+
+    it("defaults to T2 when no tier specified", () => {
+      const result = compileTieredPrompt(
+        [section("a", "short text")],
+      );
+      assert.ok(result.includes("short text"));
     });
   });
 });

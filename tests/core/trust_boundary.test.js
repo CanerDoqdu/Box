@@ -237,6 +237,24 @@ describe("AC3 — planner contract (Prometheus) critical fields", () => {
     assert.ok(result.errors.some(e => e.payloadPath.includes("role")), "error must include payloadPath referencing role");
   });
 
+  it("wave field accepts string value (oneOf)", () => {
+    const plans = [{ role: "test-worker", task: "Fix bug", priority: 1, wave: "wave-1", verification: "npm test" }];
+    const result = validateLeadershipContract("planner", { ...VALID_PLANNER, plans });
+    assert.equal(result.ok, true, "wave as string must pass");
+  });
+
+  it("wave field accepts integer value (oneOf)", () => {
+    const plans = [{ role: "test-worker", task: "Fix bug", priority: 1, wave: 2, verification: "npm test" }];
+    const result = validateLeadershipContract("planner", { ...VALID_PLANNER, plans });
+    assert.equal(result.ok, true, "wave as integer must pass");
+  });
+
+  it("wave field rejects boolean (oneOf)", () => {
+    const plans = [{ role: "test-worker", task: "Fix bug", priority: 1, wave: true, verification: "npm test" }];
+    const result = validateLeadershipContract("planner", { ...VALID_PLANNER, plans });
+    assert.equal(result.ok, false, "wave as boolean must fail");
+  });
+
   it("error entries have payloadPath and sourceFile (AC4)", () => {
     const { plans, ...payload } = VALID_PLANNER;
     const result = validateLeadershipContract("planner", payload);
@@ -287,8 +305,8 @@ describe("AC3 — supervisor contract (Jesus) critical fields", () => {
   const VALID_SUPERVISOR = {
     decision: "tactical",
     wakeMoses: true,
-    callTrump: false,
-    briefForMoses: "Proceed with planned work",
+    callPrometheus: false,
+    briefForPrometheus: "Proceed with planned work",
     systemHealth: "good"
   };
 
@@ -316,14 +334,14 @@ describe("AC3 — supervisor contract (Jesus) critical fields", () => {
     assert.ok(result.errors.some(e => e.field === "wakeMoses"), "must flag 'wakeMoses'");
   });
 
-  it("callTrump must be boolean", () => {
-    const result = validateLeadershipContract("supervisor", { ...VALID_SUPERVISOR, callTrump: "yes" });
+  it("callPrometheus must be boolean", () => {
+    const result = validateLeadershipContract("supervisor", { ...VALID_SUPERVISOR, callPrometheus: "yes" });
     assert.equal(result.ok, false);
-    assert.ok(result.errors.some(e => e.field === "callTrump"), "must flag 'callTrump'");
+    assert.ok(result.errors.some(e => e.field === "callPrometheus"), "must flag 'callPrometheus'");
   });
 
-  it("missing briefForMoses blocks execution", () => {
-    const { briefForMoses, ...payload } = VALID_SUPERVISOR;
+  it("missing briefForPrometheus blocks execution", () => {
+    const { briefForPrometheus, ...payload } = VALID_SUPERVISOR;
     const result = validateLeadershipContract("supervisor", payload);
     assert.equal(result.ok, false);
   });
@@ -425,8 +443,8 @@ describe("AC14 negative path — execution blocked on invalid input (not just wa
     const badPayload = {
       // decision is missing
       wakeMoses: true,
-      callTrump: false,
-      briefForMoses: "Do something",
+      callPrometheus: false,
+      briefForPrometheus: "Do something",
       systemHealth: "good"
     };
     const result = validateLeadershipContract(LEADERSHIP_CONTRACT_TYPE.SUPERVISOR, badPayload);

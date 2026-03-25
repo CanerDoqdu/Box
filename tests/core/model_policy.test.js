@@ -9,6 +9,8 @@ import {
   ROUTING_REASON,
   enforceModelPolicy,
   routeModelByComplexity,
+  computeTokenROI,
+  routeModelWithUncertainty,
 } from "../../src/core/model_policy.js";
 
 describe("model_policy — complexity tiers", () => {
@@ -125,6 +127,66 @@ describe("model_policy — complexity tiers", () => {
 
     it("uses Claude Sonnet 4.6 as default when no options", () => {
       const result = routeModelByComplexity({});
+      assert.equal(result.model, "Claude Sonnet 4.6");
+    });
+  });
+
+  describe("computeTokenROI (Packet 14)", () => {
+    it("computes positive ROI for done outcome", () => {
+      const roi = computeTokenROI({
+        model: "Claude Sonnet 4.6",
+        tier: "T2",
+        estimatedTokens: 1000,
+        outcome: "done",
+        qualityScore: 0.9,
+      });
+      assert.ok(roi.roi > 0);
+      assert.ok(typeof roi.efficiency === "string");
+    });
+
+    it("computes zero ROI for failed outcome", () => {
+      const roi = computeTokenROI({
+        model: "Claude Sonnet 4.6",
+        tier: "T1",
+        estimatedTokens: 500,
+        outcome: "failure",
+        qualityScore: 0,
+      });
+      assert.equal(roi.roi, 0);
+    });
+
+    it("handles missing quality score gracefully", () => {
+      const roi = computeTokenROI({
+        model: "Claude Sonnet 4.6",
+        tier: "T1",
+        estimatedTokens: 500,
+        outcome: "done",
+      });
+      assert.ok(typeof roi.roi === "number");
+    });
+  });
+
+  describe("routeModelWithUncertainty (Packet 14)", () => {
+    it("returns a model selection", () => {
+      const result = routeModelWithUncertainty(
+        { complexity: "medium" },
+        { defaultModel: "Claude Sonnet 4.6", strongModel: "Claude Opus 4.6" },
+      );
+      assert.ok(result.model);
+      assert.ok(result.reason);
+    });
+
+    it("considers history for routing", () => {
+      const result = routeModelWithUncertainty(
+        { complexity: "low" },
+        { defaultModel: "Claude Sonnet 4.6" },
+        { recentROI: 0.8 },
+      );
+      assert.ok(result.model);
+    });
+
+    it("uses default model when no history", () => {
+      const result = routeModelWithUncertainty({}, { defaultModel: "Claude Sonnet 4.6" });
       assert.equal(result.model, "Claude Sonnet 4.6");
     });
   });

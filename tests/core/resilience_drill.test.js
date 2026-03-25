@@ -630,9 +630,9 @@ describe("end-to-end drill + report round-trip (AC1–AC5)", () => {
 // ── Risk level documentation (AC15 — medium risk acknowledgement) ─────────────
 
 describe("risk level documentation (AC15)", () => {
-  it("resilience_drill.js module header documents risk level as 'medium'", async () => {
+  it("resilience_drill.ts module header documents risk level as 'medium'", async () => {
     const src = await fs.readFile(
-      new URL("../../src/core/resilience_drill.js", import.meta.url),
+      new URL("../../src/core/resilience_drill.ts", import.meta.url),
       "utf8"
     );
     assert.ok(

@@ -1,0 +1,364 @@
+
+C:\Users\caner\Desktop\Box\scripts\admin_cost_probe.mjs
+   3:18  error  'process' is not defined  no-undef
+   3:54  error  'process' is not defined  no-undef
+   6:3   error  'console' is not defined  no-undef
+   7:3   error  'process' is not defined  no-undef
+  14:17  error  'URL' is not defined      no-undef
+  21:19  error  'fetch' is not defined    no-undef
+  31:1   error  'console' is not defined  no-undef
+  32:1   error  'console' is not defined  no-undef
+  33:1   error  'console' is not defined  no-undef
+  34:1   error  'console' is not defined  no-undef
+
+C:\Users\caner\Desktop\Box\scripts\ask_jesus_question_once.mjs
+  19:11  error  Empty block statement     no-empty
+  25:13  error  Empty block statement     no-empty
+  32:13  error  Empty block statement     no-empty
+  58:8   error  'process' is not defined  no-undef
+  68:3   error  'console' is not defined  no-undef
+  69:3   error  'process' is not defined  no-undef
+  73:3   error  'console' is not defined  no-undef
+  74:3   error  'process' is not defined  no-undef
+  77:1   error  'console' is not defined  no-undef
+
+C:\Users\caner\Desktop\Box\scripts\athena_calibration.js
+   34:3   error  'scoreCalibrationPlan' is defined but never used         no-unused-vars
+   35:3   error  'computeCalibrationDeviation' is defined but never used  no-unused-vars
+   37:3   error  'RATIONALE_CLASS' is defined but never used              no-unused-vars
+   65:12  error  'err' is defined but never used                          no-unused-vars
+  145:5   error  'console' is not defined                                 no-undef
+  150:18  error  'process' is not defined                                 no-undef
+  154:5   error  'console' is not defined                                 no-undef
+  155:5   error  'process' is not defined                                 no-undef
+  160:5   error  'console' is not defined                                 no-undef
+  161:5   error  'process' is not defined                                 no-undef
+  174:3   error  'console' is not defined                                 no-undef
+  175:3   error  'console' is not defined                                 no-undef
+  176:15  error  'console' is not defined                                 no-undef
+  190:5   error  'console' is not defined                                 no-undef
+  191:5   error  'process' is not defined                                 no-undef
+  194:3   error  'console' is not defined                                 no-undef
+  221:5   error  'console' is not defined                                 no-undef
+  224:3   error  'console' is not defined                                 no-undef
+  225:3   error  'console' is not defined                                 no-undef
+  228:5   error  'console' is not defined                                 no-undef
+  230:7   error  'console' is not defined                                 no-undef
+  231:7   error  'process' is not defined                                 no-undef
+  233:5   error  'process' is not defined                                 no-undef
+  236:3   error  'console' is not defined                                 no-undef
+  237:3   error  'process' is not defined                                 no-undef
+  241:3   error  'console' is not defined                                 no-undef
+  242:3   error  'process' is not defined                                 no-undef
+
+C:\Users\caner\Desktop\Box\scripts\box_park.mjs
+    5:14  error  'process' is not defined          no-undef
+    7:46  error  'process' is not defined          no-undef
+    8:50  error  'process' is not defined          no-undef
+    9:38  error  'process' is not defined          no-undef
+   12:35  error  'setTimeout' is not defined       no-undef
+   43:7   error  'process' is not defined          no-undef
+   45:81  error  Unnecessary escape character: \"  no-useless-escape
+   45:99  error  Unnecessary escape character: \"  no-useless-escape
+   63:7   error  'process' is not defined          no-undef
+   86:10  error  'process' is not defined          no-undef
+  101:5   error  'process' is not defined          no-undef
+  154:7   error  'process' is not defined          no-undef
+  164:5   error  'process' is not defined          no-undef
+  170:7   error  'process' is not defined          no-undef
+  171:7   error  'process' is not defined          no-undef
+  173:7   error  'process' is not defined          no-undef
+  181:7   error  'process' is not defined          no-undef
+  191:3   error  'process' is not defined          no-undef
+  194:3   error  'process' is not defined          no-undef
+  199:5   error  'process' is not defined          no-undef
+  206:3   error  'process' is not defined          no-undef
+  210:5   error  'process' is not defined          no-undef
+  213:5   error  'process' is not defined          no-undef
+  217:5   error  'process' is not defined          no-undef
+  221:3   error  'process' is not defined          no-undef
+  225:3   error  'console' is not defined          no-undef
+  226:3   error  'process' is not defined          no-undef
+
+C:\Users\caner\Desktop\Box\scripts\check-coverage.js
+   99:5  error  'console' is not defined  no-undef
+  108:3  error  'console' is not defined  no-undef
+  113:5  error  'console' is not defined  no-undef
+  121:3  error  'console' is not defined  no-undef
+
+C:\Users\caner\Desktop\Box\scripts\debug_copilot_raw.mjs
+   6:8  error  'process' is not defined  no-undef
+  10:1  error  'console' is not defined  no-undef
+  11:1  error  'console' is not defined  no-undef
+  12:1  error  'console' is not defined  no-undef
+  13:1  error  'console' is not defined  no-undef
+  14:1  error  'console' is not defined  no-undef
+  15:1  error  'console' is not defined  no-undef
+  16:1  error  'console' is not defined  no-undef
+
+C:\Users\caner\Desktop\Box\scripts\generate-governance-packet.mjs
+   30:14  error  'process' is not defined  no-undef
+   42:3   error  'console' is not defined  no-undef
+   43:3   error  'process' is not defined  no-undef
+   55:1   error  'console' is not defined  no-undef
+   61:3   error  'console' is not defined  no-undef
+   62:3   error  'process' is not defined  no-undef
+   66:3   error  'console' is not defined  no-undef
+   67:3   error  'process' is not defined  no-undef
+   71:1   error  'console' is not defined  no-undef
+   75:3   error  'console' is not defined  no-undef
+   81:3   error  'console' is not defined  no-undef
+   82:3   error  'console' is not defined  no-undef
+   83:3   error  'process' is not defined  no-undef
+   92:3   error  'console' is not defined  no-undef
+   93:3   error  'process' is not defined  no-undef
+   97:3   error  'console' is not defined  no-undef
+   98:3   error  'process' is not defined  no-undef
+  101:1   error  'console' is not defined  no-undef
+
+C:\Users\caner\Desktop\Box\scripts\github_premium_usage_report.mjs
+   7:18  error  'process' is not defined          no-undef
+   7:37  error  'process' is not defined          no-undef
+   8:21  error  'process' is not defined          no-undef
+   9:22  error  'process' is not defined          no-undef
+  11:15  error  'process' is not defined          no-undef
+  11:48  error  'process' is not defined          no-undef
+  14:3   error  'console' is not defined          no-undef
+  15:3   error  'process' is not defined          no-undef
+  18:20  error  'URLSearchParams' is not defined  no-undef
+  25:24  error  'fetch' is not defined            no-undef
+  36:1   error  'console' is not defined          no-undef
+  42:3   error  'console' is not defined          no-undef
+  43:3   error  'process' is not defined          no-undef
+  47:3   error  'console' is not defined          no-undef
+  48:3   error  'process' is not defined          no-undef
+  52:1   error  'console' is not defined          no-undef
+  53:1   error  'console' is not defined          no-undef
+  54:1   error  'console' is not defined          no-undef
+  63:5   error  'console' is not defined          no-undef
+  67:1   error  'console' is not defined          no-undef
+  68:1   error  'console' is not defined          no-undef
+  69:1   error  'console' is not defined          no-undef
+
+C:\Users\caner\Desktop\Box\scripts\run_evolution.mjs
+   23:14  error  'process' is not defined  no-undef
+   37:5   error  'console' is not defined  no-undef
+   38:5   error  'process' is not defined  no-undef
+   42:3   error  'console' is not defined  no-undef
+   43:3   error  'console' is not defined  no-undef
+   44:3   error  'console' is not defined  no-undef
+   58:5   error  'console' is not defined  no-undef
+   61:3   error  'console' is not defined  no-undef
+   63:20  error  'console' is not defined  no-undef
+   65:3   error  'console' is not defined  no-undef
+   66:3   error  'process' is not defined  no-undef
+   71:1   error  'console' is not defined  no-undef
+   72:1   error  'console' is not defined  no-undef
+   73:1   error  'console' is not defined  no-undef
+   74:17  error  'console' is not defined  no-undef
+   75:13  error  'console' is not defined  no-undef
+   76:1   error  'console' is not defined  no-undef
+   82:3   error  'console' is not defined  no-undef
+   83:3   error  'process' is not defined  no-undef
+   90:3   error  'console' is not defined  no-undef
+   91:3   error  'console' is not defined  no-undef
+   93:3   error  'console' is not defined  no-undef
+   94:3   error  'process' is not defined  no-undef
+   97:1   error  'console' is not defined  no-undef
+  105:3   error  'console' is not defined  no-undef
+  108:5   error  'console' is not defined  no-undef
+  111:3   error  'process' is not defined  no-undef
+  113:3   error  'console' is not defined  no-undef
+  114:3   error  'console' is not defined  no-undef
+  115:3   error  'process' is not defined  no-undef
+
+C:\Users\caner\Desktop\Box\scripts\run_prometheus_once.mjs
+  59:1  error  'console' is not defined  no-undef
+  67:3  error  'console' is not defined  no-undef
+  69:3  error  'console' is not defined  no-undef
+
+C:\Users\caner\Desktop\Box\scripts\test_docker_env.mjs
+   6:13  error  'process' is not defined  no-undef
+   6:49  error  'process' is not defined  no-undef
+   7:1   error  'console' is not defined  no-undef
+  23:8   error  'process' is not defined  no-undef
+  26:19  error  'process' is not defined  no-undef
+  30:1   error  'console' is not defined  no-undef
+  31:1   error  'console' is not defined  no-undef
+  32:15  error  'console' is not defined  no-undef
+  33:1   error  'console' is not defined  no-undef
+
+C:\Users\caner\Desktop\Box\scripts\test_fence_parse.mjs
+   9:5  error  'console' is not defined  no-undef
+  11:5  error  'console' is not defined  no-undef
+  14:3  error  'console' is not defined  no-undef
+
+C:\Users\caner\Desktop\Box\scripts\watch_prometheus_live.mjs
+   4:18  error  'process' is not defined  no-undef
+  29:11  error  'process' is not defined  no-undef
+  47:1   error  'console' is not defined  no-undef
+  48:1   error  'console' is not defined  no-undef
+  49:1   error  'console' is not defined  no-undef
+
+C:\Users\caner\Desktop\Box\src\core\capability_pool.js
+  14:28  error  'LANES' is defined but never used. Allowed unused vars must match /^_/u  no-unused-vars
+
+C:\Users\caner\Desktop\Box\src\core\prometheus.js
+   66:21  error  Unnecessary escape character: \[  no-useless-escape
+  381:44  error  Unnecessary escape character: \)  no-useless-escape
+  394:21  error  Unnecessary escape character: \)  no-useless-escape
+  424:21  error  Unnecessary escape character: \)  no-useless-escape
+
+C:\Users\caner\Desktop\Box\tests\core\canary_engine.test.js
+  30:39  error  'beforeEach' is defined but never used  no-unused-vars
+
+C:\Users\caner\Desktop\Box\tests\core\catastrophe_detector.test.js
+   29:3   error  'loadCatastropheState' is defined but never used  no-unused-vars
+   70:19  error  '_l' is assigned a value but never used           no-unused-vars
+   70:34  error  '_s' is assigned a value but never used           no-unused-vars
+   70:52  error  '_d' is assigned a value but never used           no-unused-vars
+  380:9   error  'console' is not defined                          no-undef
+
+C:\Users\caner\Desktop\Box\tests\core\cycle_analytics.test.js
+  17:39  error  'beforeEach' is defined but never used  no-unused-vars
+
+C:\Users\caner\Desktop\Box\tests\core\dashboard_auth.test.js
+  14:1  error  'process' is not defined  no-undef
+
+C:\Users\caner\Desktop\Box\tests\core\escalation_queue.test.js
+  267:28  error  'setTimeout' is not defined  no-undef
+
+C:\Users\caner\Desktop\Box\tests\core\experiment_registry.test.js
+    8:24  error  'before' is defined but never used      no-unused-vars
+    8:32  error  'after' is defined but never used       no-unused-vars
+   56:5   error  'tmpDir' is defined but never used      no-unused-vars
+  123:27  error  '_' is assigned a value but never used  no-unused-vars
+  132:27  error  '_' is assigned a value but never used  no-unused-vars
+  139:29  error  '_' is assigned a value but never used  no-unused-vars
+  146:31  error  '_' is assigned a value but never used  no-unused-vars
+  153:27  error  '_' is assigned a value but never used  no-unused-vars
+  160:29  error  '_' is assigned a value but never used  no-unused-vars
+  181:29  error  '_' is assigned a value but never used  no-unused-vars
+  188:32  error  '_' is assigned a value but never used  no-unused-vars
+  195:21  error  '_' is assigned a value but never used  no-unused-vars
+  411:31  error  '_' is assigned a value but never used  no-unused-vars
+  658:31  error  '_' is assigned a value but never used  no-unused-vars
+  665:27  error  '_' is assigned a value but never used  no-unused-vars
+
+C:\Users\caner\Desktop\Box\tests\core\fs_utils_atomic_write.test.js
+  518:18  error  'performance' is not defined  no-undef
+  523:25  error  'performance' is not defined  no-undef
+  526:18  error  'performance' is not defined  no-undef
+  530:25  error  'performance' is not defined  no-undef
+  533:7   error  'console' is not defined      no-undef
+  534:7   error  'console' is not defined      no-undef
+
+C:\Users\caner\Desktop\Box\tests\core\fs_utils_read_errors.test.js
+   23:39  error  'afterEach' is defined but never used  no-unused-vars
+   38:5   error  'process' is not defined               no-undef
+   42:22  error  'process' is not defined               no-undef
+  275:7   error  'process' is not defined               no-undef
+  282:9   error  'process' is not defined               no-undef
+
+C:\Users\caner\Desktop\Box\tests\core\governance_contract.test.js
+  29:3   error  'HIGH_RISK_SCORE_THRESHOLD' is defined but never used       no-unused-vars
+  30:3   error  'CRITICAL_RISK_SCORE_THRESHOLD' is defined but never used   no-unused-vars
+  31:3   error  'DUAL_APPROVAL_MIN_APPROVERS' is defined but never used     no-unused-vars
+  37:3   error  'DEFAULT_APPROVAL_EVIDENCE_PATH' is defined but never used  no-unused-vars
+  74:28  error  'URL' is not defined                                        no-undef
+
+C:\Users\caner\Desktop\Box\tests\core\governance_freeze.test.js
+  85:10  error  'makeFrozenConfig' is defined but never used  no-unused-vars
+
+C:\Users\caner\Desktop\Box\tests\core\governance_review_packet.test.js
+  108:7  error  'OUTSIDE_TIMESTAMP' is assigned a value but never used  no-unused-vars
+
+C:\Users\caner\Desktop\Box\tests\core\hypothesis_scheduler.test.js
+  642:11  error  'reason' is assigned a value but never used  no-unused-vars
+
+C:\Users\caner\Desktop\Box\tests\core\orchestrator_pipeline_progress.test.js
+  11:47  error  'mock' is defined but never used  no-unused-vars
+
+C:\Users\caner\Desktop\Box\tests\core\pipeline_progress.test.js
+  58:7  warning  Unused eslint-disable directive (no problems were reported from 'no-control-regex')
+  60:9  error    Unexpected control character(s) in regular expression: \x00                          no-control-regex
+
+C:\Users\caner\Desktop\Box\tests\core\premortem.test.js
+  112:16  error  'writeTestJson' is defined but never used  no-unused-vars
+  204:24  error  '_' is assigned a value but never used     no-unused-vars
+  237:31  error  '_' is assigned a value but never used     no-unused-vars
+  245:25  error  '_' is assigned a value but never used     no-unused-vars
+
+C:\Users\caner\Desktop\Box\tests\core\resilience_drill.test.js
+   54:3   error  'CATASTROPHE_DEFAULTS' is defined but never used  no-unused-vars
+   60:3   error  'ROLLBACK_LEVEL' is defined but never used        no-unused-vars
+   80:10  error  'process' is not defined                          no-undef
+   84:10  error  'process' is not defined                          no-undef
+   91:12  error  'process' is not defined                          no-undef
+   96:5   error  'process' is not defined                          no-undef
+   98:12  error  'process' is not defined                          no-undef
+  102:5   error  'process' is not defined                          no-undef
+  104:12  error  'process' is not defined                          no-undef
+  505:5   error  'process' is not defined                          no-undef
+  508:12  error  'process' is not defined                          no-undef
+  593:5   error  'process' is not defined                          no-undef
+  626:12  error  'process' is not defined                          no-undef
+  635:11  error  'URL' is not defined                              no-undef
+
+C:\Users\caner\Desktop\Box\tests\core\self_improvement.test.js
+  38:3   error  'computeWeightedDecisionScore' is defined but never used  no-unused-vars
+  39:3   error  'DECISION_QUALITY_WEIGHTS' is defined but never used      no-unused-vars
+  41:10  error  'DECISION_QUALITY_LABEL' is defined but never used        no-unused-vars
+
+C:\Users\caner\Desktop\Box\tests\core\shadow_policy_evaluator.test.js
+  70:37  error  '_' is defined but never used  no-unused-vars
+  70:40  error  'i' is defined but never used  no-unused-vars
+
+C:\Users\caner\Desktop\Box\tests\core\trust_boundary.test.js
+  206:13  error  'plans' is assigned a value but never used               no-unused-vars
+  215:13  error  'analysis' is assigned a value but never used            no-unused-vars
+  259:13  error  'plans' is assigned a value but never used               no-unused-vars
+  279:13  error  'approved' is assigned a value but never used            no-unused-vars
+  292:13  error  'corrections' is assigned a value but never used         no-unused-vars
+  319:13  error  'decision' is assigned a value but never used            no-unused-vars
+  344:13  error  'briefForPrometheus' is assigned a value but never used  no-unused-vars
+
+C:\Users\caner\Desktop\Box\tests\core\worker_run_task.test.js
+   9:24  error  'before' is defined but never used  no-unused-vars
+   9:32  error  'after' is defined but never used   no-unused-vars
+  19:20  error  'process' is not defined            no-undef
+  20:15  error  'process' is not defined            no-undef
+
+C:\Users\caner\Desktop\Box\tests\core\worker_runner.test.js
+  122:33  error  'process' is not defined  no-undef
+
+C:\Users\caner\Desktop\Box\tests\dashboard\auth.test.js
+   44:13  error  The value assigned to 'parsed' is not used in subsequent statements  no-useless-assignment
+   70:5   error  'process' is not defined                                             no-undef
+   71:5   error  'process' is not defined                                             no-undef
+   72:5   error  'process' is not defined                                             no-undef
+   94:12  error  'process' is not defined                                             no-undef
+   95:12  error  'process' is not defined                                             no-undef
+   96:12  error  'process' is not defined                                             no-undef
+  131:12  error  'process' is not defined                                             no-undef
+
+C:\Users\caner\Desktop\Box\tests\dashboard\daemon_control.test.js
+   45:13  error  The value assigned to 'parsed' is not used in subsequent statements  no-useless-assignment
+   72:5   error  'process' is not defined                                             no-undef
+   73:5   error  'process' is not defined                                             no-undef
+   74:5   error  'process' is not defined                                             no-undef
+   96:13  error  Empty block statement                                                no-empty
+  100:9   error  'process' is not defined                                             no-undef
+  101:15  error  Empty block statement                                                no-empty
+  116:40  error  'setTimeout' is not defined                                          no-undef
+  120:12  error  'process' is not defined                                             no-undef
+  121:12  error  'process' is not defined                                             no-undef
+  122:12  error  'process' is not defined                                             no-undef
+  128:12  error  'process' is not defined                                             no-undef
+  166:27  error  'process' is not defined                                             no-undef
+  198:9   error  'process' is not defined                                             no-undef
+  199:15  error  Empty block statement                                                no-empty
+
+Ô£û 284 problems (283 errors, 1 warning)
+  0 errors and 1 warning potentially fixable with the `--fix` option.
+

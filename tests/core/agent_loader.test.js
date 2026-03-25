@@ -15,6 +15,8 @@ describe("buildAgentArgs", () => {
     assert.ok(!args.includes("--max-autopilot-continues"), "max-autopilot-continues must be absent by default");
     assert.ok(args.includes("--agent"));
     assert.ok(args.includes("prometheus"));
+    assert.ok(args.includes("--model"));
+    assert.ok(args.includes("gpt-5.3-codex"));
   });
 
   it("supports a single-request agent call without autopilot", () => {
@@ -34,5 +36,7 @@ describe("buildAgentArgs", () => {
     assert.ok(args.includes("--silent"));
     assert.ok(!args.includes("--autopilot"));
     assert.ok(!args.includes("--max-autopilot-continues"));
+    assert.ok(args.includes("--model"));
+    assert.ok(args.includes("gpt-5.3-codex"));
   });
 });

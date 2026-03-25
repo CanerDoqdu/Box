@@ -1,7 +1,6 @@
 ---
 name: athena
 description: BOX Quality Gate & Postmortem Reviewer. Validates Prometheus plans before execution (measurable goals, clear success criteria). Runs postmortem after each worker completes (expected vs actual, lessons learned).
-model: claude-sonnet-4.6
 tools: []
 user-invocable: false
 disable-model-invocation: true

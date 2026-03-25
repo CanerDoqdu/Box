@@ -1,0 +1,1 @@
+{"schemaVersion":1,"taskId":null,"failureClass":"environment","retryAction":"cooldown_retry","attempts":0,"strategyUsed":"adaptive","cooldownMs":1800000,"escalationTarget":"daemon_queue","decidedAt":"2026-03-24T18:01:01.408Z"}

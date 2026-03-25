@@ -13,10 +13,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ENTRY = path.resolve(__dirname, "../../src/workers/run_task.js");
+const ENTRY = path.resolve(__dirname, "../../src/workers/run_task.ts");
 
 function run(env = {}) {
-  return spawnSync(process.execPath, [ENTRY], {
+  return spawnSync(process.execPath, ["--import", "tsx", ENTRY], {
     env: { ...process.env, ...env },
     encoding: "utf8",
   });

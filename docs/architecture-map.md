@@ -18,8 +18,8 @@ Primary execution styles:
 ### Layer A: Entry and Config
 
 Files:
-- `src/cli.js`
-- `src/config.js`
+- `src/cli.ts`
+- `src/config.ts`
 - `box.config.json`
 
 Responsibilities:
@@ -33,7 +33,7 @@ Key output:
 ### Layer B: Orchestration Core
 
 File:
-- `src/core/orchestrator.js`
+- `src/core/orchestrator.ts`
 
 Responsibilities:
 - Recover stale task state and reconcile queue health.
@@ -49,10 +49,10 @@ Key output:
 ### Layer C: Planning and Queue
 
 Files:
-- `src/core/project_scanner.js`
-- `src/core/roadmap_engine.js`
-- `src/core/task_planner.js`
-- `src/core/task_queue.js`
+- `src/core/project_scanner.ts`
+- `src/core/roadmap_engine.ts`
+- `src/core/task_planner.ts`
+- `src/core/task_queue.ts`
 
 Responsibilities:
 - Generate repository summary and domain signals.
@@ -63,9 +63,9 @@ Responsibilities:
 ### Layer D: Worker Execution
 
 Files:
-- `src/core/worker_runner.js`
-- `src/workers/run_task.js`
-- `src/providers/coder/copilot_cli_provider.js`
+- `src/core/worker_runner.ts`
+- `src/workers/run_task.ts`
+- `src/providers/coder/copilot_cli_provider.ts`
 - `docker/worker/Dockerfile`
 
 Responsibilities:
@@ -77,11 +77,11 @@ Responsibilities:
 ### Layer E: Policy, Review, Escalation
 
 Files:
-- `src/core/gates.js`
-- `src/providers/reviewer/copilot_reviewer.js`
-- `src/providers/reviewer/claude_reviewer.js`
-- `src/core/escalation_policy.js`
-- `src/core/policy_engine.js`
+- `src/core/gates.ts`
+- `src/providers/reviewer/copilot_reviewer.ts`
+- `src/providers/reviewer/claude_reviewer.ts`
+- `src/core/escalation_policy.ts`
+- `src/core/policy_engine.ts`
 
 Responsibilities:
 - Evaluate build/test/lint/security/coverage gates.
@@ -92,11 +92,11 @@ Responsibilities:
 ### Layer F: Observability and Control Plane
 
 Files:
-- `src/core/state_tracker.js`
-- `src/core/checkpoint_engine.js`
-- `src/core/worker_activity.js`
-- `src/dashboard/live_dashboard.js`
-- `src/core/daemon_control.js`
+- `src/core/state_tracker.ts`
+- `src/core/checkpoint_engine.ts`
+- `src/core/worker_activity.ts`
+- `src/dashboard/live_dashboard.ts`
+- `src/core/daemon_control.ts`
 
 Responsibilities:
 - Persist progress, alerts, tests, usage, checkpoints, and worker phases.
@@ -106,7 +106,7 @@ Responsibilities:
 ### Layer G: Self-Improvement Control Layer
 
 Files:
-- `src/core/self_improvement_engine.js`
+- `src/core/self_improvement_engine.ts`
 
 Responsibilities:
 - Run cycle-end self-analysis and produce `SelfAnalysisReport` metrics.
@@ -117,7 +117,7 @@ Responsibilities:
 ## 3) Role Registry and Humanized Ownership
 
 Source of truth:
-- `src/core/role_registry.js`
+- `src/core/role_registry.ts`
 - Runtime override: `box.config.json -> roleRegistry`
 
 Current named roles:
@@ -135,7 +135,7 @@ Current named roles:
 - Scanner B: `Ezra`
 
 Routing owner by task kind is enforced in:
-- `src/core/task_routing.js`
+- `src/core/task_routing.ts`
 
 Examples:
 - `production` tasks map to security/devops ownership.
@@ -163,7 +163,7 @@ If ownership mismatch occurs, orchestration hard-fails that task and raises an a
 ## 5) Loop Selector
 
 Strategic/tactical decision lives in:
-- `src/core/orchestrator.js`
+- `src/core/orchestrator.ts`
 
 Current deterministic selector behavior:
 - Strategic is due when interval threshold (`runtime.strategicLoopMinutes`) is reached.
@@ -177,7 +177,7 @@ State file used:
 ## 6) Escalation Chain and User Visibility
 
 Policy engine:
-- `src/core/escalation_policy.js`
+- `src/core/escalation_policy.ts`
 
 Escalation levels:
 - `L1-self-heal`
@@ -219,12 +219,12 @@ Primary runtime files under `state/`:
 ## 8) Gates and Exit Codes
 
 Gate evaluation file:
-- `src/core/gates.js`
+- `src/core/gates.ts`
 
 Worker gate markers parsed by:
-- `src/core/worker_runner.js`
+- `src/core/worker_runner.ts`
 
-Typical worker exits from `src/workers/run_task.js`:
+Typical worker exits from `src/workers/run_task.ts`:
 - `3`: build failed
 - `4`: tests failed
 - `6`: lint failed
@@ -236,9 +236,9 @@ If worker exits non-zero without markers, all required checks are treated as fai
 
 Config and policy sources:
 - `box.config.json -> runtime`, `copilot`, `planner`
-- `src/config.js`
-- `src/providers/coder/copilot_cli_provider.js`
-- `src/providers/reviewer/copilot_reviewer.js`
+- `src/config.ts`
+- `src/providers/coder/copilot_cli_provider.ts`
+- `src/providers/reviewer/copilot_reviewer.ts`
 
 Current runtime pattern:
 - Reviewer provider is configurable (`copilot` or `claude`).
@@ -349,9 +349,9 @@ interface QueueTask {
 
 #### Integration Points
 
-- `src/core/task_planner.js`: must always produce normalized `TaskContract`.
-- `src/core/orchestrator.js`: validates contract before dispatch.
-- `src/core/task_queue.js`: stores `semanticKey`, `attempt`, and lineage.
+- `src/core/task_planner.ts`: must always produce normalized `TaskContract`.
+- `src/core/orchestrator.ts`: validates contract before dispatch.
+- `src/core/task_queue.ts`: stores `semanticKey`, `attempt`, and lineage.
 
 #### Failure Prevention Logic
 
@@ -417,9 +417,9 @@ Worker and orchestrator communication must be machine-parseable and stage-aware.
 
 #### Integration Points
 
-- `src/workers/run_task.js`: emits protocol JSON lines in stdout.
-- `src/core/worker_runner.js`: parses protocol events before fallback text parsing.
-- `src/core/worker_activity.js`: updates phase based on event stream.
+- `src/workers/run_task.ts`: emits protocol JSON lines in stdout.
+- `src/core/worker_runner.ts`: parses protocol events before fallback text parsing.
+- `src/core/worker_activity.ts`: updates phase based on event stream.
 
 #### Failure Prevention Logic
 
@@ -449,8 +449,8 @@ const AllowedTransitions: Record<TaskState, TaskState[]> = {
 
 #### Integration Points
 
-- `src/core/task_queue.js`: enforce transition map in `markTask` and requeue helpers.
-- `src/core/orchestrator.js`: disallow direct `queued -> passed` or `running -> queued` shortcuts.
+- `src/core/task_queue.ts`: enforce transition map in `markTask` and requeue helpers.
+- `src/core/orchestrator.ts`: disallow direct `queued -> passed` or `running -> queued` shortcuts.
 - `state/tasks.json`: include `lastTransition`, `lastTransitionAt`, and `transitionBy`.
 
 #### Failure Prevention Logic
@@ -488,8 +488,8 @@ interface SemanticFailureIndex {
 
 #### Integration Points
 
-- `src/core/task_queue.js`: existing semantic suppression extends to descendant depth checks.
-- `src/core/orchestrator.js`: stop creating split tasks when `maxDescendantDepth` exceeded.
+- `src/core/task_queue.ts`: existing semantic suppression extends to descendant depth checks.
+- `src/core/orchestrator.ts`: stop creating split tasks when `maxDescendantDepth` exceeded.
 - `state/tasks.json`: keep `splitDepth` and `lineageRootTaskId`.
 
 #### Failure Prevention Logic
@@ -521,8 +521,8 @@ interface IssueIntakeRecord {
 
 #### Integration Points
 
-- `src/core/orchestrator.js`: before `createHandoffIssue` and before releasing blocked tasks.
-- `src/core/task_queue.js`: check `semanticKey` against active or recently failed tasks.
+- `src/core/orchestrator.ts`: before `createHandoffIssue` and before releasing blocked tasks.
+- `src/core/task_queue.ts`: check `semanticKey` against active or recently failed tasks.
 - New file: `state/issue_intake.json`.
 
 #### Failure Prevention Logic
@@ -575,9 +575,9 @@ Workers must follow deterministic behavior constraints independent of model outp
 
 #### Integration Points
 
-- `src/workers/run_task.js`: enforce behavior file before execution.
-- `src/core/policy_engine.js`: merge repo policy and worker behavior policy.
-- `src/core/orchestrator.js`: include policy digest in checkpoint.
+- `src/workers/run_task.ts`: enforce behavior file before execution.
+- `src/core/policy_engine.ts`: merge repo policy and worker behavior policy.
+- `src/core/orchestrator.ts`: include policy digest in checkpoint.
 
 #### Failure Prevention Logic
 
@@ -627,8 +627,8 @@ interface ContextEnvelope {
 
 #### Integration Points
 
-- `src/core/orchestrator.js`: build envelope in `buildWorkerOverrides`.
-- `src/workers/run_task.js`: validate and print envelope hash to logs.
+- `src/core/orchestrator.ts`: build envelope in `buildWorkerOverrides`.
+- `src/workers/run_task.ts`: validate and print envelope hash to logs.
 - `state/checkpoint-*.json`: include envelope hash and version.
 
 #### Failure Prevention Logic
@@ -671,8 +671,8 @@ interface StrategicPlan {
 
 #### Integration Points
 
-- `src/core/roadmap_engine.js`: generate normalized complexity roof.
-- `src/core/task_planner.js`: produce contracts and semantic keys.
+- `src/core/roadmap_engine.ts`: generate normalized complexity roof.
+- `src/core/task_planner.ts`: produce contracts and semantic keys.
 - `state/roadmap.json` and `state/strategic_cycle.json`: persist plan metadata.
 
 #### Failure Prevention Logic
@@ -707,8 +707,8 @@ type CapabilityRegistry = Record<string, WorkerCapabilityProfile>;
 #### Integration Points
 
 - `box.config.json`: add `capabilityProfiles`.
-- `src/core/task_routing.js`: route by capability intersection first, then fallback by kind map.
-- `src/providers/coder/copilot_cli_provider.js`: consume profile model pool.
+- `src/core/task_routing.ts`: route by capability intersection first, then fallback by kind map.
+- `src/providers/coder/copilot_cli_provider.ts`: consume profile model pool.
 
 #### Failure Prevention Logic
 
@@ -749,9 +749,9 @@ interface RepositoryKnowledgeGraph {
 
 #### Integration Points
 
-- `src/core/project_scanner.js`: generate graph incrementally.
+- `src/core/project_scanner.ts`: generate graph incrementally.
 - New state file: `state/knowledge_graph.json`.
-- `src/core/task_planner.js`: prefer tasks touching high-centrality unresolved nodes.
+- `src/core/task_planner.ts`: prefer tasks touching high-centrality unresolved nodes.
 
 #### Failure Prevention Logic
 
@@ -788,8 +788,8 @@ interface RecoveryStrategy {
 
 #### Integration Points
 
-- `src/core/orchestrator.js`: replace ad hoc recovery branching with strategy map.
-- `src/core/task_queue.js`: annotate each follow-up with `recoveryClass`.
+- `src/core/orchestrator.ts`: replace ad hoc recovery branching with strategy map.
+- `src/core/task_queue.ts`: annotate each follow-up with `recoveryClass`.
 - `state/checkpoint-*.json`: write selected recovery strategy.
 
 #### Failure Prevention Logic
@@ -825,8 +825,8 @@ interface CoordinationPlan {
 
 #### Integration Points
 
-- `src/core/orchestrator.js`: acquire lock before dispatch.
-- `src/core/task_queue.js`: block tasks that collide on lock key.
+- `src/core/orchestrator.ts`: acquire lock before dispatch.
+- `src/core/task_queue.ts`: block tasks that collide on lock key.
 - `state/worker_activity.json`: include lock ownership metadata.
 
 #### Failure Prevention Logic
@@ -863,9 +863,9 @@ interface BudgetDecision {
 
 #### Integration Points
 
-- `src/core/budget_controller.js`: produce decision before each dispatch.
-- `src/providers/coder/copilot_cli_provider.js`: downgrade model on budget action.
-- `src/core/orchestrator.js`: pause low-priority queue on budget pressure.
+- `src/core/budget_controller.ts`: produce decision before each dispatch.
+- `src/providers/coder/copilot_cli_provider.ts`: downgrade model on budget action.
+- `src/core/orchestrator.ts`: pause low-priority queue on budget pressure.
 
 #### Failure Prevention Logic
 
@@ -916,8 +916,8 @@ All modules must emit normalized telemetry to support forensics, dashboards, and
 
 #### Integration Points
 
-- `src/core/state_tracker.js`: write event stream to new `state/events.jsonl`.
-- `src/dashboard/live_dashboard.js`: aggregate by component, severity, and correlation.
+- `src/core/state_tracker.ts`: write event stream to new `state/events.jsonl`.
+- `src/dashboard/live_dashboard.ts`: aggregate by component, severity, and correlation.
 - `state/checkpoint-*.json`: include related `eventId` list.
 
 #### Failure Prevention Logic
@@ -993,9 +993,9 @@ The following additions were introduced to close remaining loop and runtime stab
 	- `runtime.workerMaxFilesChanged`
 	- `runtime.workerForbiddenPathPrefixes`
 - Implemented in:
-	- `src/workers/run_task.js`
-	- `src/core/worker_runner.js`
-	- `src/config.js`
+	- `src/workers/run_task.ts`
+	- `src/core/worker_runner.ts`
+	- `src/config.ts`
 
 ### 15.9 Task Loop Metadata Contract
 
@@ -1019,9 +1019,9 @@ BOX now executes a dedicated post-cycle self-improvement sequence:
 3. Improvement planner derives `system_improvement` tasks from top failure categories.
 4. Tasks are enqueued through the normal queue path and routed by ownership rules.
 5. `Self-Upgrade Guard` blocks self-improvement tasks from editing protected core modules:
-	- `src/core/orchestrator.js`
-	- `src/core/task_queue.js`
-	- `src/core/policy_engine.js`
+	- `src/core/orchestrator.ts`
+	- `src/core/task_queue.ts`
+	- `src/core/policy_engine.ts`
 
 Auto-improvable areas remain intentionally bounded:
 - Worker prompts
@@ -1082,3 +1082,4 @@ Central monitor report includes:
 - `leadership.jesus`
 
 This enables direct rendering of Worker/Moses/Jesus views in live monitoring surfaces.
+

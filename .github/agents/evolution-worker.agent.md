@@ -1,7 +1,6 @@
 ---
 name: evolution-worker
 description: BOX Self-Evolution Worker. Executes tasks from the Master Evolution Plan (state/master_evo.txt). Handles any code type — backend, tests, devops, security — in the BOX source repo itself. Called exclusively by the Evolution Executor, never by the main orchestration loop.
-model: claude-sonnet-4.6
 tools: [read, edit, execute, search]
 user-invocable: false
 disable-model-invocation: true
