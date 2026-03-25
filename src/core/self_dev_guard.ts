@@ -44,10 +44,9 @@ const CRITICAL_PREFIXES = [
 
 // Files that can be modified but need extra caution (warn, don't block)
 const CAUTION_FILES = [
-  "src/core/task_queue.js",
-  "src/core/self_improvement.js",
-  "src/core/jesus_supervisor.js",
-  "src/core/prometheus.js",
+  "src/core/self_improvement.ts",
+  "src/core/jesus_supervisor.ts",
+  "src/core/prometheus.ts",
   "box.config.json",
   "package.json",
 ];

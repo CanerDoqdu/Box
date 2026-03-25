@@ -2,10 +2,11 @@ module.exports = {
   apps: [
     {
       name: "box-daemon",
-      script: "src/cli.js",
+      script: "src/cli.ts",
       args: "start",
       cwd: "C:\\Users\\caner\\Desktop\\Box",
       interpreter: "node",
+      interpreter_args: "--import tsx",
       autorestart: true,         // restart if daemon crashes unexpectedly
       restart_delay: 5000,       // wait 5s before restarting
       max_restarts: 10,
