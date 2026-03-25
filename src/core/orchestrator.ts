@@ -882,24 +882,28 @@ async function runSingleCycle(config) {
 
   await appendProgress(config, `[CYCLE] ── Step 4: Dispatching ${plans.length} workers ──`);
 
-  // Guardrail gate: if PAUSE_WORKERS is active, skip all worker dispatch.
-  if (config.systemGuardian?.enabled !== false) {
+  // Pre-dispatch governance gate: single decision source for guardrail pause,
+  // governance freeze, dependency cycle detection, and governance canary breach.
+  // Replaces the inline PAUSE_WORKERS check and adds canary + cycle guards.
+  {
+    const cycleId = `cycle-${Date.now()}`;
     try {
-      const pauseActive = await isGuardrailActive(config, GUARDRAIL_ACTION.PAUSE_WORKERS);
-      if (pauseActive) {
+      const gateDecision = await evaluatePreDispatchGovernanceGate(config, plans, cycleId);
+      if (gateDecision.blocked) {
+        const reasonMsg = gateDecision.reason || "pre_dispatch_gate_blocked";
         await appendProgress(config,
-          "[CYCLE] PAUSE_WORKERS guardrail active — skipping worker dispatch (catastrophe scenario active)"
+          `[CYCLE] Pre-dispatch governance gate blocked dispatch — reason=${reasonMsg}`
         );
         await appendAlert(config, {
           severity: ALERT_SEVERITY.HIGH,
           source: "orchestrator",
-          title: "Worker dispatch paused by PAUSE_WORKERS guardrail",
-          message: "PAUSE_WORKERS guardrail is active — all worker dispatch suspended. Revert guardrail to resume."
+          title: "Worker dispatch blocked by pre-dispatch governance gate",
+          message: `reason=${reasonMsg} action=${gateDecision.action || "none"} cycleId=${cycleId}`
         });
         return;
       }
     } catch (err) {
-      warn(`[orchestrator] PAUSE_WORKERS guardrail check failed (non-fatal): ${String(err?.message || err)}`);
+      warn(`[orchestrator] Pre-dispatch governance gate failed (non-fatal): ${String(err?.message || err)}`);
     }
   }
 
