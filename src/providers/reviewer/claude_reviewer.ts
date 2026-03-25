@@ -1,4 +1,5 @@
 import { tryExtractJson, validatePlan, validateDecision, validateOpusDecision } from "./utils.js";
+import { tagProviderDecision } from "../../core/trust_boundary.js";
 
 const API_URL = "https://api.anthropic.com/v1/messages";
 
@@ -41,7 +42,7 @@ export class ClaudeReviewer {
     return { effort: this.thinking.effort || "medium" };
   }
 
-  async requestJson<T>(prompt: string, maxTokens: number, fallback: T, validator: (payload: any, fallback: T) => T): Promise<T> {
+  async requestJson<T extends Record<string, unknown>>(prompt: string, maxTokens: number, fallback: T, validator: (payload: any, fallback: T) => T): Promise<T & { _source: "provider" | "fallback" }> {
     let lastError = null;
 
     for (let attempt = 1; attempt <= this.reviewMaxRetries + 1; attempt += 1) {
@@ -71,13 +72,14 @@ export class ClaudeReviewer {
         const text = (json as any)?.content?.map((c) => c.text).filter(Boolean).join("\n") || "";
         const parsed = tryExtractJson(text);
         const validated = validator(parsed, fallback);
-        return validated;
+        return tagProviderDecision(validated, "provider");
       } catch (error) {
         lastError = error;
       }
     }
-
-    throw lastError;
+    // All retries exhausted -- return tagged fallback so callers can inspect _source="fallback".
+    console.error(`[ClaudeReviewer] all retries exhausted, using deterministic fallback: ${lastError}`);
+    return tagProviderDecision(fallback, "fallback");
   }
 
   async reviewPlan(summary: Record<string, unknown>, tasks: unknown[]): Promise<{ tasks: unknown[] }> {

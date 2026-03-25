@@ -410,6 +410,17 @@ export interface EscalationPayload {
   createdAt: string;
 }
 
+// ─── Provider Reviewer Decision ─────────────────────────
+
+/**
+ * Indicates whether a reviewer provider decision was produced by the AI model
+ * ("provider") or by the deterministic fallback path ("fallback").
+ *
+ * Carried as `_source` on every tagged decision. Callers should check this
+ * field to distinguish AI-produced decisions from deterministic fallbacks.
+ */
+export type ReviewerDecisionSource = "provider" | "fallback";
+
 // ─── Copilot Usage ─────────────────────────────────────────────────
 export interface CopilotUsage {
   correlationId?: string;
