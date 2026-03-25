@@ -107,7 +107,7 @@ function validateIdleRecoveryDecision(payload: Record<string, unknown> | null, f
   };
 }
 
-function validateMosesCoordinationDecision(payload: Record<string, unknown> | null, fallback: { tasks_to_queue: unknown[]; idle_path_tasks_triggered: boolean; notes: string }): { tasks_to_queue: unknown[]; idle_path_tasks_triggered: boolean; notes: string } {
+function validateAthenaCoordinationDecision(payload: Record<string, unknown> | null, fallback: { tasks_to_queue: unknown[]; idle_path_tasks_triggered: boolean; notes: string }): { tasks_to_queue: unknown[]; idle_path_tasks_triggered: boolean; notes: string } {
   const tasksToQueue = safeArray(payload?.tasks_to_queue).filter((t) => t && typeof t === "object");
   if (typeof payload?.idle_path_tasks_triggered !== "boolean" && tasksToQueue.length === 0) {
     return fallback;
@@ -358,7 +358,7 @@ export class CopilotReviewer {
 
     const prompt = [
       "Return only strict JSON with schema: {\"action\":\"retry|split|park|escalate_jesus\",\"reason\":string}",
-      "You are Moses. Choose a bounded recovery action after worker failure.",
+      "You are Athena. Choose a bounded recovery action after worker failure.",
       "Prefer retry for transient failures, split for complex deterministic fixes, park for cooldown-worthy families, escalate_jesus when lead cannot safely recover.",
       `<context>${JSON.stringify(context)}</context>`
     ].join("\n");
@@ -377,7 +377,7 @@ export class CopilotReviewer {
 
     const prompt = [
       "Return only strict JSON with schema: {\"action\":\"retry|park|notify_user\",\"reason\":string,\"notifyUser\":boolean}",
-      "You are Jesus. Moses could not close the incident. Decide final bounded action.",
+      "You are Jesus. Athena could not close the incident. Decide final bounded action.",
       "Set notify_user true only when autonomous recovery cannot safely continue.",
       `<context>${JSON.stringify(context)}</context>`
     ].join("\n");
@@ -394,7 +394,7 @@ export class CopilotReviewer {
 
     const prompt = [
       "Return only strict JSON with schema: {\"orderedTaskIds\":number[],\"deferTaskIds\":number[],\"reason\":string}",
-      "You are Moses. Rebalance Trump wave for execution readiness.",
+      "You are Athena. Rebalance Trump wave for execution readiness.",
       "Use deferTaskIds when a task should wait due to dependency/conflict pressure.",
       "Do not violate role ownership policy; IDs must come from plannedTasks list only.",
       `<context>${JSON.stringify(context)}</context>`
@@ -453,13 +453,13 @@ export class CopilotReviewer {
 
     const prompt = [
       "Return only strict JSON with schema: {\"tasks_to_queue\":[{\"issue_id\":number,\"task_type\":string,\"priority\":string,\"scope_files\":string[]}],\"idle_path_tasks_triggered\":boolean,\"notes\":string}",
-      "You are Moses, Lead AI Coordinator. Convert Jesus strategic directives into execution steps.",
+      "You are Athena, Lead AI Coordinator. Convert Jesus strategic directives into execution steps.",
       "Identify which open issues should become executable tasks.",
       "Respect bounded autonomy: max 3 tasks per cycle.",
       "Avoid retrying tasks with identical failure fingerprints.",
       `<context>${JSON.stringify(context)}</context>`
     ].join("\n");
 
-    return this.requestJson(prompt, fallback, validateMosesCoordinationDecision);
+    return this.requestJson(prompt, fallback, validateAthenaCoordinationDecision);
   }
 }

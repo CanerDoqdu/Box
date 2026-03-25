@@ -7,7 +7,7 @@
   "scripts": {
     "lint": "eslint src/",
     "test": "node --import tsx --test",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -p tsconfig.typecheck.json --noEmit",
     "box:on": "node --import tsx src/cli.ts on",
     "box:off": "node --import tsx src/cli.ts off",
     "box:up": "pwsh -NoProfile -File scripts/box-up.ps1",
@@ -15,10 +15,10 @@
     "box:start": "node --import tsx src/cli.ts start",
     "box:stop": "node --import tsx src/cli.ts stop",
     "box:rebase": "node --import tsx src/cli.ts rebase",
-    "box:park": "node scripts/box_park.mjs",
+    "box:park": "node --import tsx scripts/box_park.ts",
     "box:once": "node --import tsx src/cli.ts once",
     "box:dashboard": "node --import tsx src/dashboard/live_dashboard.ts",
-    "prometheus:watch": "node scripts/watch_prometheus_live.mjs",
+    "prometheus:watch": "node --import tsx scripts/watch_prometheus_live.ts",
     "worker:run": "node --import tsx src/workers/run_task.ts",
     "doctor": "node --import tsx src/cli.ts doctor"
   },
@@ -33,6 +33,7 @@
     "@types/node": "^25.5.0",
     "eslint": "^10.0.3",
     "globals": "^17.4.0",
+    "jiti": "^2.6.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.57.2"

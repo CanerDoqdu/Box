@@ -3,7 +3,7 @@
 Bu dokumanda yeni AI-driven mimari 3 farkli bakis acisi ile cizilmistir:
 
 - Katmanli genel gorunum (sistemin tum bloklari)
-- Liderlik ve karar akis sekansi (Jesus -> Moses -> Worker)
+- Liderlik ve karar akis sekansi (Jesus -> Athena -> Worker)
 - Runtime mod gecis diyagrami (Strategic/Tactical/Recovery)
 
 ## 1) Katmanli Genel Gorunum
@@ -24,9 +24,9 @@ flowchart LR
 
   subgraph L2[2) AI Liderlik Zinciri]
     J[Jesus Supervisor AI]
-    M[Moses Coordinator AI]
+    M[Athena Coordinator AI]
     D1[jesus_directive.json]
-    D2[moses_coordination.json]
+    D2[athena_coordination.json]
     J --> D1 --> M --> D2
   end
 
@@ -85,7 +85,7 @@ sequenceDiagram
   participant Orch as Orchestrator
   participant Jesus as Jesus AI Supervisor
   participant GitHub as Target Repo
-  participant Moses as Moses AI Coordinator
+  participant Athena as Athena AI Coordinator
   participant Queue as Task Queue
   participant Worker as Workers
   participant Dash as Live Dashboard
@@ -97,9 +97,9 @@ sequenceDiagram
   Jesus->>Jesus: Strategic mi Tactical mi karari
   Jesus-->>Orch: jesus_directive.json
 
-  Orch->>Moses: Directive + queue state
-  Moses->>Moses: Best prompting + model secimi
-  Moses-->>Orch: moses_coordination.json
+  Orch->>Athena: Directive + queue state
+  Athena->>Athena: Best prompting + model secimi
+  Athena-->>Orch: athena_coordination.json
 
   Orch->>Queue: AI gorevlerini enqueue et
   Queue->>Worker: Gorev dagitimi

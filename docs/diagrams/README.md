@@ -15,7 +15,7 @@ Bu dosya Mermaid degil, dogrudan interaktif HTML oldugu icin:
 ## Gorunumler
 
 - 1) Genel Mimari: tum sistemi tek ekranda sade bloklarla gosterir
-- 2) Liderlik Akisi: Jesus -> Moses -> Queue -> Worker zincirini sirali gosterir
+- 2) Liderlik Akisi: Jesus -> Athena -> Queue -> Worker zincirini sirali gosterir
 - 3) Mod Gecisi: Strategic, Tactical, Recovery arasindaki gecisleri aciklar
 
 ## Kullanım

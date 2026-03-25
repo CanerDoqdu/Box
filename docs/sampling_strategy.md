@@ -72,13 +72,13 @@ Current denylist (see source for authoritative list):
 
 Adding new sensitive fields: edit `SENSITIVE_FIELD_DENYLIST` in
 `src/core/event_schema.js` and add a corresponding test in
-`tests/core/event_schema.test.js`.
+`tests/core/event_schema.test.ts`.
 
 ---
 
 ## 5. CI Completeness Check
 
-The test suite (`tests/core/event_schema.test.js`) asserts that this file:
+The test suite (`tests/core/event_schema.test.ts`) asserts that this file:
 
 1. Exists at `docs/sampling_strategy.md`
 2. Contains the five required section headings:

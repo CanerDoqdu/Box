@@ -88,10 +88,10 @@ function matchPathPattern(targetPath, pattern) {
     return pathNorm === prefix || pathNorm.startsWith(`${prefix}/`);
   }
 
-  // Support suffix globs like "**/orchestrator.js" or "**/*.test.js".
+  // Support suffix globs like "**/orchestrator.js" or "**/*.test.ts".
   // The match is anchored to a path-separator boundary so that "bad_orchestrator.js"
   // does not falsely match "**/orchestrator.js". A bare "*" in the suffix matches
-  // any run of non-separator characters (e.g. "**/*.test.js" covers all .test.js files).
+  // any run of non-separator characters (e.g. "**/*.test.ts" covers all .test.ts files).
   if (patternNorm.startsWith("**/")) {
     const suffix = patternNorm.slice(3);
     const reStr = suffix

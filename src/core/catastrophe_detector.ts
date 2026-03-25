@@ -21,7 +21,7 @@
  * ── Overhead bound (AC #3 / Athena missing item #2) ──────────────────────────
  *   detectCatastrophes() is pure-synchronous with no I/O.
  *   Nominal overhead: <1ms. Hard budget: <10ms per cycle.
- *   Measured in tests/core/catastrophe_detector.test.js using performance.now().
+ *   Measured in tests/core/catastrophe_detector.test.ts using performance.now().
  *
  * ── Guardrail schema (AC #4 / Athena missing item #3) ────────────────────────
  *   GuardrailRecommendation: { action, urgency, description }

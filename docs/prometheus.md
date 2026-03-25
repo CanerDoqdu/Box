@@ -52,7 +52,7 @@ Prometheus output should be a clear, human-readable master plan.
 
 - `.github/agents/prometheus.agent.md`: Prometheus agent behavior contract
 - `src/core/prometheus.js`: Runtime entry point (`runPrometheusAnalysis`)
-- `scripts/run_prometheus_once.mjs`: One-shot standalone Prometheus run
+- `scripts/run_prometheus_once.ts`: One-shot standalone Prometheus run
 - `state/prometheus_analysis.json`: Persisted Prometheus analysis artifact
 - `state/prometheus_dossier.md`: Human-readable analysis narrative
 - `state/prometheus_read_audit.json`: Read-coverage audit for grounding checks

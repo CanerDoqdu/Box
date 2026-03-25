@@ -272,7 +272,7 @@ async function saveKnowledgeMemory(stateDir, memory) {
 /**
  * Normalized outcome collector — Athena-gated architecture.
  *
- * Primary state sources (replaces stale Moses artifacts):
+ * Primary state sources (replaces stale legacy artifacts):
  *   prometheus_analysis.json  — plans, projectHealth, requestBudget, waves
  *   evolution_progress.json   — completed task IDs
  *   worker_sessions.json      — per-worker status (unchanged)
@@ -472,7 +472,7 @@ async function analyzeWithAI(config, outcomes, knowledgeMemory) {
       await fs.readFile(path.join(stateDir, "health_audit_findings.json"), "utf8")
     );
     if (Array.isArray(auditData?.findings) && auditData.findings.length > 0) {
-      healthAuditSection = `\n## JESUS HEALTH AUDIT FINDINGS (hierarchical detection)\n${JSON.stringify(auditData.findings, null, 2)}\nAnalyze these findings — they represent issues that WORKERS and MOSES missed but JESUS caught.\nFor each finding, determine if the system is MISSING A CAPABILITY that caused the gap.\n`;
+      healthAuditSection = `\n## JESUS HEALTH AUDIT FINDINGS (hierarchical detection)\n${JSON.stringify(auditData.findings, null, 2)}\nAnalyze these findings — they represent issues that WORKERS and ATHENA missed but JESUS caught.\nFor each finding, determine if the system is MISSING A CAPABILITY that caused the gap.\n`;
     }
   } catch { /* no audit data */ }
 
@@ -513,7 +513,7 @@ Analyze the cycle outcomes and produce a JSON response with these fields:
    Set autoApply=false for anything that changes system behavior significantly.
 
 3. "promptHints" — Array of objects with { "targetAgent": string, "hint": string, "reason": string }
-   These hints will be injected into the next cycle's prompts for the specified agent (trump, moses, or worker names).
+  These hints will be injected into the next cycle's prompts for the specified agent (trump, athena, or worker names).
 
 4. "workerFeedback" — Array of objects with { "worker": string, "assessment": "excellent"|"good"|"needs-improvement"|"poor", "reason": string, "suggestion": string }
 
@@ -531,7 +531,7 @@ Analyze the cycle outcomes and produce a JSON response with these fields:
    - "Workers couldn't fix CI because they didn't know the failing test" → proposedFix: "Inject CI failure logs into worker context"
    
    IMPORTANT: Think about what went WRONG or what was MISSED in this cycle.
-   What problem existed that NO part of the system (workers, Moses, Trump, Jesus) addressed?
+   What problem existed that NO part of the system (workers, Athena, Trump, Jesus) addressed?
    What capability would have prevented the issue?
    Would this gap appear in OTHER repositories too? Set appliesToAllRepos=true if so.
 

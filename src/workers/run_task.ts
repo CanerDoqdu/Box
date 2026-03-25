@@ -9,7 +9,7 @@
  * When BOX runs in container-worker mode the orchestrator launches a
  * worker container and passes the task payload via environment
  * variables.  This entry point validates those variables, prints
- * diagnostics, then delegates to the CLI (src/cli.js once) so the
+ * diagnostics, then delegates to the CLI (src/cli.ts once) so the
  * full orchestrator boot-path is exercised correctly.
  *
  * Required environment variables:

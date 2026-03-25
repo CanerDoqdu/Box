@@ -60,16 +60,16 @@
     },
     "supervisor": {
       "$comment": "Jesus supervisor directive output contract.",
-      "requiredFields": ["decision", "wakeMoses", "callPrometheus", "briefForPrometheus", "systemHealth"],
+      "requiredFields": ["decision", "wakeAthena", "callPrometheus", "briefForPrometheus", "systemHealth"],
       "fields": {
         "decision": {
           "type": "string",
           "enum": ["wait", "strategic", "tactical", "emergency"],
           "description": "Strategic decision for the current cycle"
         },
-        "wakeMoses": {
+        "wakeAthena": {
           "type": "boolean",
-          "description": "Whether Moses should be activated this cycle"
+          "description": "Whether Athena should be activated this cycle"
         },
         "callPrometheus": {
           "type": "boolean",

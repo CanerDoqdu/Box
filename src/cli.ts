@@ -106,19 +106,19 @@ async function boxOn(config: Config): Promise<void> {
     await clearStopRequest(config);
 
     // 3. Start daemon (detached)
-    const dPid = spawnDetached("node", ["src/cli.js", "start"], root);
+    const dPid = spawnDetached("node", ["--import", "tsx", "src/cli.ts", "start"], root);
     savePid(stateDir, "daemon_bg", dPid);
     console.log(`[box on] daemon started pid=${dPid}`);
   }
 
   // 4. Start dashboard (detached)
-  const dashPid = spawnDetached("node", ["src/dashboard/live_dashboard.js"], root);
+  const dashPid = spawnDetached("node", ["src/dashboard/live_dashboard.ts"], root);
   savePid(stateDir, "dashboard_bg", dashPid);
   console.log(`[box on] dashboard started pid=${dashPid} → http://localhost:8787`);
 
   console.log("");
   console.log("BOX is running. Dashboard: http://localhost:8787");
-  console.log("To stop: node src/cli.js off  (or: npm run box:off)");
+  console.log("To stop: node --import tsx src/cli.ts off  (or: npm run box:off)");
 }
 
 async function boxOff(config: Config): Promise<void> {
@@ -323,7 +323,7 @@ async function main(): Promise<void> {
       console.log("  updatedAt: " + record.updatedAt);
       console.log("  updatedBy: " + record.updatedBy);
       console.log("");
-      console.log("System continues running without SI. Re-enable: node src/cli.js si on");
+      console.log("System continues running without SI. Re-enable: node --import tsx src/cli.ts si on");
       return;
     }
 

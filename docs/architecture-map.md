@@ -122,7 +122,7 @@ Source of truth:
 
 Current named roles:
 - CEO Supervisor: `Jesus`
-- Lead Worker: `Moses`
+- Lead Worker: `Athena`
 - Backend: `King David`
 - Frontend: `Esther`
 - API: `Aaron`
@@ -195,8 +195,8 @@ User notification channel:
 - Progress stream in `state/progress.txt`
 
 Humanized chain messaging:
-- Worker reports to `Moses`.
-- `Moses` reports to `Jesus`.
+- Worker reports to `Athena`.
+- `Athena` reports to `Jesus`.
 - `Jesus` escalates to user when autonomous recovery cannot close the loop safely.
 
 ## 7) State Contract (Operational Files)
@@ -288,11 +288,11 @@ The sections below define missing internal schemas and behavioral protocols for 
 
 ### 13.1 Task Contract Schema
 
-#### Architecture Section
+#### Architecture Section - Task Contract Schema
 
 Every task must be executable without ambiguity. A task contract is the single source of truth for execution boundaries, acceptance criteria, and rollback behavior.
 
-#### Schema Definition
+#### Schema Definition - Task Contract Schema
 
 ```ts
 type Domain = "quality" | "stability" | "production" | "security" | "general";
@@ -347,13 +347,13 @@ interface QueueTask {
 }
 ```
 
-#### Integration Points
+#### Integration Points - Task Contract Schema
 
 - `src/core/task_planner.ts`: must always produce normalized `TaskContract`.
 - `src/core/orchestrator.ts`: validates contract before dispatch.
 - `src/core/task_queue.ts`: stores `semanticKey`, `attempt`, and lineage.
 
-#### Failure Prevention Logic
+#### Failure Prevention Logic - Task Contract Schema
 
 - Reject dispatch if `goal`, `nonGoals`, `exitCriteria`, or `rollbackPlan` are missing.
 - Reject contracts where `filesInScope` contains paths outside repository root.
@@ -361,11 +361,11 @@ interface QueueTask {
 
 ### 13.2 Worker Communication Protocol
 
-#### Architecture Section
+#### Architecture Section - Worker Communication Protocol
 
 Worker and orchestrator communication must be machine-parseable and stage-aware. Free-form logs are supplemental only.
 
-#### Schema Definition
+#### Schema Definition - Worker Communication Protocol
 
 ```json
 {
@@ -415,24 +415,24 @@ Worker and orchestrator communication must be machine-parseable and stage-aware.
 }
 ```
 
-#### Integration Points
+#### Integration Points - Worker Communication Protocol
 
 - `src/workers/run_task.ts`: emits protocol JSON lines in stdout.
 - `src/core/worker_runner.ts`: parses protocol events before fallback text parsing.
 - `src/core/worker_activity.ts`: updates phase based on event stream.
 
-#### Failure Prevention Logic
+#### Failure Prevention Logic - Worker Communication Protocol
 
 - If no valid protocol envelope is emitted within timeout window, mark task failed with `communication-timeout`.
 - If event order is invalid (for example `publish` before `validate`), hard-fail as non-deterministic execution.
 
 ### 13.3 Task State Machine
 
-#### Architecture Section
+#### Architecture Section - Task State Machine
 
 Task lifecycle is a strict state machine. Illegal transitions are rejected and logged as policy violations.
 
-#### Schema Definition
+#### Schema Definition - Task State Machine
 
 ```ts
 type TaskState = "queued" | "running" | "blocked" | "failed" | "passed" | "parked";
@@ -447,13 +447,13 @@ const AllowedTransitions: Record<TaskState, TaskState[]> = {
 };
 ```
 
-#### Integration Points
+#### Integration Points - Task State Machine
 
 - `src/core/task_queue.ts`: enforce transition map in `markTask` and requeue helpers.
 - `src/core/orchestrator.ts`: disallow direct `queued -> passed` or `running -> queued` shortcuts.
 - `state/tasks.json`: include `lastTransition`, `lastTransitionAt`, and `transitionBy`.
 
-#### Failure Prevention Logic
+#### Failure Prevention Logic - Task State Machine
 
 - Reject and alert on illegal transitions.
 - Lock each task by `taskId` during transition to prevent concurrent writes.
@@ -461,11 +461,11 @@ const AllowedTransitions: Record<TaskState, TaskState[]> = {
 
 ### 13.4 Loop Prevention Mechanism
 
-#### Architecture Section
+#### Architecture Section - Loop Prevention Mechanism
 
 Loop prevention combines semantic deduplication, retry budget, cooldown parking, and stale lineage suppression.
 
-#### Schema Definition
+#### Schema Definition - Loop Prevention Mechanism
 
 ```ts
 interface LoopGuardPolicy {
@@ -486,13 +486,13 @@ interface SemanticFailureIndex {
 }
 ```
 
-#### Integration Points
+#### Integration Points - Loop Prevention Mechanism
 
 - `src/core/task_queue.ts`: existing semantic suppression extends to descendant depth checks.
 - `src/core/orchestrator.ts`: stop creating split tasks when `maxDescendantDepth` exceeded.
 - `state/tasks.json`: keep `splitDepth` and `lineageRootTaskId`.
 
-#### Failure Prevention Logic
+#### Failure Prevention Logic - Loop Prevention Mechanism
 
 - Park semantic family if max failures reached without newer pass.
 - Refuse enqueue when parent lineage already parked.
@@ -500,11 +500,11 @@ interface SemanticFailureIndex {
 
 ### 13.5 Issue Intake Filtering Policy
 
-#### Architecture Section
+#### Architecture Section - Issue Intake Filtering Policy
 
 Not every external issue should become executable work. Intake must classify, deduplicate, and gate by policy.
 
-#### Schema Definition
+#### Schema Definition - Issue Intake Filtering Policy
 
 ```ts
 interface IssueIntakeRecord {
@@ -519,13 +519,13 @@ interface IssueIntakeRecord {
 }
 ```
 
-#### Integration Points
+#### Integration Points - Issue Intake Filtering Policy
 
 - `src/core/orchestrator.ts`: before `createHandoffIssue` and before releasing blocked tasks.
 - `src/core/task_queue.ts`: check `semanticKey` against active or recently failed tasks.
 - New file: `state/issue_intake.json`.
 
-#### Failure Prevention Logic
+#### Failure Prevention Logic - Issue Intake Filtering Policy
 
 - Ignore issues tied to already-closed semantic families unless a newer checkpoint indicates recovery.
 - Reject stale issues older than configurable max age unless labeled `force-intake`.
@@ -533,11 +533,11 @@ interface IssueIntakeRecord {
 
 ### 13.6 Worker Behavior Policy
 
-#### Architecture Section
+#### Architecture Section - Worker Behavior Policy
 
 Workers must follow deterministic behavior constraints independent of model output quality.
 
-#### Schema Definition
+#### Schema Definition - Worker Behavior Policy
 
 ```json
 {
@@ -573,13 +573,13 @@ Workers must follow deterministic behavior constraints independent of model outp
 }
 ```
 
-#### Integration Points
+#### Integration Points - Worker Behavior Policy
 
 - `src/workers/run_task.ts`: enforce behavior file before execution.
 - `src/core/policy_engine.ts`: merge repo policy and worker behavior policy.
 - `src/core/orchestrator.ts`: include policy digest in checkpoint.
 
-#### Failure Prevention Logic
+#### Failure Prevention Logic - Worker Behavior Policy
 
 - Immediate fail on forbidden action attempt.
 - If required check command missing, fail task as `policy-noncompliant`.
@@ -587,11 +587,11 @@ Workers must follow deterministic behavior constraints independent of model outp
 
 ### 13.7 Context Envelope Schema
 
-#### Architecture Section
+#### Architecture Section - Context Envelope Schema
 
 Workers should receive bounded, deterministic context packets. Context size and content must be controlled.
 
-#### Schema Definition
+#### Schema Definition - Context Envelope Schema
 
 ```ts
 interface ContextEnvelope {
@@ -625,13 +625,13 @@ interface ContextEnvelope {
 }
 ```
 
-#### Integration Points
+#### Integration Points - Context Envelope Schema
 
 - `src/core/orchestrator.ts`: build envelope in `buildWorkerOverrides`.
 - `src/workers/run_task.ts`: validate and print envelope hash to logs.
 - `state/checkpoint-*.json`: include envelope hash and version.
 
-#### Failure Prevention Logic
+#### Failure Prevention Logic - Context Envelope Schema
 
 - Reject worker start if envelope validation fails.
 - Reject envelope over max byte size.
@@ -639,11 +639,11 @@ interface ContextEnvelope {
 
 ### 13.8 Strategic Planning Schema
 
-#### Architecture Section
+#### Architecture Section - Strategic Planning Schema
 
 Strategic planning output must be reproducible and auditable. Plans are immutable snapshots for a sprint window.
 
-#### Schema Definition
+#### Schema Definition - Strategic Planning Schema
 
 ```ts
 interface StrategicPlan {
@@ -669,13 +669,13 @@ interface StrategicPlan {
 }
 ```
 
-#### Integration Points
+#### Integration Points - Strategic Planning Schema
 
 - `src/core/roadmap_engine.ts`: generate normalized complexity roof.
 - `src/core/task_planner.ts`: produce contracts and semantic keys.
 - `state/roadmap.json` and `state/strategic_cycle.json`: persist plan metadata.
 
-#### Failure Prevention Logic
+#### Failure Prevention Logic - Strategic Planning Schema
 
 - Refuse strategic plan if no `freezeSemanticKeys` generated.
 - Refuse plan where top-priority tasks have identical semantic keys.
@@ -683,11 +683,11 @@ interface StrategicPlan {
 
 ### 13.9 Worker Capability Profiles
 
-#### Architecture Section
+#### Architecture Section - Worker Capability Profiles
 
 Role assignment should be capability-based, not only task-kind based.
 
-#### Schema Definition
+#### Schema Definition - Worker Capability Profiles
 
 ```ts
 interface WorkerCapabilityProfile {
@@ -704,13 +704,13 @@ interface WorkerCapabilityProfile {
 type CapabilityRegistry = Record<string, WorkerCapabilityProfile>;
 ```
 
-#### Integration Points
+#### Integration Points - Worker Capability Profiles
 
 - `box.config.json`: add `capabilityProfiles`.
 - `src/core/task_routing.ts`: route by capability intersection first, then fallback by kind map.
 - `src/providers/coder/copilot_cli_provider.ts`: consume profile model pool.
 
-#### Failure Prevention Logic
+#### Failure Prevention Logic - Worker Capability Profiles
 
 - Prevent assigning high-risk security task to profile with `maxRiskLevel=medium`.
 - Prevent assignment when `maxConcurrentTasks` exceeded.
@@ -718,11 +718,11 @@ type CapabilityRegistry = Record<string, WorkerCapabilityProfile>;
 
 ### 13.10 Repository Knowledge Graph Schema
 
-#### Architecture Section
+#### Architecture Section - Repository Knowledge Graph Schema
 
 BOX needs persistent structural memory of modules, dependencies, critical paths, and ownership to avoid blind retries.
 
-#### Schema Definition
+#### Schema Definition - Repository Knowledge Graph Schema
 
 ```ts
 interface KnowledgeNode {
@@ -747,24 +747,24 @@ interface RepositoryKnowledgeGraph {
 }
 ```
 
-#### Integration Points
+#### Integration Points - Repository Knowledge Graph Schema
 
 - `src/core/project_scanner.ts`: generate graph incrementally.
 - New state file: `state/knowledge_graph.json`.
 - `src/core/task_planner.ts`: prefer tasks touching high-centrality unresolved nodes.
 
-#### Failure Prevention Logic
+#### Failure Prevention Logic - Repository Knowledge Graph Schema
 
 - Reject tasks whose `filesInScope` reference unknown graph nodes unless explicitly marked `bootstrap`.
 - Use graph edge validation to block invalid cross-domain edits.
 
 ### 13.11 Recovery Strategy System
 
-#### Architecture Section
+#### Architecture Section - Recovery Strategy System
 
 Recovery must be strategy-driven and finite. Each failure class maps to one recovery plan.
 
-#### Schema Definition
+#### Schema Definition - Recovery Strategy System
 
 ```ts
 type RecoveryClass =
@@ -786,13 +786,13 @@ interface RecoveryStrategy {
 }
 ```
 
-#### Integration Points
+#### Integration Points - Recovery Strategy System
 
 - `src/core/orchestrator.ts`: replace ad hoc recovery branching with strategy map.
 - `src/core/task_queue.ts`: annotate each follow-up with `recoveryClass`.
 - `state/checkpoint-*.json`: write selected recovery strategy.
 
-#### Failure Prevention Logic
+#### Failure Prevention Logic - Recovery Strategy System
 
 - Never split recursively without class-specific allowance.
 - Always park after strategy exhaustion.
@@ -800,11 +800,11 @@ interface RecoveryStrategy {
 
 ### 13.12 Worker Coordination Model
 
-#### Architecture Section
+#### Architecture Section - Worker Coordination Model
 
 Multi-worker execution needs explicit coordination to avoid duplicate work and write conflicts.
 
-#### Schema Definition
+#### Schema Definition - Worker Coordination Model
 
 ```ts
 interface CoordinationLock {
@@ -823,13 +823,13 @@ interface CoordinationPlan {
 }
 ```
 
-#### Integration Points
+#### Integration Points - Worker Coordination Model
 
 - `src/core/orchestrator.ts`: acquire lock before dispatch.
 - `src/core/task_queue.ts`: block tasks that collide on lock key.
 - `state/worker_activity.json`: include lock ownership metadata.
 
-#### Failure Prevention Logic
+#### Failure Prevention Logic - Worker Coordination Model
 
 - Hard-block dispatch if lock collision exists.
 - Auto-release stale locks by TTL with alert entry.
@@ -837,11 +837,11 @@ interface CoordinationPlan {
 
 ### 13.13 Budget Guard System
 
-#### Architecture Section
+#### Architecture Section - Budget Guard System
 
 Budget guard must cover model usage, worker attempts, and recovery explosion risk.
 
-#### Schema Definition
+#### Schema Definition - Budget Guard System
 
 ```ts
 interface BudgetGuard {
@@ -861,13 +861,13 @@ interface BudgetDecision {
 }
 ```
 
-#### Integration Points
+#### Integration Points - Budget Guard System
 
 - `src/core/budget_controller.ts`: produce decision before each dispatch.
 - `src/providers/coder/copilot_cli_provider.ts`: downgrade model on budget action.
 - `src/core/orchestrator.ts`: pause low-priority queue on budget pressure.
 
-#### Failure Prevention Logic
+#### Failure Prevention Logic - Budget Guard System
 
 - Refuse high-cost model when below floor.
 - Refuse new retries when `maxWorkerRunsPerTask` exceeded.
@@ -875,11 +875,11 @@ interface BudgetDecision {
 
 ### 13.14 Observability Event Schema
 
-#### Architecture Section
+#### Architecture Section - Observability Event Schema
 
 All modules must emit normalized telemetry to support forensics, dashboards, and deterministic incident review.
 
-#### Schema Definition
+#### Schema Definition - Observability Event Schema
 
 ```json
 {
@@ -914,13 +914,13 @@ All modules must emit normalized telemetry to support forensics, dashboards, and
 }
 ```
 
-#### Integration Points
+#### Integration Points - Observability Event Schema
 
 - `src/core/state_tracker.ts`: write event stream to new `state/events.jsonl`.
 - `src/dashboard/live_dashboard.ts`: aggregate by component, severity, and correlation.
 - `state/checkpoint-*.json`: include related `eventId` list.
 
-#### Failure Prevention Logic
+#### Failure Prevention Logic - Observability Event Schema
 
 - Reject silent failures: every failed task must emit at least one `error` event.
 - Enforce correlation id from dispatch to finalize.
@@ -990,24 +990,24 @@ The following additions were introduced to close remaining loop and runtime stab
 
 - Worker execution is rejected when changed-file count exceeds threshold or forbidden path prefixes are modified.
 - Runtime-configurable via:
-	- `runtime.workerMaxFilesChanged`
-	- `runtime.workerForbiddenPathPrefixes`
+  - `runtime.workerMaxFilesChanged`
+  - `runtime.workerForbiddenPathPrefixes`
 - Implemented in:
-	- `src/workers/run_task.ts`
-	- `src/core/worker_runner.ts`
-	- `src/config.ts`
+  - `src/workers/run_task.ts`
+  - `src/core/worker_runner.ts`
+  - `src/config.ts`
 
 ### 15.9 Task Loop Metadata Contract
 
 - `tasks.json` now supports loop metadata for deterministic lineage tracking:
-	- fingerprint
-	- attempts / semanticAttempts
-	- repeatedFailureCount
-	- failureSignature
-	- contextRevision
-	- cooldownUntil
-	- lineageRootTaskId
-	- splitDepth / splitCount
+  - fingerprint
+  - attempts / semanticAttempts
+  - repeatedFailureCount
+  - failureSignature
+  - contextRevision
+  - cooldownUntil
+  - lineageRootTaskId
+  - splitDepth / splitCount
 - Implemented in `src/core/task_schema.ts`.
 
 ## 16) Self-Analysis and Upgrade Protocol
@@ -1035,11 +1035,11 @@ This keeps BOX self-optimizing without allowing unbounded autonomous mutation of
 
 BOX leadership reporting now follows a strict chain:
 
-- Worker (`King David`, `Esther`, etc.) -> `Moses`
-- `Moses` -> `Jesus`
+- Worker (`King David`, `Esther`, etc.) -> `Athena`
+- `Athena` -> `Jesus`
 - `Jesus` -> User
 
-### 17.1 Worker -> Moses (`state/worker_activity.json`)
+### 17.1 Worker -> Athena (`state/worker_activity.json`)
 
 Worker slot telemetry continues under `workers`, and role-centric worker reports are materialized under `roles`.
 
@@ -1056,7 +1056,7 @@ Color policy:
 - `yellow`: running, queued, parked, cooldown-like progression
 - `red`: blocked/failed
 
-### 17.2 Moses -> Jesus (`state/moses_summary.json`)
+### 17.2 Athena -> Jesus (`state/athena_summary.json`)
 
 Leader aggregation includes:
 - Worker capacity snapshot: `active_workers`, `idle_workers`, `blocked_workers`
@@ -1073,13 +1073,13 @@ Central monitor report includes:
 - Queue and backlog pressure: `queue_length`, `backlog_total`
 - Problem task list: `blocked_tasks` with `suggested_action`
 - Escalation context: `alerts`, `escalation_triggers`
-- Embedded `moses_summary`
+- Embedded `athena_summary`
 
 ### 17.4 Dashboard API Exposure
 
 `/api/state` exposes leadership reports under:
-- `leadership.moses`
+- `leadership.athena`
 - `leadership.jesus`
 
-This enables direct rendering of Worker/Moses/Jesus views in live monitoring surfaces.
-
+This enables direct rendering of Worker/Athena/Jesus views in live monitoring surfaces
+This enables direct rendering of Worker/Athena/Jesus views in live monitoring surfaces.

@@ -337,7 +337,7 @@ function getLastWorkerMessage(session: Record<string, any>, roleName: string): a
   const history = Array.isArray(session?.history) ? session.history : [];
   for (let i = history.length - 1; i >= 0; i -= 1) {
     const entry = history[i];
-    if (!entry || entry.from === "moses") continue;
+    if (!entry || String(entry.from || "").toLowerCase() === "athena") continue;
     if (roleName && entry.from && entry.from !== roleName) continue;
     return entry;
   }
@@ -469,7 +469,7 @@ function buildPrometheusPlanBoard(prometheusAnalysis: Record<string, any>, worke
 
 function runRebaseCommand() {
   return new Promise((resolve) => {
-    const child = execFile("node", ["src/cli.js", "rebase"], { cwd: ROOT, windowsHide: true }, (error, stdout, stderr) => {
+    const child = execFile("node", ["--import", "tsx", "src/cli.ts", "rebase"], { cwd: ROOT, windowsHide: true }, (error, stdout, stderr) => {
       const output = [String(stdout || "").trim(), String(stderr || "").trim()].filter(Boolean).join("\n");
       if (error) {
         resolve({ ok: false, exitCode: Number(error?.code || 1), output });
@@ -489,7 +489,7 @@ function runRebaseCommand() {
 function startDaemonDetached() {
   return new Promise((resolve) => {
     try {
-      const child = spawn("node", ["src/cli.js", "start"], {
+      const child = spawn("node", ["--import", "tsx", "src/cli.ts", "start"], {
         cwd: ROOT,
         detached: true,
         stdio: "ignore",
@@ -1876,7 +1876,7 @@ function renderHtml() {
       color: var(--ink);
       background: var(--card);
     }
-    .chain-box.user, .chain-box.jesus, .chain-box.moses, .chain-box.workers { background: var(--card); }
+    .chain-box.user, .chain-box.jesus, .chain-box.Athena, .chain-box.workers { background: var(--card); }
     .chain-title {
       font-family: "IBM Plex Mono", Consolas, monospace;
       text-transform: uppercase;
@@ -1961,7 +1961,7 @@ function renderHtml() {
       border: 1px solid var(--line); background: var(--card); padding: 12px 14px;
     }
     .lf-card.jesus { border-left: 4px solid #4a9eff; }
-    .lf-card.moses { border-left: 4px solid #22c27e; }
+    .lf-card.Athena { border-left: 4px solid #22c27e; }
     .lf-name { font-family: "IBM Plex Mono", Consolas, monospace; font-weight: 700; font-size: 14px; margin-bottom: 4px; }
     .lf-status { font-size: 12px; color: var(--muted); margin-bottom: 6px; font-family: "IBM Plex Mono", Consolas, monospace; }
     .lf-detail { font-size: 12px; line-height: 1.4; }
@@ -2408,12 +2408,12 @@ function renderHtml() {
           </div>
           <div class="lp-arrow-label" id="lp-arrow-tm-label">—</div>
         </div>
-        <!-- Moses -->
-        <div class="lp-node" id="lp-node-moses" data-entity="moses">
+        <!-- Athena -->
+        <div class="lp-node" id="lp-node-Athena" data-entity="Athena">
           <div class="lp-node-emoji">📋</div>
-          <div class="lp-node-name">Moses</div>
+          <div class="lp-node-name">Athena</div>
           <div class="lp-node-role">Lead Manager</div>
-          <div class="lp-node-status" id="lp-moses-status">—</div>
+          <div class="lp-node-status" id="lp-Athena-status">—</div>
         </div>
         <div class="lp-arrow" id="lp-arrow-mw">
           <div style="display:flex;align-items:center;gap:2px">
@@ -2491,16 +2491,16 @@ function renderHtml() {
             </details>
           </div>
         </article>
-        <article class="chain-box moses">
-          <h2 class="chain-title">Moses (Lead Worker Manager)</h2>
+        <article class="chain-box Athena">
+          <h2 class="chain-title">Athena (Lead Worker Manager)</h2>
           <div class="chain-body">
             <div>Worker Coordination</div>
-            <div id="moses-counts">Status: awaiting...</div>
-            <div id="moses-gates">Completed: 0 tasks</div>
+            <div id="Athena-counts">Status: awaiting...</div>
+            <div id="Athena-gates">Completed: 0 tasks</div>
             <details style="margin-top:6px">
               <summary style="cursor:pointer;font-size:11px;color:var(--muted);font-family:'IBM Plex Mono',monospace">Coordination Report ▾</summary>
-              <div id="moses-statusreport" style="margin-top:4px;font-size:11px;font-family:'IBM Plex Mono',monospace;white-space:pre-wrap;color:#2a4a5e;background:rgba(200,225,245,0.45);border-radius:6px;padding:6px;max-height:180px;overflow-y:auto">Awaiting Moses coordination...</div>
-              <div id="moses-tasksplanned" style="margin-top:4px;font-size:10px;color:var(--muted);font-family:'IBM Plex Mono',monospace"></div>
+              <div id="Athena-statusreport" style="margin-top:4px;font-size:11px;font-family:'IBM Plex Mono',monospace;white-space:pre-wrap;color:#2a4a5e;background:rgba(200,225,245,0.45);border-radius:6px;padding:6px;max-height:180px;overflow-y:auto">Awaiting Athena coordination...</div>
+              <div id="Athena-tasksplanned" style="margin-top:4px;font-size:10px;color:var(--muted);font-family:'IBM Plex Mono',monospace"></div>
             </details>
           </div>
         </article>
@@ -2632,7 +2632,7 @@ function renderHtml() {
     // ── Change detection state ────────────────────────────────
     var prevJesusDecidedAt = null;
     var prevPrometheusAnalyzedAt = null;
-    var prevMosesCoordinatedAt = null;
+    var prevAthenaCoordinatedAt = null;
     var prevTotalPremiumReqs = 0;
     var prevWorkerStatuses = {};
     var prevPremiumByWorker = {};
@@ -2976,10 +2976,10 @@ function renderHtml() {
 
     // ── Leadership Pipeline + Change Detection ─────────────────────────
     function detectLeadershipChanges(data) {
-      var changes = { jesusNew: false, prometheusNew: false, mosesNew: false, newWorkers: [], reqFlashes: [], newMessages: [] };
+      var changes = { jesusNew: false, prometheusNew: false, AthenaNew: false, newWorkers: [], reqFlashes: [], newMessages: [] };
       var jesus = (data && data.leadership && data.leadership.jesus) || {};
       var prometheus = (data && data.leadership && data.leadership.prometheus) || {};
-      var moses = (data && data.leadership && data.leadership.moses) || {};
+      var Athena = (data && data.leadership && data.leadership.athena) || {};
       var wa = data && data.workerActivity ? data.workerActivity : {};
       var puBw = (data && data.premiumUsageByWorker && data.premiumUsageByWorker.byWorker) || {};
 
@@ -2988,10 +2988,10 @@ function renderHtml() {
         changes.jesusNew = true;
         if (prevJesusDecidedAt) {
           var newMsg = {
-            icon: '⚡', from: 'Jesus', to: jesus.callPrometheus ? 'Prometheus' : 'Moses',
+            icon: '⚡', from: 'Jesus', to: jesus.callPrometheus ? 'Prometheus' : 'Athena',
             text: jesus.callPrometheus
               ? 'Activate Prometheus for deep analysis: ' + String(jesus.prometheusReason || jesus.briefForPrometheus || '').slice(0, 100)
-              : 'Directive to Moses: ' + String(jesus.briefForPrometheus || jesus.decision || '').slice(0, 100),
+              : 'Directive to Athena: ' + String(jesus.briefForPrometheus || jesus.decision || '').slice(0, 100),
             time: jesus.decidedAt, isNew: true
           };
           leadershipMessages.unshift(newMsg);
@@ -3006,7 +3006,7 @@ function renderHtml() {
         if (prevPrometheusAnalyzedAt) {
           var planCount = Array.isArray(prometheus.plans) ? prometheus.plans.length : 0;
           var newMsg = {
-            icon: '📊', from: 'Prometheus', to: 'Moses',
+            icon: '📊', from: 'Prometheus', to: 'Athena',
             text: planCount + ' plans created, health: ' + String(prometheus.projectHealth || '?') + ' — ' + String(prometheus.analysis || '').slice(0, 80),
             time: prometheus.analyzedAt, isNew: true
           };
@@ -3016,20 +3016,20 @@ function renderHtml() {
         prevPrometheusAnalyzedAt = prometheus.analyzedAt;
       }
 
-      // Moses coordinated
-      if (moses.coordinatedAt && moses.coordinatedAt !== prevMosesCoordinatedAt) {
-        changes.mosesNew = true;
-        if (prevMosesCoordinatedAt) {
-          var activeSess = Number(moses.activeSessions || 0);
+      // Athena coordinated
+      if (Athena.coordinatedAt && Athena.coordinatedAt !== prevAthenaCoordinatedAt) {
+        changes.AthenaNew = true;
+        if (prevAthenaCoordinatedAt) {
+          var activeSess = Number(Athena.activeSessions || 0);
           var newMsg = {
-            icon: '📋', from: 'Moses', to: 'Workers',
-            text: 'Dispatched ' + activeSess + ' workers: ' + String(moses.summary || moses.statusReport || '').slice(0, 100),
-            time: moses.coordinatedAt, isNew: true
+            icon: '📋', from: 'Athena', to: 'Workers',
+            text: 'Dispatched ' + activeSess + ' workers: ' + String(Athena.summary || Athena.statusReport || '').slice(0, 100),
+            time: Athena.coordinatedAt, isNew: true
           };
           leadershipMessages.unshift(newMsg);
           changes.newMessages.push(newMsg);
         }
-        prevMosesCoordinatedAt = moses.coordinatedAt;
+        prevAthenaCoordinatedAt = Athena.coordinatedAt;
       }
 
       // Workers changed status (became working)
@@ -3039,7 +3039,7 @@ function renderHtml() {
         if (st === 'working' && prevSt !== 'working') {
           changes.newWorkers.push(name);
           var newMsg = {
-            icon: '👷', from: 'Moses', to: name,
+            icon: '👷', from: 'Athena', to: name,
             text: 'Task assigned: ' + String((wa[name] || {}).lastTask || '').slice(0, 100),
             time: (wa[name] || {}).lastActiveAt || new Date().toISOString(), isNew: true
           };
@@ -3111,7 +3111,7 @@ function renderHtml() {
     function renderLeadershipPipeline(data, changes) {
       var jesus = (data && data.leadership && data.leadership.jesus) || {};
       var prometheus = (data && data.leadership && data.leadership.prometheus) || {};
-      var moses = (data && data.leadership && data.leadership.moses) || {};
+      var Athena = (data && data.leadership && data.leadership.athena) || {};
       var wa = data && data.workerActivity ? data.workerActivity : {};
 
       // Progress ring
@@ -3165,21 +3165,21 @@ function renderHtml() {
       if (arrowTM) arrowTM.classList.toggle('active', changes.prometheusNew);
       if (arrowTMLabel) arrowTMLabel.textContent = planCount > 0 ? (planCount + ' plans') : '—';
 
-      // Moses node
-      var mosesStatusEl = document.getElementById('lp-moses-status');
-      var activeSessions = Number(moses.activeSessions || 0);
-      var completedCount = Array.isArray(moses.completedTasks) ? moses.completedTasks.length : 0;
-      if (mosesStatusEl) mosesStatusEl.textContent = activeSessions + ' active | ' + completedCount + ' done';
-      var mosesNode = document.getElementById('lp-node-moses');
-      if (mosesNode) {
-        mosesNode.classList.toggle('active', !!moses.coordinatedAt);
-        if (changes.mosesNew) { mosesNode.classList.remove('flash'); void mosesNode.offsetWidth; mosesNode.classList.add('flash'); }
+      // Athena node
+      var AthenaStatusEl = document.getElementById('lp-Athena-status');
+      var activeSessions = Number(Athena.activeSessions || 0);
+      var completedCount = Array.isArray(Athena.completedTasks) ? Athena.completedTasks.length : 0;
+      if (AthenaStatusEl) AthenaStatusEl.textContent = activeSessions + ' active | ' + completedCount + ' done';
+      var AthenaNode = document.getElementById('lp-node-Athena');
+      if (AthenaNode) {
+        AthenaNode.classList.toggle('active', !!Athena.coordinatedAt);
+        if (changes.AthenaNew) { AthenaNode.classList.remove('flash'); void AthenaNode.offsetWidth; AthenaNode.classList.add('flash'); }
       }
 
-      // Moses → Workers arrow
+      // Athena → Workers arrow
       var arrowMW = document.getElementById('lp-arrow-mw');
       var arrowMWLabel = document.getElementById('lp-arrow-mw-label');
-      if (arrowMW) arrowMW.classList.toggle('active', changes.mosesNew || changes.newWorkers.length > 0);
+      if (arrowMW) arrowMW.classList.toggle('active', changes.AthenaNew || changes.newWorkers.length > 0);
       if (arrowMWLabel) arrowMWLabel.textContent = activeSessions > 0 ? ('dispatch ' + activeSessions) : '—';
 
       // Workers node
@@ -3481,7 +3481,7 @@ function renderHtml() {
 
     function renderLeadershipPanel(data) {
       var jesus = (data && data.leadership && data.leadership.jesus) ? data.leadership.jesus : {};
-      var moses = (data && data.leadership && data.leadership.moses) ? data.leadership.moses : {};
+      var Athena = (data && data.leadership && data.leadership.athena) ? data.leadership.athena : {};
       var prometheus = (data && data.leadership && data.leadership.prometheus) ? data.leadership.prometheus : {};
       var workerActivity = (data && data.workerActivity) ? data.workerActivity : {};
       var latestTasks = (data && data.tasks && Array.isArray(data.tasks.list)) ? data.tasks.list : [];
@@ -3534,7 +3534,7 @@ function renderHtml() {
 
       var jesusStatusEl = document.getElementById('jesus-status');
       if (jesusStatusEl) jesusStatusEl.innerHTML = 'Health: ' + healthText + ' | Mode: ' + esc(String(jesus.decision || '?')) + freshnessBadge(jesus.decidedAt);
-      document.getElementById('jesus-action').textContent = 'Brief to Moses: ' + nextAction;
+      document.getElementById('jesus-action').textContent = 'Brief to Athena: ' + nextAction;
       document.getElementById('jesus-blocked').textContent = 'Prometheus needed: ' + (jesus.callPrometheus ? 'YES — ' + String(jesus.prometheusReason || '').slice(0, 80) : 'No');
       document.getElementById('jesus-queue').textContent = 'Priorities: ' + (Array.isArray(jesus.priorities) ? jesus.priorities.join(', ') : 'none');
 
@@ -3545,21 +3545,21 @@ function renderHtml() {
         jesusReasoningEl.title = 'Decided: ' + String(jesus.decidedAt || '') + ' | Model: ' + String(jesus.model || '');
       }
 
-      var mosesCountsEl = document.getElementById('moses-counts');
-      if (mosesCountsEl) mosesCountsEl.innerHTML =
-        'Status: ' + esc(String(moses.statusReport || 'No coordination yet')) +
-        ' | Workers: ' + esc(String(moses.activeSessions || 0)) +
-        freshnessBadge(moses.coordinatedAt || moses.updatedAt || null);
-      document.getElementById('moses-gates').textContent = 'Completed: ' + (Array.isArray(moses.completedTasks) ? moses.completedTasks.length : 0) + ' tasks';
+      var AthenaCountsEl = document.getElementById('Athena-counts');
+      if (AthenaCountsEl) AthenaCountsEl.innerHTML =
+        'Status: ' + esc(String(Athena.statusReport || 'No coordination yet')) +
+        ' | Workers: ' + esc(String(Athena.activeSessions || 0)) +
+        freshnessBadge(Athena.coordinatedAt || Athena.updatedAt || null);
+      document.getElementById('Athena-gates').textContent = 'Completed: ' + (Array.isArray(Athena.completedTasks) ? Athena.completedTasks.length : 0) + ' tasks';
 
-      var mosesReportEl = document.getElementById('moses-statusreport');
-      if (mosesReportEl) {
-        mosesReportEl.textContent = String(moses.summary || 'Awaiting Moses coordination...');
+      var AthenaReportEl = document.getElementById('Athena-statusreport');
+      if (AthenaReportEl) {
+        AthenaReportEl.textContent = String(Athena.summary || 'Awaiting Athena coordination...');
       }
-      var mosesPlannedEl = document.getElementById('moses-tasksplanned');
-      if (mosesPlannedEl) {
-        var completed = Array.isArray(moses.completedTasks) ? moses.completedTasks : [];
-        mosesPlannedEl.textContent = completed.length ? ('Done: ' + completed.join(' | ')) : '';
+      var AthenaPlannedEl = document.getElementById('Athena-tasksplanned');
+      if (AthenaPlannedEl) {
+        var completed = Array.isArray(Athena.completedTasks) ? Athena.completedTasks : [];
+        AthenaPlannedEl.textContent = completed.length ? ('Done: ' + completed.join(' | ')) : '';
       }
 
       // Prometheus panel
@@ -3584,8 +3584,8 @@ function renderHtml() {
           : 'Estimated Premium Requests: not available';
       }
 
-      var mosesWorkers = (moses && moses.workers) ? { ...moses.workers } : {};
-      var names = Object.keys(mosesWorkers || {});
+      var AthenaWorkers = (Athena && Athena.workers) ? { ...Athena.workers } : {};
+      var names = Object.keys(AthenaWorkers || {});
       var activeSlots = Object.keys(workerActivity || {}).filter(function(slot) {
         var live = workerActivity[slot] || {};
         return String(live.status || '').toLowerCase() === 'active';
@@ -3593,8 +3593,8 @@ function renderHtml() {
 
       // Make leadership table reflect live worker slot activity when role summary is stale.
       var roleBySlot = {};
-      Object.keys(mosesWorkers || {}).forEach(function(name) {
-        var item = mosesWorkers[name] || {};
+      Object.keys(AthenaWorkers || {}).forEach(function(name) {
+        var item = AthenaWorkers[name] || {};
         var slot = String(item.slot || '').trim();
         if (slot) {
           roleBySlot[slot] = name;
@@ -3604,8 +3604,8 @@ function renderHtml() {
       Object.keys(workerActivity || {}).forEach(function(slot) {
         var live = workerActivity[slot] || {};
         var mappedName = roleBySlot[slot] || String(live.roleName || '').trim() || slot;
-        if (!mosesWorkers[mappedName]) {
-          mosesWorkers[mappedName] = {
+        if (!AthenaWorkers[mappedName]) {
+          AthenaWorkers[mappedName] = {
             status: String(live.status || 'idle').toLowerCase(),
             task: live.taskTitle || null,
             gate_color: String(live.status || '').toLowerCase() === 'active' ? 'yellow' : 'green',
@@ -3613,11 +3613,11 @@ function renderHtml() {
           };
           names.push(mappedName);
         } else if (String(live.status || '').toLowerCase() === 'active') {
-          mosesWorkers[mappedName] = {
-            ...mosesWorkers[mappedName],
+          AthenaWorkers[mappedName] = {
+            ...AthenaWorkers[mappedName],
             status: 'running',
-            task: live.taskTitle || mosesWorkers[mappedName].task || null,
-            gate_color: mosesWorkers[mappedName].gate_color === 'red' ? 'red' : 'yellow',
+            task: live.taskTitle || AthenaWorkers[mappedName].task || null,
+            gate_color: AthenaWorkers[mappedName].gate_color === 'red' ? 'red' : 'yellow',
             slot: slot
           };
         }
@@ -3626,10 +3626,10 @@ function renderHtml() {
       // If no slot is active, do not keep stale "running" labels from old summaries.
       if (activeSlots.length === 0) {
         names.forEach(function(name) {
-          var item = mosesWorkers[name] || {};
+          var item = AthenaWorkers[name] || {};
           var st = String(item.status || '').toLowerCase();
           if (st === 'running' || st === 'active') {
-            mosesWorkers[name] = {
+            AthenaWorkers[name] = {
               ...item,
               status: 'idle',
               task: null,
@@ -3642,7 +3642,7 @@ function renderHtml() {
       var chips = [];
       names.sort(function(a, b) { return String(a).localeCompare(String(b)); });
       names.forEach(function(name) {
-        var item = mosesWorkers[name] || {};
+        var item = AthenaWorkers[name] || {};
         var gateColor = String(item.gate_color || statusColor(item.status));
         chips.push('<div class="worker-chip ' + esc(gateColor) + '">' +
           '<div><strong>' + esc(name) + '</strong></div>' +
@@ -4467,8 +4467,9 @@ export function startDashboard(opts: { port?: number } = {}): http.Server | null
   return _server;
 }
 
-// Auto-start when run directly (node src/dashboard/live_dashboard.js)
+// Auto-start when run directly (node src/dashboard/live_dashboard.ts)
 const _isDirectRun = process.argv[1] && (
+  process.argv[1].endsWith("live_dashboard.ts") ||
   process.argv[1].endsWith("live_dashboard.js") ||
   process.argv[1].endsWith("live_dashboard")
 );

@@ -71,7 +71,7 @@ Write all your thinking freely in plain English first. Then close with:
   "decision": "tactical | strategic",
   "callPrometheus": false,
   "prometheusReason": "Only if callPrometheus is true — why a fresh full repo scan is needed",
-  "wakeMoses": true,
+  "wakeAthena": true,
   "briefForPrometheus": "Complete senior-level directive. Describe all open work, exact file paths, issue numbers, why each task matters, parallel opportunities, expected deliverables. Prometheus will plan — you focus on WHAT needs doing and WHY.",
   "priorities": ["highest priority area", "second priority"],
   "workItems": [

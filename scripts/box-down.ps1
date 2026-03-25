@@ -6,7 +6,7 @@ Set-Location $Root
 
 # --- 1. Graceful daemon stop via CLI ---
 Write-Host "[box-down] sending stop request to daemon..."
-$stopResult = & node src/cli.js stop 2>&1
+$stopResult = & node --import tsx src/cli.ts stop 2>&1
 Write-Host "[box-down] $stopResult"
 
 # Wait up to 6 seconds for daemon to exit cleanly

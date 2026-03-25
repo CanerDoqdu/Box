@@ -218,23 +218,27 @@ export function spawnAsync(command, args, options) {
     });
 
     let settled = false;
-    const timeoutMs = options.timeoutMs ?? 45 * 60 * 1000; // 45-minute default
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      try { child.kill("SIGKILL"); } catch { /* already gone */ }
-      resolve({
-        status: -1,
-        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-        stderr: `[BOX] Process killed after ${timeoutMs / 1000}s timeout`,
-        timedOut: true
-      });
-    }, timeoutMs);
+    const timeoutMs = options.timeoutMs === null
+      ? 0
+      : (options.timeoutMs ?? 45 * 60 * 1000); // 45-minute default
+    const timer = timeoutMs > 0
+      ? setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          try { child.kill("SIGKILL"); } catch { /* already gone */ }
+          resolve({
+            status: -1,
+            stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+            stderr: `[BOX] Process killed after ${timeoutMs / 1000}s timeout`,
+            timedOut: true
+          });
+        }, timeoutMs)
+      : null;
 
     child.on("close", (code) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       resolve({
         status: code ?? 1,
         stdout: Buffer.concat(stdoutChunks).toString("utf8"),
@@ -244,7 +248,7 @@ export function spawnAsync(command, args, options) {
     child.on("error", (err) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       resolve({ status: 1, stdout: "", stderr: String(err.message) });
     });
   });

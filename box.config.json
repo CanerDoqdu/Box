@@ -22,7 +22,7 @@
     "autonomousTaskSplitOnFailure": true,
     "maxQueuedTasks": 30,
     "runningTaskTimeoutMinutes": 0,
-    "workerTimeoutMinutes": 30,
+    "workerTimeoutMinutes": 0,
     "blockedTaskRequeueMinutes": 120,
     "semanticFailureWindowMinutes": 180,
     "semanticFailureMaxCount": 3,
@@ -129,7 +129,11 @@
       "provider": "copilot"
     },
     "workers": {
-      "evolution": { "id": "worker-evolution", "name": "Evolution Worker", "model": "GPT-5.3-Codex" }
+      "evolution": {
+        "id": "worker-evolution",
+        "name": "Evolution Worker",
+        "model": "GPT-5.3-Codex"
+      }
     }
   },
   "planner": {
@@ -156,7 +160,7 @@
     "experimentEngineEnabled": true,
     "shadowPolicy": {
       "enabled": true,
-      "threshold": 0.10,
+      "threshold": 0.1,
       "cycleWindow": 20,
       "minSampleSize": 3
     }
@@ -185,7 +189,7 @@
       "falseBlockRateMax": 0.02,
       "safetyScoreMin": 0.95,
       "falseBlockRateTrigger": 0.05,
-      "safetyScoreTriggerLow": 0.80,
+      "safetyScoreTriggerLow": 0.8,
       "breachAction": "halt_new_assignments",
       "auditLogPath": "state/governance_canary_audit.jsonl",
       "ledgerPath": "state/governance_canary_ledger.json"
@@ -210,24 +214,72 @@
     "strategy": "task-best",
     "defaultModel": "Claude Sonnet 4.6",
     "preferredModelsByTaskKind": {
-      "scan": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
-      "analysis": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
-      "planning": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
-      "implementation": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
-      "test": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
-      "qa": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
-      "security": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
-      "devops": ["Claude Sonnet 4.6", "GPT-5.3-Codex"],
-      "refactor": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
-      "quality": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
-      "stability": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
-      "production": ["Claude Sonnet 4.6", "GPT-5.3-Codex"]
+      "scan": [
+        "GPT-5.3-Codex",
+        "Claude Sonnet 4.6"
+      ],
+      "analysis": [
+        "GPT-5.3-Codex",
+        "Claude Sonnet 4.6"
+      ],
+      "planning": [
+        "GPT-5.3-Codex",
+        "Claude Sonnet 4.6"
+      ],
+      "implementation": [
+        "Claude Sonnet 4.6",
+        "GPT-5.3-Codex"
+      ],
+      "test": [
+        "GPT-5.3-Codex",
+        "Claude Sonnet 4.6"
+      ],
+      "qa": [
+        "GPT-5.3-Codex",
+        "Claude Sonnet 4.6"
+      ],
+      "security": [
+        "Claude Sonnet 4.6",
+        "GPT-5.3-Codex"
+      ],
+      "devops": [
+        "Claude Sonnet 4.6",
+        "GPT-5.3-Codex"
+      ],
+      "refactor": [
+        "GPT-5.3-Codex",
+        "Claude Sonnet 4.6"
+      ],
+      "quality": [
+        "GPT-5.3-Codex",
+        "Claude Sonnet 4.6"
+      ],
+      "stability": [
+        "GPT-5.3-Codex",
+        "Claude Sonnet 4.6"
+      ],
+      "production": [
+        "Claude Sonnet 4.6",
+        "GPT-5.3-Codex"
+      ]
     },
     "preferredModelsByRole": {
-      "Jesus": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
-      "Prometheus": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
-      "Athena": ["GPT-5.3-Codex", "Claude Sonnet 4.6"],
-      "Evolution Worker": ["GPT-5.3-Codex", "Claude Sonnet 4.6"]
+      "Jesus": [
+        "GPT-5.3-Codex",
+        "Claude Sonnet 4.6"
+      ],
+      "Prometheus": [
+        "GPT-5.3-Codex",
+        "Claude Sonnet 4.6"
+      ],
+      "Athena": [
+        "GPT-5.3-Codex",
+        "Claude Sonnet 4.6"
+      ],
+      "Evolution Worker": [
+        "GPT-5.3-Codex",
+        "Claude Sonnet 4.6"
+      ]
     },
     "opusModel": "Claude Sonnet 4.6",
     "allowOpusEscalation": false,
@@ -254,7 +306,11 @@
       "opusAllowedForLargeTasks": true,
       "opusMinEstimatedLines": 3000,
       "opusMinDurationMinutes": 120,
-      "opusAllowedComplexities": ["critical", "massive", "high"],
+      "opusAllowedComplexities": [
+        "critical",
+        "massive",
+        "high"
+      ],
       "3xRateAllowed": true,
       "3xRateMinDurationMinutes": 60,
       "30xRateAllowed": false,
@@ -333,15 +389,15 @@
     "breachSeverity": {
       "decisionLatencyMs": "high",
       "rollbackEngine": {
-    "enabled": true,
-    "oneCycleSlaMs": 5000,
-    "incidentLogPath": "state/rollback_incidents.jsonl",
-    "lockFilePath": "state/rollback_lock.json",
-    "baselineRefPath": "state/project_baseline.json",
-    "configFilePath": "box.config.json",
-    "policyFilePath": "policy.json"
-  },
-  "dispatchLatencyMs": "high",
+        "enabled": true,
+        "oneCycleSlaMs": 5000,
+        "incidentLogPath": "state/rollback_incidents.jsonl",
+        "lockFilePath": "state/rollback_lock.json",
+        "baselineRefPath": "state/project_baseline.json",
+        "configFilePath": "box.config.json",
+        "policyFilePath": "policy.json"
+      },
+      "dispatchLatencyMs": "high",
       "verificationCompletionMs": "critical"
     },
     "degradedOnBreach": true
@@ -360,8 +416,14 @@
     "enabled": true,
     "recoveryTag": "box/recovery-v0.1.0-pre-selfdev",
     "maxFilesPerPr": 8,
-    "mandatoryGates": ["lint", "test"],
-    "forbiddenBranchTargets": ["main", "master"],
+    "mandatoryGates": [
+      "lint",
+      "test"
+    ],
+    "forbiddenBranchTargets": [
+      "main",
+      "master"
+    ],
     "branchPrefix": "box/selfdev-",
     "criticalFiles": [
       "src/core/orchestrator.js",

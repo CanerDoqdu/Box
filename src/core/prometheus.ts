@@ -179,18 +179,18 @@ function inferTargetFilesFromTask(taskText) {
   const lower = String(taskText || "").toLowerCase();
   const stem = slugifyTaskToFileStem(taskText);
   const mappings = [
-    { pattern: /trust-boundary/, files: ["src/core/trust_boundary.js"] },
-    { pattern: /canary/, files: ["src/core/canary_engine.js"] },
-    { pattern: /compounding analyzer|compounding/, files: ["src/core/compounding_effects_analyzer.js"] },
-    { pattern: /freeze-window|freeze window/, files: ["src/core/governance_freeze.js"] },
-    { pattern: /resilience-drill|resilience drill/, files: ["src/core/catastrophe_detector.js"] },
-    { pattern: /worker-runner|worker runner/, files: ["src/core/worker_runner.js"] },
-    { pattern: /planner packet contract|contract completeness/, files: ["src/core/plan_contract_validator.js", "src/core/prometheus.js"] },
-    { pattern: /critical-path scheduling|dependency-aware waves/, files: ["src/core/dag_scheduler.js", "src/core/orchestrator.js"] },
-    { pattern: /parser replay corpus|marker\/fence|fence outputs/, files: ["src/core/parser_replay_harness.js", "tests/core/parser_replay_harness.test.js"] },
-    { pattern: /governance integration worker lane|ownership contract/, files: ["src/core/capability_pool.js", "src/core/role_registry.js"] },
-    { pattern: /model routing|uncertainty-aware|roi feedback loop/, files: ["src/core/agent_loader.js", "src/core/model_router.js"] },
-    { pattern: /postmortem deltas|actionable packets/, files: ["src/core/delta_analytics.js", "src/core/learning_policy_compiler.js"] },
+    { pattern: /trust-boundary/, files: ["src/core/trust_boundary.ts"] },
+    { pattern: /canary/, files: ["src/core/canary_engine.ts"] },
+    { pattern: /compounding analyzer|compounding/, files: ["src/core/compounding_effects_analyzer.ts"] },
+    { pattern: /freeze-window|freeze window/, files: ["src/core/governance_freeze.ts"] },
+    { pattern: /resilience-drill|resilience drill/, files: ["src/core/catastrophe_detector.ts"] },
+    { pattern: /worker-runner|worker runner/, files: ["src/core/worker_runner.ts"] },
+    { pattern: /planner packet contract|contract completeness/, files: ["src/core/plan_contract_validator.ts", "src/core/prometheus.ts"] },
+    { pattern: /critical-path scheduling|dependency-aware waves/, files: ["src/core/dag_scheduler.ts", "src/core/orchestrator.ts"] },
+    { pattern: /parser replay corpus|marker\/fence|fence outputs/, files: ["src/core/parser_replay_harness.ts", "tests/core/parser_replay_harness.test.ts"] },
+    { pattern: /governance integration worker lane|ownership contract/, files: ["src/core/capability_pool.ts", "src/core/role_registry.ts"] },
+    { pattern: /model routing|uncertainty-aware|roi feedback loop/, files: ["src/core/agent_loader.ts", "src/core/model_router.ts"] },
+    { pattern: /postmortem deltas|actionable packets/, files: ["src/core/delta_analytics.ts", "src/core/learning_policy_compiler.ts"] },
   ];
 
   for (const mapping of mappings) {
@@ -200,9 +200,9 @@ function inferTargetFilesFromTask(taskText) {
   }
 
   if (/\b(test|tests|assertion|coverage|regression)\b/.test(lower)) {
-    return [`tests/core/${stem}.test.js`];
+    return [`tests/core/${stem}.test.ts`];
   }
-  return [`src/core/${stem}.js`];
+  return [`src/core/${stem}.ts`];
 }
 
 function inferScopeFromTask(taskText, targetFiles) {
@@ -1176,7 +1176,7 @@ Each packet MUST contain ALL of the following fields:
 - **riskLevel**: One of: "low" | "medium" | "high". Tasks touching orchestrator.js, athena_reviewer.js, prometheus.js, or gates.js default to "high".
 - **dependencies**: Array of packet titles that must complete before this one, or empty array if none. If empty, state that wave ordering is the only ordering mechanism.
 - **acceptance_criteria**: Array of ≥2 concrete testable statements that prove completion. Vague criteria like "code is improved" are rejected.
-- **verification**: Specific test file path AND expected test description or observable log assertion (e.g., "tests/core/foo.test.js — test: should return X when Y"). Generic "npm test" or "run tests" is REJECTED.
+- **verification**: Specific test file path AND expected test description or observable log assertion (e.g., "tests/core/foo.test.ts — test: should return X when Y"). Generic "npm test" or "run tests" is REJECTED.
 - **premortem** (REQUIRED when riskLevel is "medium" or "high"): Object with: failureModes (array of ≥2 distinct failure scenarios each with cause+impact), mitigations (array), rollbackPlan (string describing how to revert safely).
 - **leverage_rank**: Which dimension(s) from the EQUAL DIMENSION SET this improves
 
@@ -1185,7 +1185,7 @@ These rules are enforced by the quality gate. Violations cause plan rejection:
 1. **target_files**: Must list real existing paths verbatim from EXISTING REPOSITORY FILES. Do not invent module names. For new files, include the parent module path as the first entry.
 2. **before_state**: Must describe observable current behavior — cite the actual function name, variable, or code gap. "Current state is suboptimal" is rejected.
 3. **after_state**: Must describe what is measurably different — not a restatement of the title or before_state negation.
-4. **verification**: Must name a specific test file (e.g., tests/core/foo.test.js) plus an expected test name or exact log assertion. "npm test" alone is always rejected.
+4. **verification**: Must name a specific test file (e.g., tests/core/foo.test.ts) plus an expected test name or exact log assertion. "npm test" alone is always rejected.
 5. **acceptance_criteria**: ≥2 items, each a concrete testable statement. Every item must be independently verifiable.
 6. **riskLevel + premortem**: Any task modifying orchestration paths, plan parsing, or dispatch logic is automatically high-risk and requires a compliant premortem.
 7. **requestBudget**: Compute byWave and byRole from actual plan distribution. Never emit _fallback:true. byWave and byRole arrays must not be empty if plans exist.
@@ -1222,7 +1222,7 @@ The JSON block must contain all of the following fields:
     "riskLevel": "low|medium|high",
     "dependencies": [],
     "acceptance_criteria": ["...", "..."],
-    "verification": "tests/core/foo.test.js — test: expected description",
+    "verification": "tests/core/foo.test.ts — test: expected description",
     "premortem": null
   }]
 }

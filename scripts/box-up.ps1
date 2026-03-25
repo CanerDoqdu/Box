@@ -14,7 +14,7 @@ if ($c) {
 # Start dashboard (detached, hidden window)
 $dash = Start-Process `
     -FilePath "node" `
-    -ArgumentList "src/dashboard/live_dashboard.js" `
+    -ArgumentList "--import", "tsx", "src/dashboard/live_dashboard.ts" `
     -WorkingDirectory $Root `
     -WindowStyle Hidden `
     -PassThru
@@ -24,7 +24,7 @@ Write-Host "[box-up] dashboard started  pid=$($dash.Id)  http://localhost:8787"
 # Start daemon (detached, hidden window)
 $daemon = Start-Process `
     -FilePath "node" `
-    -ArgumentList "src/cli.js", "start" `
+    -ArgumentList "--import", "tsx", "src/cli.ts", "start" `
     -WorkingDirectory $Root `
     -WindowStyle Hidden `
     -PassThru

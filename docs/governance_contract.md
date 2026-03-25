@@ -19,7 +19,7 @@ All enforcement is runtime-deterministic and machine-verifiable via `npm test`.
 
 The table below maps each acceptance criterion to the exact runtime function that enforces it.
 Every listed function is covered by a deterministic automated test in
-`tests/core/governance_contract.test.js`.
+`tests/core/governance_contract.test.ts`.
 
 | Acceptance Criterion | Runtime Function | Test Coverage |
 |---|---|---|

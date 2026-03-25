@@ -29,8 +29,8 @@
  * secret-key pattern (token, secret, password, etc.) are stripped recursively.
  *
  * Trigger (Athena missing item #4 resolved):
- *   CLI via scripts/generate-governance-packet.mjs
- *   node scripts/generate-governance-packet.mjs [--month YYYY-MM] [--state-dir <path>] [--dry-run]
+ *   CLI via scripts/generate-governance-packet.ts
+ *   node scripts/generate-governance-packet.ts [--month YYYY-MM] [--state-dir <path>] [--dry-run]
  *
  * Output path (Athena missing item #6 resolved):
  *   state/governance_packets/governance_packet_{YYYY-MM}.json

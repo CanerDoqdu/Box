@@ -16,17 +16,15 @@
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
-    "allowJs": true,
+    "allowJs": false,
     "checkJs": false,
     "noEmit": true,
     "isolatedModules": true
   },
   "include": [
     "src/**/*.ts",
-    "src/**/*.js",
     "tests/**/*.ts",
-    "tests/**/*.js",
-    "scripts/**/*.mjs"
+    "scripts/**/*.ts"
   ],
   "exclude": [
     "node_modules",

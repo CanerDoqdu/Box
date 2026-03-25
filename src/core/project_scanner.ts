@@ -67,7 +67,7 @@ function detectDomains(scripts, frameworks) {
 
 function isTestLike(filePath) {
   const lower = String(filePath || "").toLowerCase();
-  return lower.endsWith(".test.js")
+  return lower.endsWith(".test.ts")
     || lower.endsWith(".spec.js")
     || lower.includes("/__tests__/")
     || lower.endsWith(".test.ts")
@@ -89,11 +89,11 @@ function pickPreviewTargets(files) {
     "package.json",
     "box.config.json",
     "docker-compose.yml",
-    "src/cli.js",
-    "src/core/orchestrator.js",
-    "src/core/project_scanner.js",
-    "src/core/task_planner.js",
-    "src/core/roadmap_engine.js"
+    "src/cli.ts",
+    "src/core/orchestrator.ts",
+    "src/core/project_scanner.ts",
+    "src/core/task_planner.ts",
+    "src/core/roadmap_engine.ts"
   ];
 
   const normalizedFiles = files.map((f) => String(f).replace(/\\/g, "/"));
