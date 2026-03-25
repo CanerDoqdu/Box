@@ -152,9 +152,8 @@
     "maxImprovementTasksPerCycle": 3,
     "enforceCoreModuleGuard": true,
     "coreProtectedModules": [
-      "src/core/orchestrator.js",
-      "src/core/task_queue.js",
-      "src/core/policy_engine.js"
+      "src/core/orchestrator.ts",
+      "src/core/policy_engine.ts"
     ],
     "knowledgeMemoryEnabled": true,
     "experimentEngineEnabled": true,
@@ -426,20 +425,19 @@
     ],
     "branchPrefix": "box/selfdev-",
     "criticalFiles": [
-      "src/core/orchestrator.js",
-      "src/core/self_dev_guard.js",
-      "src/core/daemon_control.js",
-      "src/core/policy_engine.js",
-      "src/cli.js",
+      "src/core/orchestrator.ts",
+      "src/core/self_dev_guard.ts",
+      "src/core/daemon_control.ts",
+      "src/core/policy_engine.ts",
+      "src/cli.ts",
       ".env",
       "policy.json"
     ],
     "cautionFiles": [
-      "src/core/task_queue.js",
-      "src/core/self_improvement.js",
-      "src/core/athena_reviewer.js",
-      "src/core/jesus_supervisor.js",
-      "src/core/prometheus.js",
+      "src/core/self_improvement.ts",
+      "src/core/athena_reviewer.ts",
+      "src/core/jesus_supervisor.ts",
+      "src/core/prometheus.ts",
       "box.config.json",
       "package.json"
     ]

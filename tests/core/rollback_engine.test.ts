@@ -57,7 +57,7 @@ function makeConfig(overrides = {}) {
       policyFilePath:  overrides.policyFilePath
     },
     selfDev: {
-      criticalFiles: ["src/core/orchestrator.js", "src/core/policy_engine.js"]
+      criticalFiles: ["src/core/orchestrator.ts", "src/core/policy_engine.ts"]
     }
   };
 }
@@ -920,9 +920,9 @@ describe("resolveRollbackConfig", () => {
 
   it("uses selfDev.criticalFiles as freeze scope when rollbackEngine.criticalFiles absent", () => {
     const rc = resolveRollbackConfig({
-      selfDev: { criticalFiles: ["src/core/orchestrator.js"] }
+      selfDev: { criticalFiles: ["src/core/orchestrator.ts"] }
     });
-    assert.deepEqual(rc.criticalFiles, ["src/core/orchestrator.js"]);
+    assert.deepEqual(rc.criticalFiles, ["src/core/orchestrator.ts"]);
   });
 });
 
