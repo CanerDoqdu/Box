@@ -30,9 +30,76 @@ import { buildTaskFingerprint, buildLineageId, LINEAGE_ENTRY_STATUS } from "./li
 import { classifyFailure } from "./failure_classifier.js";
 import { resolveRetryAction, persistRetryMetric } from "./retry_strategy.js";
 
+type WorkerRunnerConfig = {
+  env?: Record<string, string | undefined>;
+  paths?: {
+    stateDir?: string;
+  };
+  [key: string]: unknown;
+};
+
+type PremiumUsageMeta = {
+  outcome?: string;
+  taskId?: string | number | null;
+};
+
+type WorkerRegistryEntry = {
+  name?: string;
+  model?: string;
+  kind?: string;
+  [key: string]: unknown;
+};
+
+type TaskHints = {
+  estimatedLines?: number;
+  estimatedDurationMinutes?: number;
+  complexity?: string;
+};
+
+type WorkerActivityEntry = {
+  at?: string;
+  status?: string;
+  task?: string;
+  files?: string[];
+  pr?: string;
+};
+
+type WorkerSessionState = {
+  currentBranch?: string | null;
+  createdPRs?: string[];
+  filesTouched?: string[];
+  activityLog?: WorkerActivityEntry[];
+  [key: string]: unknown;
+};
+
+type SpawnAsyncResult = {
+  status: number;
+  stdout: string;
+  stderr: string;
+  timedOut?: boolean;
+};
+
+type VerificationEvidence = {
+  profile: string;
+  hasReport: boolean;
+  report: unknown;
+  responsiveMatrix: unknown;
+  prUrl: string | null;
+  gaps: string[];
+  passed: boolean;
+  attempt: number;
+  validatedAt: string;
+  roleName: string;
+  taskSnippet: string;
+};
+
+type ParsedWorkerResponse = ReturnType<typeof parseWorkerResponse> & {
+  verificationEvidence?: VerificationEvidence | null;
+};
+
 // ── Premium usage tracking ──────────────────────────────────────────────────
 
-function logPremiumUsage(config, roleName, model, taskKind, durationMs, { outcome, taskId }: any = {}) {
+function logPremiumUsage(config, roleName, model, taskKind, durationMs, { outcome, taskId }: PremiumUsageMeta = {}) {
   const logPath = path.join(config.paths?.stateDir || "state", "premium_usage_log.json");
   let entries = [];
   try {
@@ -79,8 +146,8 @@ async function appendLiveWorkerLog(logPath, text) {
 function findWorkerByName(config, roleName) {
   const registry = getRoleRegistry(config);
   const workers = registry?.workers || {};
-  for (const [kind, w] of Object.entries(workers) as any[]) {
-    if ((w as any).name === roleName) return { kind, ...(w as any) };
+  for (const [kind, worker] of Object.entries(workers) as Array<[string, WorkerRegistryEntry]>) {
+    if (worker?.name === roleName) return { kind, ...worker };
   }
   return null;
 }
@@ -88,7 +155,7 @@ function findWorkerByName(config, roleName) {
 // ── Task-aware model resolution ───────────────────────────────────────────────
 // Priority: taskKind → role preference → worker's registered model → default
 
-function resolveModel(config, roleName, taskKind, taskHints: any = {}) {
+function resolveModel(config, roleName, taskKind, taskHints: TaskHints = {}) {
   let candidate;
   // 1. Task-kind override (e.g. "scan" always uses GPT-5.3-Codex)
   if (taskKind) {
@@ -120,7 +187,7 @@ function resolveModel(config, roleName, taskKind, taskHints: any = {}) {
 
 // ── Build conversation-only context (persona is in .agent.md) ───────────────
 
-function buildConversationContext(history, instruction, sessionState: any = {}, config: any = {}, workerKind = null) {
+function buildConversationContext(history, instruction, sessionState: WorkerSessionState = {}, config: WorkerRunnerConfig = {}, workerKind = null) {
   const parts = [];
 
   // Persistent worker state — always injected first so workers always know where they stand
@@ -375,7 +442,7 @@ export function parseWorkerResponse(stdout, stderr) {
 
 // ── Main Worker Conversation ─────────────────────────────────────────────────
 
-export async function runWorkerConversation(config, roleName, instruction, history = [], sessionState: any = {}) {
+export async function runWorkerConversation(config, roleName, instruction, history = [], sessionState: WorkerSessionState = {}) {
   const model = resolveModel(config, roleName, instruction.taskKind, {
     estimatedLines: Number(instruction.estimatedLines || 0),
     estimatedDurationMinutes: Number(instruction.estimatedDurationMinutes || 0),
@@ -428,7 +495,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
   );
 
   const startMs = Date.now();
-  const result: any = await spawnAsync(command, args, {
+  const result = await spawnAsync(command, args, {
     env: {
       ...process.env,
       GH_TOKEN: config.env?.githubToken || process.env.GH_TOKEN || "",
@@ -443,7 +510,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     onStderr: (chunk) => {
       appendLiveWorkerLog(liveLogPath, `[stderr] ${String(chunk)}`).catch(() => {});
     }
-  });
+  }) as SpawnAsyncResult;
 
   const stdout = String(result?.stdout || "");
   const stderr = String(result?.stderr || "");
@@ -530,7 +597,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     );
   } catch { /* non-critical */ }
 
-  const parsed = parseWorkerResponse(stdout, stderr);
+  const parsed: ParsedWorkerResponse = parseWorkerResponse(stdout, stderr);
 
   // If access was reported as blocked, persist a structured escalation (non-critical)
   if (parsed.status === "blocked" && /BOX_ACCESS=[^\n]*blocked/i.test(stdout)) {
@@ -670,7 +737,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
       return runWorkerConversation(config, roleName, reworkDecision.instruction, updatedHistory, sessionState);
     }
 
-    (parsed as any).verificationEvidence = verificationEvidence;
+    parsed.verificationEvidence = verificationEvidence;
   }
 
   await appendLiveWorkerLog(
@@ -787,7 +854,7 @@ export async function runWorkerConversation(config, roleName, instruction, histo
     workerKind,
     verificationReport: parsed.verificationReport,
     responsiveMatrix: parsed.responsiveMatrix,
-    verificationEvidence: (parsed as any).verificationEvidence || null,
+    verificationEvidence: parsed.verificationEvidence || null,
     fullOutput: parsed.fullOutput,
     failureClassification,
     retryDecision

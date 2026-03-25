@@ -66,6 +66,33 @@ export const ORCHESTRATOR_STATUS = Object.freeze({
   DEGRADED: "degraded"
 });
 
+type WorkerSessionRecord = {
+  status?: string;
+  [key: string]: unknown;
+};
+
+type GithubPullRequestSummary = {
+  number?: number;
+  title?: string;
+  merged_at?: string | null;
+  head?: {
+    ref?: string;
+  };
+};
+
+type GithubBranchSummary = {
+  name?: string;
+};
+
+type CriticalReadResult = {
+  ok: boolean;
+  reason?: string;
+  data?: unknown;
+  error?: {
+    message?: string;
+  } | null;
+};
+
 /** Write orchestrator health record to state/orchestrator_health.json. Exported for downstream use. */
 export async function writeOrchestratorHealth(stateDir, status, reason, details = null) {
   await writeJson(path.join(stateDir, "orchestrator_health.json"), {
@@ -219,7 +246,7 @@ async function auditCriticalStateFiles(config, stateDir) {
     ["worker_sessions.json",    sessionsResult,          {}, STATE_FILE_TYPE.WORKER_SESSIONS],
     ["jesus_directive.json",    jesusDirectiveResult,    null, null],
     ["prometheus_analysis.json", prometheusAnalysisResult, null, STATE_FILE_TYPE.PROMETHEUS_ANALYSIS]
-  ] as any[])) {
+  ] as Array<[string, CriticalReadResult, unknown, string | null]>)) {
     if (result.ok) {
       // Successfully parsed — run schema migration if this file type is versioned
       if (fileType && result.data !== null) {
@@ -400,7 +427,7 @@ export async function runOnce(config) {
   await runSingleCycle(config);
 }
 
-export async function runRebase(_config, _opts: any = {}) {
+export async function runRebase(_config, _opts: Record<string, unknown> = {}) {
   return { triggered: false, reason: "not applicable in athena-gated architecture" };
 }
 
@@ -430,7 +457,7 @@ function getLastWorkerReportedStatus(session, role) {
 async function recoverStaleWorkerSessions(config, stateDir, sessions) {
   const recoveredRoles = [];
 
-  for (const [role, session] of Object.entries(sessions || {}) as any[]) {
+  for (const [role, session] of Object.entries(sessions || {}) as Array<[string, WorkerSessionRecord]>) {
     if (session?.status !== "working") continue;
 
     const reportedStatus = getLastWorkerReportedStatus(session, role);
@@ -467,7 +494,7 @@ async function hasActiveWorkersAsync(config) {
     const stateDir = config.paths?.stateDir || "state";
     const sessions = await readJson(path.join(stateDir, "worker_sessions.json"), {});
     await recoverStaleWorkerSessions(config, stateDir, sessions);
-    return Object.values(sessions).some((s: any) => s?.status === "working");
+    return (Object.values(sessions) as WorkerSessionRecord[]).some(s => s?.status === "working");
   } catch { return false; }
 }
 
@@ -505,9 +532,11 @@ async function postCompletionCleanup(config) {
   try {
     const prsRes = await fetch(`${base}/pulls?state=open&per_page=50`, { headers });
     if (prsRes.ok) {
-      const openPrs: any = await prsRes.json();
+      const openPrsJson = await prsRes.json();
+      const openPrs = Array.isArray(openPrsJson) ? openPrsJson as GithubPullRequestSummary[] : [];
       const mergedRes = await fetch(`${base}/pulls?state=closed&per_page=50&sort=updated&direction=desc`, { headers });
-      const closedPrs: any = mergedRes.ok ? await mergedRes.json() : [];
+      const closedJson = mergedRes.ok ? await mergedRes.json() : [];
+      const closedPrs = Array.isArray(closedJson) ? closedJson as GithubPullRequestSummary[] : [];
       const mergedTitles = closedPrs
         .filter(p => p.merged_at)
         .map(p => String(p.title || "").toLowerCase().trim());
@@ -537,11 +566,13 @@ async function postCompletionCleanup(config) {
 
     const branchesRes = await fetch(`${base}/branches?per_page=100`, { headers });
     if (branchesRes.ok) {
-      const branches: any = await branchesRes.json();
+      const branchesJson = await branchesRes.json();
+      const branches = Array.isArray(branchesJson) ? branchesJson as GithubBranchSummary[] : [];
       const openPrBranches = new Set();
       const openPrsRes = await fetch(`${base}/pulls?state=open&per_page=100`, { headers });
       if (openPrsRes.ok) {
-        const ops: any = await openPrsRes.json();
+        const opsJson = await openPrsRes.json();
+        const ops = Array.isArray(opsJson) ? opsJson as GithubPullRequestSummary[] : [];
         for (const pr of ops) {
           if (pr.head?.ref) openPrBranches.add(pr.head.ref);
         }
@@ -596,10 +627,10 @@ async function dispatchWorker(config, plan) {
   return {
     roleName,
     status: result?.status || "unknown",
-    pr: (result as any)?.pr || result?.prUrl || null,
+    pr: result?.prUrl || null,
     summary: result?.summary || "",
     filesChanged: result?.filesTouched || "",
-    raw: String((result as any)?.raw || "").slice(0, 3000),
+    raw: String(result?.fullOutput || "").slice(0, 3000),
     verificationEvidence: result?.verificationEvidence || null
   };
 }
@@ -857,7 +888,7 @@ async function runSingleCycle(config) {
         .sort((a, b) => b - a);
       for (const idx of toRemove) {
         const plan = plans[idx];
-        warn(`[orchestrator] Plan "${String((plan as any)?.task || "unknown").slice(0, 60)}" has critical contract violation(s) — removing from dispatch`);
+        warn(`[orchestrator] Plan "${String(plan?.task || "unknown").slice(0, 60)}" has critical contract violation(s) — removing from dispatch`);
         plans.splice(idx, 1);
       }
       if (plans.length === 0) {
@@ -873,8 +904,8 @@ async function runSingleCycle(config) {
   // ── Lane diversity gate (Packet 6) ──
   try {
     const diversityResult = enforceLaneDiversity(plans);
-    if (!(diversityResult as any).ok) {
-      await appendProgress(config, `[LANE_DIVERSITY] Warning: ${(diversityResult as any).reason}`);
+    if (!diversityResult.meetsMinimum) {
+      await appendProgress(config, `[LANE_DIVERSITY] Warning: ${diversityResult.warning}`);
     }
   } catch (err) {
     warn(`[orchestrator] Lane diversity check failed (non-fatal): ${String(err?.message || err)}`);

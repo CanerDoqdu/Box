@@ -29,6 +29,62 @@ import { spawnAsync } from "./fs_utils.js";
 import { getRoleRegistry } from "./role_registry.js";
 import { checkPostMergeArtifact } from "./verification_gate.js";
 
+type EvolutionTask = {
+  task_id?: string;
+  title?: string;
+  scope?: string;
+  files_hint?: string[];
+  acceptance_criteria?: string[];
+  verification_commands?: string[];
+  risk_level?: string;
+  intervention_title?: string;
+  [key: string]: unknown;
+};
+
+type AthenaReview = {
+  approved?: boolean;
+  reason?: string;
+  issues?: string[];
+  actualOutcome?: string;
+  lessonLearned?: string;
+  followUpTask?: string;
+  [key: string]: unknown;
+};
+
+type PreparedEvolutionTask = EvolutionTask & {
+  title: string;
+  scope: string;
+  files_hint: string[];
+  acceptance_criteria: string[];
+  verification_commands: string[];
+};
+
+type ProgressTaskState = {
+  status: string;
+  attempts: number;
+  worker_result: unknown;
+  verification_passed: boolean | null;
+  athena_verdict: Record<string, unknown> | null;
+  completed_at: string | null;
+  error: string | null;
+};
+
+type PrChecksResult = {
+  ok: boolean;
+  passed: boolean;
+  failed: string[];
+  pending: string[];
+  total: number;
+  error?: string;
+};
+
+type SpawnAsyncResult = {
+  status: number;
+  stdout: string;
+  stderr: string;
+  timedOut?: boolean;
+};
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const PROGRESS_FILE = "state/evolution_progress.json";
@@ -134,7 +190,7 @@ function normalizeEvolutionTask(task) {
   };
 }
 
-export function shouldHaltOnPreReviewReject(config: any = {}) {
+export function shouldHaltOnPreReviewReject(config: { runtime?: { evolutionStopOnPreReviewReject?: boolean } } = {}) {
   return config.runtime?.evolutionStopOnPreReviewReject === true;
 }
 
@@ -149,7 +205,7 @@ function normalizeScope(scope, title = "") {
   return `Implement ${title || "the task"} with deterministic acceptance criteria and verifiable output.`;
 }
 
-export function repairPrometheusTask(task: any = {}) {
+export function repairPrometheusTask(task: EvolutionTask = {}): PreparedEvolutionTask {
   const repaired = {
     ...task,
     title: String(task.title || task.task_id || "Untitled task").trim(),
@@ -170,7 +226,7 @@ export function repairPrometheusTask(task: any = {}) {
   return repaired;
 }
 
-export function injectAthenaMissingItems(task, preReview: any = {}) {
+export function injectAthenaMissingItems(task: PreparedEvolutionTask, preReview: AthenaReview = {}): PreparedEvolutionTask {
   const issues = normalizeStringList(preReview.issues);
   const derivedIssues = issues.length > 0
     ? issues
@@ -200,19 +256,19 @@ export function injectAthenaMissingItems(task, preReview: any = {}) {
   });
 }
 
-function collectAthenaReviewText(preReview: any = {}) {
+function collectAthenaReviewText(preReview: AthenaReview = {}) {
   const issuesText = Array.isArray(preReview.issues)
     ? preReview.issues.join(" ")
     : "";
   return `${preReview.reason || ""} ${issuesText}`.trim();
 }
 
-export function shouldRetryAthenaPreReview(preReview: any = {}) {
+export function shouldRetryAthenaPreReview(preReview: AthenaReview = {}) {
   const text = collectAthenaReviewText(preReview);
   return ATHENA_RETRYABLE_REVIEW_PATTERNS.some(pattern => pattern.test(text));
 }
 
-export function hardenTaskForAthena(task, preReview: any = {}) {
+export function hardenTaskForAthena(task: PreparedEvolutionTask, preReview: AthenaReview = {}): PreparedEvolutionTask {
   const existingCriteria = Array.isArray(task.acceptance_criteria)
     ? task.acceptance_criteria
     : [];
@@ -293,7 +349,7 @@ export function assessStatusCheckRollup(rollup = []) {
 async function readPrChecks(config, prUrl) {
   const prNumber = parsePrNumber(prUrl);
   if (!prNumber) {
-    return { ok: false, error: "invalid-pr-url", passed: false, failed: [], pending: [] };
+    return { ok: false, error: "invalid-pr-url", passed: false, failed: [], pending: [], total: 0 };
   }
 
   const command = config.env?.ghCommand || "gh";
@@ -303,7 +359,7 @@ async function readPrChecks(config, prUrl) {
   }
 
   try {
-    const raw: any = await spawnAsync(command, args, { env: process.env, timeoutMs: 60_000 });
+    const raw = await spawnAsync(command, args, { env: process.env, timeoutMs: 60_000 }) as SpawnAsyncResult;
     const parsed = JSON.parse(String(raw?.stdout || "{}"));
     const summary = assessStatusCheckRollup(parsed?.statusCheckRollup || []);
     return { ok: true, ...summary };
@@ -313,7 +369,8 @@ async function readPrChecks(config, prUrl) {
       error: String(err?.message || err),
       passed: false,
       failed: [],
-      pending: []
+      pending: [],
+      total: 0
     };
   }
 }
@@ -395,7 +452,7 @@ function initProgress(cycleId, tasks) {
  * Ask Athena to validate a single evolution task before dispatching the worker.
  * Returns { approved, reason } — fail-closed: if Athena AI fails, approved=false.
  */
-async function runAthenaTaskReview(config, task) {
+async function runAthenaTaskReview(config, task: PreparedEvolutionTask) {
   const registry = getRoleRegistry(config);
   const athenaModel = registry?.qualityReviewer?.model || "Claude Sonnet 4.6";
   const command = config.env?.copilotCliCommand || "copilot";
@@ -440,10 +497,10 @@ Output your assessment, then:
 
   let aiResult;
   try {
-    const raw: any = await spawnAsync(command, args, {
+    const raw = await spawnAsync(command, args, {
       env: process.env,
       timeoutMs: config.runtime?.athenaReviewTimeoutMs || ATHENA_REVIEW_TIMEOUT_MS
-    });
+    }) as SpawnAsyncResult;
     if (raw?.timedOut) {
       return { approved: false, reason: "Athena pre-review timed out" };
     }
@@ -617,7 +674,7 @@ function extractAthenaVerdict(athenaResult) {
  * @param {string} [options.fromTaskId]  - force start from this task_id (skip prior)
  * @param {boolean} [options.dryRun]    - log plan but don't execute workers
  */
-export async function runEvolutionLoop(config, options: any = {}) {
+export async function runEvolutionLoop(config, options: { fromTaskId?: string; dryRun?: boolean } = {}) {
   const stateDir = config.paths?.stateDir || "state";
   const maxAttempts = config.runtime?.autonomousMaxAttemptsPerTask || DEFAULT_MAX_ATTEMPTS;
 
@@ -632,8 +689,8 @@ export async function runEvolutionLoop(config, options: any = {}) {
     progress = initProgress(cycleId, tasks);
     await saveProgress(stateDir, progress);
   } else {
-    const doneCount = Object.values(progress.tasks).filter((t: any) => t.status === "done").length;
-    const escalatedCount = Object.values(progress.tasks).filter((t: any) => t.status === "escalated").length;
+    const doneCount = Object.values(progress.tasks).filter((t: ProgressTaskState) => t.status === "done").length;
+    const escalatedCount = Object.values(progress.tasks).filter((t: ProgressTaskState) => t.status === "escalated").length;
     console.log(`[evolution] Resuming — ${doneCount} done, ${escalatedCount} escalated`);
   }
 
@@ -682,7 +739,7 @@ export async function runEvolutionLoop(config, options: any = {}) {
     console.log(`[evolution] Athena pre-reviewing task ${task.task_id}...`);
     await appendProgress(config, `[EVO] Athena pre-review — ${task.task_id}`);
     let activeTask = repairPrometheusTask(task);
-    let preReview = await runAthenaTaskReview(config, activeTask);
+    let preReview: AthenaReview = await runAthenaTaskReview(config, activeTask);
     console.log(`[evolution] Athena pre-review: ${preReview.approved ? "APPROVED" : "REJECTED"} — ${preReview.reason}`);
 
     if (!preReview.approved && shouldRetryAthenaPreReview(preReview)) {
@@ -790,7 +847,7 @@ export async function runEvolutionLoop(config, options: any = {}) {
       // 4d. PR checks gate (default fail-closed): if worker opened/updated a PR,
       // require all remote checks to be green before proceeding.
       const requireGreenPrChecks = config.runtime?.requireGreenPrChecks !== false;
-      let prChecks: any = { ok: true, passed: true, failed: [], pending: [], total: 0 };
+      let prChecks: PrChecksResult = { ok: true, passed: true, failed: [], pending: [], total: 0 };
       if (requireGreenPrChecks && workerResult.prUrl) {
         console.log("[evolution] Validating PR status checks...");
         prChecks = await readPrChecks(config, workerResult.prUrl);
@@ -903,7 +960,7 @@ export async function runEvolutionLoop(config, options: any = {}) {
   }
 
   // 5. Final summary
-  const finalCounts = Object.values(progress.tasks).reduce((acc: any, t: any) => {
+  const finalCounts = Object.values(progress.tasks).reduce((acc: Record<string, number>, t: ProgressTaskState) => {
     acc[t.status] = (acc[t.status] || 0) + 1;
     return acc;
   }, {});
