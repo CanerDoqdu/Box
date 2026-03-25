@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { toCopilotModelSlug } from "../../core/agent_loader.js";
+import { tagProviderDecision } from "../../core/trust_boundary.js";
 import { safeArray, tryExtractJson, validatePlan, validateDecision, validateOpusDecision } from "./utils.js";
 
 function validateAutonomyAudit(payload: Record<string, unknown> | null, fallback: { healthy: boolean; reason: string; notifyUser: boolean }): { healthy: boolean; reason: string; notifyUser: boolean } {
@@ -181,7 +182,7 @@ export class CopilotReviewer {
     return usage;
   }
 
-  requestJson<T>(prompt: string, fallback: T, validator: (payload: any, fallback: T) => T): T {
+  requestJson<T extends Record<string, unknown>>(prompt: string, fallback: T, validator: (payload: any, fallback: T) => T): T & { _source: "provider" | "fallback" } {
     const args = ["--allow-all-tools", "-p", String(prompt || "")];
     const slug = toCopilotModelSlug(this.model);
     if (slug) {
@@ -202,17 +203,17 @@ export class CopilotReviewer {
     if (result.status !== 0) {
       const errSnippet = stderr.slice(0, 200) || stdout.slice(0, 200);
       console.error(`[CopilotReviewer] copilot exited ${result.status}: ${errSnippet}`);
-      return fallback;
+      return tagProviderDecision(fallback, "fallback");
     }
 
     const parsed = tryExtractJson(merged);
     if (!parsed) {
       console.error(`[CopilotReviewer] failed to parse JSON from copilot output (${merged.length} chars)`);
-      return fallback;
+      return tagProviderDecision(fallback, "fallback");
     }
     const validated = validator(parsed, fallback);
     this.lastUsage = { model: this.model, provider: "copilot" };
-    return validated;
+    return tagProviderDecision(validated, "provider");
   }
 
   async reviewPlan(summary: Record<string, unknown>, tasks: unknown[]): Promise<{ tasks: unknown[] }> {

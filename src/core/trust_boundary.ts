@@ -497,3 +497,31 @@ export function trustBoundaryRetryDelayMs(attempt) {
   const { delayMs, multiplier } = TRUST_BOUNDARY_RETRY;
   return delayMs * Math.pow(multiplier, Math.max(0, attempt - 1));
 }
+
+// -- Provider decision tagging --------------------------------------------------
+
+/**
+ * Tag a reviewer provider decision with its source at the trust boundary.
+ *
+ * This is the canonical tagging point between untrusted AI output and the BOX
+ * orchestration pipeline. It makes fallback decisions explicit and machine-readable
+ * so callers can distinguish AI-produced decisions from deterministic fallbacks.
+ *
+ *   source="provider"  -- AI model returned a parseable, validated response.
+ *   source="fallback"  -- AI call failed (process error / parse failure);
+ *                         a deterministic fallback value is being used instead.
+ *
+ * Usage in provider requestJson methods:
+ *   return tagProviderDecision(validatedPayload, "provider");
+ *   return tagProviderDecision(fallback,         "fallback");
+ *
+ * @param decision  - validated decision payload
+ * @param source    - "provider" (AI response) | "fallback" (deterministic fallback)
+ * @returns decision with _source field attached
+ */
+export function tagProviderDecision<T extends Record<string, unknown>>(
+  decision: T,
+  source: "provider" | "fallback"
+): T & { _source: "provider" | "fallback" } {
+  return { ...decision, _source: source };
+}
