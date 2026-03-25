@@ -3,7 +3,7 @@
  *
  * After a worker reports "done", this module validates the response
  * against the role's verification profile. If required evidence is
- * missing or failed, it produces a rework instruction for Moses to
+ * missing or failed, it produces a rework instruction for Athena to
  * re-dispatch the worker with specific gap feedback.
  *
  * Anti-loop: max rework attempts are configurable (default 2).
@@ -264,7 +264,7 @@ export function validateWorkerContract(workerKind, parsedResponse, options: any 
  * @param {string[]} gaps — array of gap descriptions
  * @param {number} attempt — current rework attempt number (1-based)
  * @param {number} maxAttempts — maximum rework attempts allowed
- * @returns {object} — instruction object for Moses to re-dispatch
+ * @returns {object} — instruction object for Athena to re-dispatch
  */
 export function buildReworkInstruction(originalTask, gaps, attempt, maxAttempts) {
   const gapList = gaps.map((g, i) => `  ${i + 1}. ${g}`).join("\n");
@@ -314,7 +314,7 @@ export function decideRework(validationResult, originalTask, currentAttempt, max
   const nextAttempt = currentAttempt + 1;
 
   if (nextAttempt > maxAttempts) {
-    // Max retries exhausted — escalate to Moses, don't loop
+    // Max retries exhausted — escalate to Athena, don't loop
     return {
       shouldRework: false,
       instruction: null,

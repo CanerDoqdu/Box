@@ -304,7 +304,7 @@ describe("AC3 — reviewer contract (Athena) critical fields", () => {
 describe("AC3 — supervisor contract (Jesus) critical fields", () => {
   const VALID_SUPERVISOR = {
     decision: "tactical",
-    wakeMoses: true,
+    wakeAthena: true,
     callPrometheus: false,
     briefForPrometheus: "Proceed with planned work",
     systemHealth: "good"
@@ -328,10 +328,10 @@ describe("AC3 — supervisor contract (Jesus) critical fields", () => {
     assert.ok(result.errors.some(e => e.field === "decision"), "must flag 'decision' enum violation");
   });
 
-  it("wakeMoses must be boolean", () => {
-    const result = validateLeadershipContract("supervisor", { ...VALID_SUPERVISOR, wakeMoses: 1 });
+  it("wakeAthena must be boolean", () => {
+    const result = validateLeadershipContract("supervisor", { ...VALID_SUPERVISOR, wakeAthena: 1 });
     assert.equal(result.ok, false);
-    assert.ok(result.errors.some(e => e.field === "wakeMoses"), "must flag 'wakeMoses'");
+    assert.ok(result.errors.some(e => e.field === "wakeAthena"), "must flag 'wakeAthena'");
   });
 
   it("callPrometheus must be boolean", () => {
@@ -442,7 +442,7 @@ describe("AC14 negative path — execution blocked on invalid input (not just wa
     // This is the critical negative path: invalid supervisor output must BLOCK execution
     const badPayload = {
       // decision is missing
-      wakeMoses: true,
+      wakeAthena: true,
       callPrometheus: false,
       briefForPrometheus: "Do something",
       systemHealth: "good"

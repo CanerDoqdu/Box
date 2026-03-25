@@ -1093,8 +1093,8 @@ export function renderHtml(): string {
       }
       var lfJesusDetail = document.getElementById('lf-jesus-detail');
       if (lfJesusDetail) {
-        lfJesusDetail.textContent = jesus.briefForPrometheus || jesus.briefForMoses
-          ? String(jesus.briefForPrometheus || jesus.briefForMoses).slice(0, 130)
+        lfJesusDetail.textContent = jesus.briefForPrometheus || jesus.briefForAthena
+          ? String(jesus.briefForPrometheus || jesus.briefForAthena).slice(0, 130)
           : 'No directive yet';
       }
       var lfJesusReasoning = document.getElementById('lf-jesus-reasoning');
@@ -1386,7 +1386,7 @@ export function renderHtml(): string {
       var topBlocked = blockedTasks[0] || null;
       var health = String(jesus.systemHealth || 'unknown');
       var healthText = health === 'healthy' ? '🟢 Healthy' : health === 'critical' ? '🔴 Critical' : '🟡 Attention';
-      var nextAction = (jesus.briefForPrometheus || jesus.briefForMoses) ? String(jesus.briefForPrometheus || jesus.briefForMoses).slice(0, 120) : 'No immediate action';
+      var nextAction = (jesus.briefForPrometheus || jesus.briefForAthena) ? String(jesus.briefForPrometheus || jesus.briefForAthena).slice(0, 120) : 'No immediate action';
 
       document.getElementById('user-overview').textContent = 'System: ' + healthText + ' | Decision: ' + String(jesus.decision || 'unknown');
       document.getElementById('user-blocked').textContent = topBlocked
@@ -1453,8 +1453,8 @@ export function renderHtml(): string {
           : 'Estimated Premium Requests: not available';
       }
 
-      var mosesWorkers = (moses && moses.workers) ? { ...moses.workers } : {};
-      var names = Object.keys(mosesWorkers || {});
+      var athenaWorkers = (athena && athena.workers) ? { ...athena.workers } : {};
+      var names = Object.keys(athenaWorkers || {});
       var activeSlots = Object.keys(workerActivity || {}).filter(function(slot) {
         var live = workerActivity[slot] || {};
         return String(live.status || '').toLowerCase() === 'active';
@@ -1462,8 +1462,8 @@ export function renderHtml(): string {
 
       // Make leadership table reflect live worker slot activity when role summary is stale.
       var roleBySlot = {};
-      Object.keys(mosesWorkers || {}).forEach(function(name) {
-        var item = mosesWorkers[name] || {};
+      Object.keys(athenaWorkers || {}).forEach(function(name) {
+        var item = athenaWorkers[name] || {};
         var slot = String(item.slot || '').trim();
         if (slot) {
           roleBySlot[slot] = name;
@@ -1473,8 +1473,8 @@ export function renderHtml(): string {
       Object.keys(workerActivity || {}).forEach(function(slot) {
         var live = workerActivity[slot] || {};
         var mappedName = roleBySlot[slot] || String(live.roleName || '').trim() || slot;
-        if (!mosesWorkers[mappedName]) {
-          mosesWorkers[mappedName] = {
+        if (!athenaWorkers[mappedName]) {
+          athenaWorkers[mappedName] = {
             status: String(live.status || 'idle').toLowerCase(),
             task: live.taskTitle || null,
             gate_color: String(live.status || '').toLowerCase() === 'active' ? 'yellow' : 'green',
@@ -1482,11 +1482,11 @@ export function renderHtml(): string {
           };
           names.push(mappedName);
         } else if (String(live.status || '').toLowerCase() === 'active') {
-          mosesWorkers[mappedName] = {
-            ...mosesWorkers[mappedName],
+          athenaWorkers[mappedName] = {
+            ...athenaWorkers[mappedName],
             status: 'running',
-            task: live.taskTitle || mosesWorkers[mappedName].task || null,
-            gate_color: mosesWorkers[mappedName].gate_color === 'red' ? 'red' : 'yellow',
+            task: live.taskTitle || athenaWorkers[mappedName].task || null,
+            gate_color: athenaWorkers[mappedName].gate_color === 'red' ? 'red' : 'yellow',
             slot: slot
           };
         }
@@ -1495,10 +1495,10 @@ export function renderHtml(): string {
       // If no slot is active, do not keep stale "running" labels from old summaries.
       if (activeSlots.length === 0) {
         names.forEach(function(name) {
-          var item = mosesWorkers[name] || {};
+          var item = athenaWorkers[name] || {};
           var st = String(item.status || '').toLowerCase();
           if (st === 'running' || st === 'active') {
-            mosesWorkers[name] = {
+            athenaWorkers[name] = {
               ...item,
               status: 'idle',
               task: null,
@@ -1511,7 +1511,7 @@ export function renderHtml(): string {
       var chips = [];
       names.sort(function(a, b) { return String(a).localeCompare(String(b)); });
       names.forEach(function(name) {
-        var item = mosesWorkers[name] || {};
+        var item = athenaWorkers[name] || {};
         var gateColor = String(item.gate_color || statusColor(item.status));
         chips.push('<div class="worker-chip ' + esc(gateColor) + '">' +
           '<div><strong>' + esc(name) + '</strong></div>' +

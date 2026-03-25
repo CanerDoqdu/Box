@@ -1,12 +1,12 @@
 /**
- * Tests for T-013: Deprecate stale Moses references in learning loop.
+ * Tests for T-013: Deprecate stale Athena references in learning loop.
  *
  * Covers:
- *   AC1:  Outcome collector no longer relies on absent Moses artifacts.
+ *   AC1:  Outcome collector no longer relies on absent Athena artifacts.
  *   AC2:  Metrics derive from active orchestration state files
  *         (prometheus_analysis.json, evolution_progress.json, worker_sessions.json).
  *   AC3:  No null/empty learning cycles due to missing state files.
- *   AC5:  Tests cover no-Moses runtime (criterion 5 from task).
+ *   AC5:  Tests cover no-Athena runtime (criterion 5 from task).
  *   AC7:  Negative path — missing ALL state files → degraded=true with reason code.
  *   AC8:  Newly returned JSON fields (metricsSource, degraded, degradedReason) are present.
  *   AC9:  Missing input (ENOENT) vs invalid input (parse error) produce distinct reason codes.
@@ -19,7 +19,7 @@
  *      → degraded=true, degradedReason=PROMETHEUS_ABSENT
  *   3. prometheus_analysis present but invalid JSON
  *      → degraded=true, degradedReason=PROMETHEUS_INVALID
- *   4. moses_coordination.json present → ignored (legacy adapter removed)
+ *   4. athena_coordination.json present → ignored (legacy adapter removed)
  *   5. No state files at all
  *      → degraded=true, totalPlans=0, completedCount=0
  *   6. evolution_progress invalid JSON (distinct from missing)
@@ -120,9 +120,9 @@ describe("OUTCOME_DEGRADED_REASON", () => {
   });
 });
 
-// ── Scenario 1: No-Moses runtime (AC1, AC2, AC3, AC5) ────────────────────────
+// ── Scenario 1: No-Athena runtime (AC1, AC2, AC3, AC5) ────────────────────────
 
-describe("collectCycleOutcomes — no-Moses runtime", () => {
+describe("collectCycleOutcomes — no-Athena runtime", () => {
   let tmpDir;
   let result;
 
@@ -132,7 +132,7 @@ describe("collectCycleOutcomes — no-Moses runtime", () => {
     await writeTestJson(tmpDir, "evolution_progress.json", EVOLUTION_PROGRESS);
     await writeTestJson(tmpDir, "worker_sessions.json", WORKER_SESSIONS);
     await writeTestJson(tmpDir, "athena_plan_review.json", ATHENA_PLAN_REVIEW);
-    // Intentionally NO moses_coordination.json
+    // Intentionally NO athena_coordination.json
     result = await collectCycleOutcomes(makeConfig(tmpDir));
   });
 
@@ -160,11 +160,11 @@ describe("collectCycleOutcomes — no-Moses runtime", () => {
   it("metricsSource includes prometheus_analysis and evolution_progress", () => {
     assert.ok(result.metricsSource.includes("prometheus_analysis"), "must credit prometheus_analysis");
     assert.ok(result.metricsSource.includes("evolution_progress"), "must credit evolution_progress");
-    assert.ok(!result.metricsSource.includes("moses_coordination"), "must not include Moses source");
+    assert.ok(!result.metricsSource.includes("athena_coordination"), "must not include Athena source");
   });
 
-  it("dispatches does not rely on moses dispatchLog", () => {
-    // With no Moses file and no worker activity files, dispatches is empty (not null).
+  it("dispatches does not rely on Athena dispatchLog", () => {
+    // With no Athena file and no worker activity files, dispatches is empty (not null).
     assert.ok(Array.isArray(result.dispatches), "dispatches must be an array");
   });
 
@@ -277,9 +277,9 @@ describe("collectCycleOutcomes — prometheus_analysis missing plans array", () 
   });
 });
 
-// ── Scenario 5: moses_coordination.json present but ignored (adapter removed) ─
+// ── Scenario 5: athena_coordination.json present but ignored (adapter removed) ─
 
-describe("collectCycleOutcomes — moses_coordination.json present but ignored", () => {
+describe("collectCycleOutcomes — athena_coordination.json present but ignored", () => {
   let tmpDir;
   let result;
 
@@ -288,8 +288,8 @@ describe("collectCycleOutcomes — moses_coordination.json present but ignored",
     await writeTestJson(tmpDir, "prometheus_analysis.json", PROMETHEUS_ANALYSIS);
     await writeTestJson(tmpDir, "evolution_progress.json", EVOLUTION_PROGRESS);
     await writeTestJson(tmpDir, "worker_sessions.json", WORKER_SESSIONS);
-    // Legacy Moses file still present on disk — should be ignored
-    await writeTestJson(tmpDir, "moses_coordination.json", {
+    // Legacy Athena file still present on disk — should be ignored
+    await writeTestJson(tmpDir, "athena_coordination.json", {
       completedTasks: ["T-001", "T-LEGACY-001"],
       dispatchLog: [{ role: "old-worker", task: "T-LEGACY-001", status: "done" }]
     });
@@ -300,14 +300,14 @@ describe("collectCycleOutcomes — moses_coordination.json present but ignored",
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
-  it("completedCount only reflects evolution_progress (Moses ignored)", () => {
+  it("completedCount only reflects evolution_progress (Athena ignored)", () => {
     // evolution has only T-001 completed; legacy T-LEGACY-001 is NOT merged
     assert.equal(result.completedCount, 1, "must only count evolution-derived completed tasks");
   });
 
-  it("metricsSource does NOT include moses_coordination", () => {
-    assert.ok(!result.metricsSource.includes("moses_coordination"),
-      "must not reference moses_coordination in metricsSource");
+  it("metricsSource does NOT include athena_coordination", () => {
+    assert.ok(!result.metricsSource.includes("athena_coordination"),
+      "must not reference athena_coordination in metricsSource");
   });
 
   it("degraded=false — primary sources are present", () => {

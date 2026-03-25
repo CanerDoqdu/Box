@@ -7,7 +7,7 @@ import { readJson, writeJson, writeJsonAtomic } from "./fs_utils.js";
 const SHUTDOWN_CLEAR_FILES = [
   "jesus_directive.json",
   "prometheus_analysis.json",
-  "moses_coordination.json",
+  "athena_coordination.json",
   "worker_sessions.json",
   "jesus_escalation.json",
   "daemon.pid.json",

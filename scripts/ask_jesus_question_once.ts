@@ -47,7 +47,7 @@ Return ONLY strict JSON:
   "whatIDo": [string],
   "whatIDontDo": [string],
   "howIStrategicVsTactical": string,
-  "howICoordinateMosesAndWorkers": string,
+  "howICoordinateAthenaAndWorkers": string,
   "operatorAdvice": string
 }
 Use concise Turkish.`;

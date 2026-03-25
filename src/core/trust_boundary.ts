@@ -24,7 +24,7 @@
  * ── Critical contract fields per provider type (AC3 / Athena missing item #3) ─
  *   planner   (Prometheus): plans, analysis, projectHealth, executionStrategy, requestBudget
  *   reviewer  (Athena):     approved, corrections, planReviews
- *   supervisor(Jesus):      decision, wakeMoses, callPrometheus, briefForPrometheus, systemHealth
+ *   supervisor(Jesus):      decision, wakeAthena, callPrometheus, briefForPrometheus, systemHealth
  *
  * ── Error format (AC4) ───────────────────────────────────────────────────────
  *   Each error entry includes: { field, reasonCode, message, payloadPath, sourceFile }
@@ -138,7 +138,7 @@ export const TRUST_BOUNDARY_REASON = Object.freeze({
  *
  * planner   — Prometheus analysis output (plans, projectHealth, executionStrategy, ...)
  * reviewer  — Athena plan-review output (approved, corrections, planReviews)
- * supervisor — Jesus directive output (decision, wakeMoses, callPrometheus, briefForPrometheus, ...)
+ * supervisor — Jesus directive output (decision, wakeAthena, callPrometheus, briefForPrometheus, ...)
  *
  * @enum {string}
  */

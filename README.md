@@ -7,7 +7,7 @@
 - Runtime entrypoint: `src/cli.ts`
 - Config loader: `src/config.ts`
 - Main orchestration loop: `src/core/orchestrator.ts`
-- Leadership coordination: `src/core/jesus_supervisor.ts`, `src/core/moses_coordinator.ts`
+- Leadership coordination: `src/core/jesus_supervisor.ts`, `src/core/athena_reviewer.ts`
 - Worker conversation runner: `src/core/worker_runner.ts`
 
 ## Requirements

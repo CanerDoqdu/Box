@@ -182,7 +182,10 @@ function buildConversationContext(history, instruction, sessionState: any = {}, 
   } catch { /* knowledge memory not available yet — no-op */ }
 
   // Loop detection — inject a visible warning before history if the worker is stuck
-  const myMessages = history.filter(m => m.from !== "moses" && m.from !== "prometheus");
+  const myMessages = history.filter(m => {
+    const from = String(m?.from || "").toLowerCase();
+    return from !== "athena" && from !== "prometheus";
+  });
   const recentOwn = myMessages.slice(-3);
   const allFailed = recentOwn.length >= 2 && recentOwn.every(m =>
     m.status === "error" || m.status === "blocked" ||
@@ -217,7 +220,8 @@ function buildConversationContext(history, instruction, sessionState: any = {}, 
     parts.push("## CONVERSATION HISTORY");
     const recentHistory = history.slice(-12);
     for (const msg of recentHistory) {
-      if (msg.from === "moses" || msg.from === "prometheus") {
+      const from = String(msg?.from || "").toLowerCase();
+      if (from === "athena" || from === "prometheus") {
         parts.push(`\nINSTRUCTION: ${truncate(msg.content, 600)}`);
       } else {
         parts.push(`\nYOU (${msg.from}): ${truncate(msg.content, 800)}`);

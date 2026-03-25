@@ -7,7 +7,7 @@
  *   → back to Prometheus for next iteration
  *
  * Each agent uses exactly 1 premium request per invocation (single-prompt).
- * No autopilot. No Moses — Jesus orchestrates, Prometheus plans, Athena gates.
+ * No autopilot. Jesus orchestrates, Prometheus plans, Athena gates.
  *
  * Startup:
  *   1. Read last checkpoint (worker_sessions.json + prometheus_analysis.json)

@@ -122,7 +122,7 @@ Source of truth:
 
 Current named roles:
 - CEO Supervisor: `Jesus`
-- Lead Worker: `Moses`
+- Lead Worker: `Athena`
 - Backend: `King David`
 - Frontend: `Esther`
 - API: `Aaron`
@@ -195,8 +195,8 @@ User notification channel:
 - Progress stream in `state/progress.txt`
 
 Humanized chain messaging:
-- Worker reports to `Moses`.
-- `Moses` reports to `Jesus`.
+- Worker reports to `Athena`.
+- `Athena` reports to `Jesus`.
 - `Jesus` escalates to user when autonomous recovery cannot close the loop safely.
 
 ## 7) State Contract (Operational Files)
@@ -1035,11 +1035,11 @@ This keeps BOX self-optimizing without allowing unbounded autonomous mutation of
 
 BOX leadership reporting now follows a strict chain:
 
-- Worker (`King David`, `Esther`, etc.) -> `Moses`
-- `Moses` -> `Jesus`
+- Worker (`King David`, `Esther`, etc.) -> `Athena`
+- `Athena` -> `Jesus`
 - `Jesus` -> User
 
-### 17.1 Worker -> Moses (`state/worker_activity.json`)
+### 17.1 Worker -> Athena (`state/worker_activity.json`)
 
 Worker slot telemetry continues under `workers`, and role-centric worker reports are materialized under `roles`.
 
@@ -1056,7 +1056,7 @@ Color policy:
 - `yellow`: running, queued, parked, cooldown-like progression
 - `red`: blocked/failed
 
-### 17.2 Moses -> Jesus (`state/moses_summary.json`)
+### 17.2 Athena -> Jesus (`state/athena_summary.json`)
 
 Leader aggregation includes:
 - Worker capacity snapshot: `active_workers`, `idle_workers`, `blocked_workers`
@@ -1073,13 +1073,13 @@ Central monitor report includes:
 - Queue and backlog pressure: `queue_length`, `backlog_total`
 - Problem task list: `blocked_tasks` with `suggested_action`
 - Escalation context: `alerts`, `escalation_triggers`
-- Embedded `moses_summary`
+- Embedded `athena_summary`
 
 ### 17.4 Dashboard API Exposure
 
 `/api/state` exposes leadership reports under:
-- `leadership.moses`
+- `leadership.athena`
 - `leadership.jesus`
 
-This enables direct rendering of Worker/Moses/Jesus views in live monitoring surfaces
-This enables direct rendering of Worker/Moses/Jesus views in live monitoring surfaces.
+This enables direct rendering of Worker/Athena/Jesus views in live monitoring surfaces
+This enables direct rendering of Worker/Athena/Jesus views in live monitoring surfaces.

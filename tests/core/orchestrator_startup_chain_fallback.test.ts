@@ -21,14 +21,14 @@ describe("orchestrator startup chain fallback", () => {
         policyFile: path.join(tmpDir, "policy.json")
       },
       env: {
-        // Force all Copilot agent calls (Jesus/Prometheus/Moses) into deterministic fallback paths.
+        // Force all Copilot agent calls (Jesus/Prometheus/Athena) into deterministic fallback paths.
         copilotCliCommand: "__missing_copilot_binary__",
         targetRepo: "CanerDoqdu/Box"
       },
       roleRegistry: {
         ceoSupervisor: { name: "Jesus", model: "Claude Sonnet 4.6" },
         deepPlanner: { name: "Prometheus", model: "GPT-5.3-Codex" },
-        leadWorker: { name: "Moses", model: "Claude Sonnet 4.6" },
+        leadWorker: { name: "Athena", model: "Claude Sonnet 4.6" },
         workers: {
           backend: { name: "King David" },
           test: { name: "Samuel" }

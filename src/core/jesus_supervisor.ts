@@ -40,11 +40,11 @@ async function callCopilotAgent(command, agentSlug, contextPrompt) {
 
 // ── Hierarchical System Health Audit ─────────────────────────────────────────
 // Jesus runs this audit on every cycle. It checks for structural problems that
-// workers and Moses might have missed. When gaps are found, they're injected
+// workers and Athena might have missed. When gaps are found, they're injected
 // into the Jesus directive as specific remediation items AND fed to the self-
 // improvement system as capability gaps.
 
-async function runSystemHealthAudit(config, githubState, mosesCoordination, sessions) {
+async function runSystemHealthAudit(config, githubState, AthenaCoordination, sessions) {
   const findings = [];
 
   // 1. CI Health — is main branch green?
@@ -119,11 +119,11 @@ async function runSystemHealthAudit(config, githubState, mosesCoordination, sess
     });
   }
 
-  // 5. Moses coordination gaps — did Moses complete all planned waves?
-  const completedTasks = Array.isArray(mosesCoordination?.completedTasks)
-    ? mosesCoordination.completedTasks : [];
-  const executionWaves = Array.isArray(mosesCoordination?.executionStrategy?.waves)
-    ? mosesCoordination.executionStrategy.waves : [];
+  // 5. Athena coordination gaps — did Athena complete all planned waves?
+  const completedTasks = Array.isArray(AthenaCoordination?.completedTasks)
+    ? AthenaCoordination.completedTasks : [];
+  const executionWaves = Array.isArray(AthenaCoordination?.executionStrategy?.waves)
+    ? AthenaCoordination.executionStrategy.waves : [];
   if (executionWaves.length > 0) {
     const incompleteWaves = executionWaves.filter(w => {
       const waveId = String(w?.id || "").trim().toLowerCase();
@@ -134,7 +134,7 @@ async function runSystemHealthAudit(config, githubState, mosesCoordination, sess
         area: "execution-gaps",
         severity: "important",
         finding: `${incompleteWaves.length} wave(s) not yet completed: ${incompleteWaves.map(w => w.id).join(", ")}`,
-        remediation: "Continue execution of incomplete waves in next Moses cycle",
+        remediation: "Continue execution of incomplete waves in next Athena cycle",
         capabilityNeeded: "wave-continuation"
       });
     }
@@ -349,20 +349,20 @@ export async function runJesusCycle(config) {
   // Read all state (no budget)
   const [
     lastDirective,
-    mosesCoordination,
+    AthenaCoordination,
     prometheusAnalysis,
     githubState,
     sessions
   ] = await Promise.all([
     readJson(path.join(stateDir, "jesus_directive.json"), {}),
-    readJson(path.join(stateDir, "moses_coordination.json"), {}),
+    readJson(path.join(stateDir, "athena_coordination.json"), {}),
     readJson(path.join(stateDir, "prometheus_analysis.json"), {}),
     fetchGitHubState(config),
     readJson(path.join(stateDir, "worker_sessions.json"), {})
   ]);
 
   // ── Hierarchical Health Audit — detect what lower layers missed ──────────
-  const healthFindings = await runSystemHealthAudit(config, githubState, mosesCoordination, sessions);
+  const healthFindings = await runSystemHealthAudit(config, githubState, AthenaCoordination, sessions);
   if (healthFindings.length > 0) {
     const criticalCount = healthFindings.filter(f => f.severity === "critical").length;
     await appendProgress(config, `[JESUS][AUDIT] ${healthFindings.length} finding(s) — ${criticalCount} critical`);
@@ -392,7 +392,7 @@ export async function runJesusCycle(config) {
 
   // Reuse directive if: (a) state unchanged + workers busy, OR (b) directive is very fresh with pending work
   const hasPendingWork = Array.isArray(lastDirective?.workItems) && lastDirective.workItems.length > 0;
-  const isFreshDirective = minutesSinceLast < 2 && hasPendingWork && lastDirective?.wakeMoses;
+  const isFreshDirective = minutesSinceLast < 2 && hasPendingWork && lastDirective?.wakeAthena;
   const directiveFreshnessMins = Number(config.runtime?.jesusDirectiveFreshnessMinutes) || 30;
   if (
     (minutesSinceLast < directiveFreshnessMins && lastDirective?.decision && lastDirective?.githubStateHash === ghFingerprint && activeSessions > 0) ||
@@ -471,8 +471,8 @@ ${githubState.recentlyMergedPrs.length > 0
   : "  No recently merged PRs"}
 
 **Last Coordination:**
-${mosesCoordination?.summary ? `  ${mosesCoordination.summary}` : "  No previous coordination"}
-${mosesCoordination?.completedTasks ? `  Completed tasks: ${mosesCoordination.completedTasks}` : ""}
+${AthenaCoordination?.summary ? `  ${AthenaCoordination.summary}` : "  No previous coordination"}
+${AthenaCoordination?.completedTasks ? `  Completed tasks: ${AthenaCoordination.completedTasks}` : ""}
 
 **Prometheus's Last Analysis:**
 ${prometheusAnalysis?.projectHealth ? `  Health: ${prometheusAnalysis.projectHealth}` : "  No analysis available"}
@@ -486,9 +486,9 @@ ${prometheusAnalysis?.projectClassification ? `  Project type: ${prometheusAnaly
   Prometheus age: ${prometheusAgeHours < Infinity ? `${prometheusAgeHours.toFixed(1)}h` : "never"}
 ${capacityTrendBlock}
 
-**Hierarchical System Health Audit (detected by YOU — issues workers/Moses may have missed):**
+**Hierarchical System Health Audit (detected by YOU — issues workers/Athena may have missed):**
 ${formatHealthAuditFindings(healthFindings)}
-${healthFindings.filter(f => f.severity === "critical").length > 0 ? "\n⚠️ CRITICAL FINDINGS ABOVE — these MUST be addressed. Workers and Moses missed them." : ""}
+${healthFindings.filter(f => f.severity === "critical").length > 0 ? "\n⚠️ CRITICAL FINDINGS ABOVE — these MUST be addressed. Workers and Athena missed them." : ""}
 ${healthFindings.filter(f => f.area === "capability-gap").length > 0 ? "\n⚠️ CAPABILITY GAPS DETECTED — the system is missing abilities that caused failures. Consider requesting Prometheus to plan fixes." : ""}
 
 **Available Workers:**
@@ -503,7 +503,7 @@ ${workersList}`;
     const needsPrometheus = prometheusAgeHours > 6;
     return {
       wait: false,
-      wakeMoses: true,
+      wakeAthena: true,
       callPrometheus: needsPrometheus,
       prometheusReason: needsPrometheus ? "AI call failed and no recent Prometheus analysis — must scan" : undefined,
       decision: "tactical",
@@ -538,7 +538,7 @@ ${workersList}`;
     const needsPrometheus = prometheusAgeHours > 6;
     return {
       wait: false,
-      wakeMoses: true,
+      wakeAthena: true,
       callPrometheus: needsPrometheus,
       prometheusReason: needsPrometheus ? "Trust-boundary violation in supervisor output and no recent Prometheus analysis" : undefined,
       decision: "tactical",
@@ -581,10 +581,10 @@ ${workersList}`;
   }
 
   chatLog(stateDir, jesusName,
-    `Decision: ${d.decision || "?"} | Health: ${d.systemHealth || "?"} | callPrometheus: ${d.callPrometheus} | wakeMoses: ${d.wakeMoses}`
+    `Decision: ${d.decision || "?"} | Health: ${d.systemHealth || "?"} | callPrometheus: ${d.callPrometheus} | wakeAthena: ${d.wakeAthena}`
   );
   await appendProgress(config,
-    `[JESUS] decision=${d.decision} health=${d.systemHealth} callPrometheus=${d.callPrometheus} wakeMoses=${d.wakeMoses}`
+    `[JESUS] decision=${d.decision} health=${d.systemHealth} callPrometheus=${d.callPrometheus} wakeAthena=${d.wakeAthena}`
   );
 
   // ── Capacity Delta Report (Packet 13) ──────────────────────────────────
