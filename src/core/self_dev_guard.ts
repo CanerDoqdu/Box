@@ -20,7 +20,7 @@
  */
 
 // Unused imports kept as _prefixed for future recovery flows
-import _path from "node:path"; // eslint-disable-line no-unused-vars
+import _path from "node:path";  
 
 // ── Critical paths that must NEVER be modified by workers during self-dev ─────
 
