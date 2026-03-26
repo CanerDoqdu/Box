@@ -609,6 +609,13 @@ async function tryResumeDispatchFromCheckpoint(config, options: { force?: boolea
 
     await waitForWorkersToFinish(config);
     await updateDispatchCheckpointProgress(config, checkpoint, index + 1);
+
+    // Inter-batch rate-limit cooldown to avoid transient API errors
+    const resumeDelay = Number(config?.runtime?.interBatchDelayMs || 90000);
+    if (index + 1 < workerBatches.length && resumeDelay > 0) {
+      await appendProgress(config, `[RESUME] Inter-batch cooldown ${Math.round(resumeDelay / 1000)}s to avoid rate limits`);
+      await sleep(resumeDelay);
+    }
   }
 
   await completeDispatchCheckpoint(config, checkpoint);
@@ -1326,6 +1333,13 @@ async function runSingleCycle(config) {
     workersDone += 1;
     await updateDispatchCheckpointProgress(config, dispatchCheckpoint, workersDone);
     await waitForWorkersToFinish(config);
+
+    // Inter-batch rate-limit cooldown to avoid transient API errors
+    const cycleDelay = Number(config?.runtime?.interBatchDelayMs || 90000);
+    if (workersDone < workerBatches.length && cycleDelay > 0) {
+      await appendProgress(config, `[CYCLE] Inter-batch cooldown ${Math.round(cycleDelay / 1000)}s to avoid rate limits`);
+      await sleep(cycleDelay);
+    }
   }
 
   await completeDispatchCheckpoint(config, dispatchCheckpoint);
