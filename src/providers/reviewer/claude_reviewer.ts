@@ -1,5 +1,7 @@
 import { tryExtractJson, validatePlan, validateDecision, validateOpusDecision } from "./utils.js";
 import { tagProviderDecision } from "../../core/trust_boundary.js";
+import { emitEvent } from "../../core/logger.js";
+import { EVENTS, EVENT_DOMAIN } from "../../core/event_schema.js";
 
 const API_URL = "https://api.anthropic.com/v1/messages";
 
@@ -80,6 +82,10 @@ export class ClaudeReviewer {
     // All retries exhausted -- return tagged fallback so callers can inspect _source="fallback".
     const failReason = lastError instanceof Error ? lastError.message : String(lastError);
     console.error(`[ClaudeReviewer] all retries exhausted, using deterministic fallback: ${failReason}`);
+    emitEvent(EVENTS.POLICY_PROVIDER_FALLBACK_DECISION, EVENT_DOMAIN.POLICY, `provider-fallback-${Date.now()}`, {
+      source: "fallback",
+      fallbackReason: failReason
+    });
     return tagProviderDecision(fallback, "fallback", failReason);
   }
 

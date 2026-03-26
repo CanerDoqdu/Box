@@ -3,7 +3,7 @@
  *
  * Flow per cycle:
  *   Jesus (orchestrator/state analyzer) → Prometheus (full scan + plan)
- *   → Athena (validate plan) → Worker(s) → Athena (postmortem)
+ *   → Athena (validate plan) → Worker(s)
  *   → back to Prometheus for next iteration
  *
  * Each agent uses exactly 1 premium request per invocation (single-prompt).
@@ -23,12 +23,13 @@ import { readStopRequest, writeDaemonPid, clearDaemonPid, clearStopRequest, read
 import { loadConfig } from "../config.js";
 import { runJesusCycle } from "./jesus_supervisor.js";
 import { runPrometheusAnalysis } from "./prometheus.js";
-import { runAthenaPlanReview, runAthenaPostmortem } from "./athena_reviewer.js";
+import { runAthenaPlanReview } from "./athena_reviewer.js";
 import { runWorkerConversation } from "./worker_runner.js";
 import { runSelfImprovementCycle, shouldTriggerSelfImprovement } from "./self_improvement.js";
 import { collectEvolutionMetrics } from "./evolution_metrics.js";
 import { capturePreWorkBaseline, runProjectCompletion, isProjectAlreadyCompleted } from "./project_lifecycle.js";
-import { warn } from "./logger.js";
+import { warn, emitEvent } from "./logger.js";
+import { EVENTS, EVENT_DOMAIN } from "./event_schema.js";
 import { readJson, readJsonSafe, writeJson, cleanupStaleTempFiles, READ_JSON_REASON } from "./fs_utils.js";
 import { updatePipelineProgress, readPipelineProgress } from "./pipeline_progress.js";
 import { loadEscalationQueue, sortEscalationQueue } from "./escalation_queue.js";
@@ -58,6 +59,7 @@ import { isGovernanceCanaryBreachActive } from "./governance_canary.js";
 import { executeRollback, ROLLBACK_LEVEL, ROLLBACK_TRIGGER } from "./rollback_engine.js";
 import { initializeAggregateLiveLog } from "./live_log.js";
 import { buildRoleExecutionBatches } from "./worker_batch_planner.js";
+import { agentFileExists, nameToSlug } from "./agent_loader.js";
 
 /**
  * Orchestrator health status enum.
@@ -503,7 +505,9 @@ async function tryResumeDispatchFromCheckpoint(config, options: { force?: boolea
 
   const athenaReview = await readJson(path.join(stateDir, "athena_plan_review.json"), null);
   const prometheusAnalysis = await readJson(path.join(stateDir, "prometheus_analysis.json"), null);
-  const plans = Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans : [];
+  const plans = Array.isArray(athenaReview?.patchedPlans) && athenaReview.patchedPlans.length > 0
+    ? athenaReview.patchedPlans
+    : (Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans : []);
   if (!athenaReview?.approved || plans.length === 0) return false;
   const workerBatches = buildRoleExecutionBatches(plans, config);
   if (workerBatches.length === 0) return false;
@@ -526,6 +530,33 @@ async function tryResumeDispatchFromCheckpoint(config, options: { force?: boolea
   if (startIndex >= workerBatches.length) {
     await completeDispatchCheckpoint(config, checkpoint);
     return false;
+  }
+
+  // Pre-dispatch governance gate — same checks as runSingleCycle to prevent
+  // resuming into a frozen/canary-breached/guardrail-paused state.
+  const resumeCycleId = `resume-${Date.now()}`;
+  try {
+    const gateDecision = await evaluatePreDispatchGovernanceGate(config, plans, resumeCycleId);
+    emitEvent(EVENTS.GOVERNANCE_GATE_EVALUATED, EVENT_DOMAIN.GOVERNANCE, resumeCycleId, {
+      blocked: gateDecision.blocked,
+      reason: gateDecision.reason || null,
+      inputSnapshot: { planCount: plans.length, resumedFromCheckpoint: true, startIndex }
+    });
+    if (gateDecision.blocked) {
+      const reasonMsg = gateDecision.reason || "pre_dispatch_gate_blocked";
+      await appendProgress(config,
+        `[RESUME] Pre-dispatch governance gate blocked resumed dispatch — reason=${reasonMsg}`
+      );
+      await appendAlert(config, {
+        severity: ALERT_SEVERITY.HIGH,
+        source: "orchestrator",
+        title: "Resumed worker dispatch blocked by pre-dispatch governance gate",
+        message: `reason=${reasonMsg} action=${gateDecision.action || "none"} cycleId=${resumeCycleId}`
+      });
+      return true;
+    }
+  } catch (err) {
+    warn(`[orchestrator] Pre-dispatch governance gate failed during resume (non-fatal): ${String(err?.message || err)}`);
   }
 
   await appendProgress(config,
@@ -567,13 +598,6 @@ async function tryResumeDispatchFromCheckpoint(config, options: { force?: boolea
       await appendProgress(config, `[RESUME] Worker ${batch.role} failed: ${msg}`);
       warn(`[orchestrator] resumed worker dispatch error: ${msg}`);
       workerResult = { roleName: batch.role, status: "error", summary: msg };
-    }
-
-    await appendProgress(config, `[RESUME] ── Step 5: Athena postmortem for ${batch.role} ──`);
-    try {
-      await runAthenaPostmortem(config, workerResult, batch);
-    } catch (err) {
-      await appendProgress(config, `[RESUME] Athena postmortem failed for ${batch.role}: ${String(err?.message || err)}`);
     }
 
     if (!isDispatchOutcomeSuccessful(workerResult)) {
@@ -632,7 +656,7 @@ export async function runResumeDispatch(config) {
 
   const resumed = await tryResumeDispatchFromCheckpoint(config, { force: true });
   if (!resumed) {
-    throw new Error("No resumable Step-4 checkpoint found (athena_plan_review approved + prometheus plans required)");
+    throw new Error("No resumable Step-4 checkpoint found (approved Athena review + plans required)");
   }
 }
 
@@ -816,10 +840,28 @@ async function postCompletionCleanup(config) {
   }
 }
 
+// ── Resolve logical plan role to actual worker agent ────────────────────────
+
+const IMPLEMENTATION_WORKER = "evolution-worker";
+
+function resolveWorkerRole(logicalRole, taskKind) {
+  const role = String(logicalRole || "").toLowerCase().trim();
+  // If the role already has a dedicated agent file, use it as-is
+  const slug = nameToSlug(role);
+  if (slug && agentFileExists(slug)) return logicalRole;
+  // For implementation tasks without an agent file, fall back to evolution-worker
+  const kind = String(taskKind || "").toLowerCase();
+  if (!kind || kind === "implementation") return IMPLEMENTATION_WORKER;
+  return IMPLEMENTATION_WORKER;
+}
+
 // ── Dispatch a single worker from a Prometheus plan item ───────────────────
 
 async function dispatchWorker(config, plan) {
-  const roleName = plan.role;
+  // Resolve actual worker agent: plan.role is a logical category ("orchestrator", "athena", etc.).
+  // Map roles without a dedicated .agent.md to "evolution-worker" for implementation tasks.
+  const logicalRole = plan.role;
+  const roleName = resolveWorkerRole(logicalRole, plan.taskKind || plan.kind || "implementation");
   const batchPlans = Array.isArray(plan?.plans) ? plan.plans : null;
   const task = batchPlans
     ? `Execute this bundled work package in a single worker session.\n${batchPlans.map((item, i) => `${i + 1}. ${String(item?.task || item?.title || "Untitled task")}`).join("\n")}`
@@ -1085,6 +1127,11 @@ async function runSingleCycle(config) {
     const rejectionReason = planReview.reason || { code: "PLAN_REJECTED", message: planReview.summary || "Rejected by Athena" };
     const correctionsList = planReview.corrections || [];
     await appendProgress(config, `[CYCLE] Athena REJECTED plan — code=${typeof rejectionReason === "object" ? rejectionReason.code : rejectionReason} corrections: ${correctionsList.join("; ")}`);
+    emitEvent(EVENTS.PLANNING_PLAN_REJECTED, EVENT_DOMAIN.PLANNING, `plan-reject-${Date.now()}`, {
+      code: typeof rejectionReason === "object" ? (rejectionReason as Record<string, unknown>).code : String(rejectionReason),
+      corrections: correctionsList,
+      summary: planReview.summary || ""
+    });
     // Save rejection for Prometheus to read on next cycle
     await writeJson(path.join(stateDir, "athena_plan_rejection.json"), {
       rejectedAt: new Date().toISOString(),
@@ -1098,7 +1145,9 @@ async function runSingleCycle(config) {
   await safeUpdatePipelineProgress(config, "athena_approved", "Athena approved the plan");
 
   // Step 4: Dispatch workers sequentially (1 request per worker)
-  const plans = prometheusAnalysis.plans;
+  const plans = Array.isArray(planReview.patchedPlans) && planReview.patchedPlans.length > 0
+    ? planReview.patchedPlans
+    : prometheusAnalysis.plans;
 
   // ── Capability pool: assign workers based on task capability matching ──────
   try {
@@ -1163,6 +1212,11 @@ async function runSingleCycle(config) {
     const cycleId = `cycle-${Date.now()}`;
     try {
       const gateDecision = await evaluatePreDispatchGovernanceGate(config, plans, cycleId);
+      emitEvent(EVENTS.GOVERNANCE_GATE_EVALUATED, EVENT_DOMAIN.GOVERNANCE, cycleId, {
+        blocked: gateDecision.blocked,
+        reason: gateDecision.reason || null,
+        inputSnapshot: { planCount: plans.length, cycleId }
+      });
       if (gateDecision.blocked) {
         const reasonMsg = gateDecision.reason || "pre_dispatch_gate_blocked";
         await appendProgress(config,
@@ -1262,13 +1316,6 @@ async function runSingleCycle(config) {
       workerResult = { roleName: batch.role, status: "error", summary: msg };
     }
 
-    await appendProgress(config, `[CYCLE] ── Step 5: Athena postmortem for ${batch.role} ──`);
-    try {
-      await runAthenaPostmortem(config, workerResult, batch);
-    } catch (err) {
-      await appendProgress(config, `[CYCLE] Athena postmortem failed for ${batch.role}: ${String(err?.message || err)}`);
-    }
-
     if (!isDispatchOutcomeSuccessful(workerResult)) {
       await appendProgress(config,
         `[CYCLE] Worker batch ${workersDone + 1}/${workerBatches.length} ended with status=${workerResult?.status || "unknown"}; checkpoint not advanced so it can be retried`
@@ -1288,7 +1335,7 @@ async function runSingleCycle(config) {
     workersDone: workerBatches.length
   });
 
-  await appendProgress(config, "[CYCLE] ── All workers dispatched and reviewed — cycle complete ──");
+  await appendProgress(config, "[CYCLE] ── All workers dispatched — cycle complete ──");
   await safeUpdatePipelineProgress(config, "cycle_complete", `Cycle complete — ${workerBatches.length} worker batch(es) processed`, {
     workersTotal: workerBatches.length,
     workersDone: workerBatches.length

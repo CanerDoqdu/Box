@@ -1,6 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { toCopilotModelSlug } from "../../core/agent_loader.js";
 import { tagProviderDecision } from "../../core/trust_boundary.js";
+import { emitEvent } from "../../core/logger.js";
+import { EVENTS, EVENT_DOMAIN } from "../../core/event_schema.js";
 import { safeArray, tryExtractJson, validatePlan, validateDecision, validateOpusDecision } from "./utils.js";
 
 function validateAutonomyAudit(payload: Record<string, unknown> | null, fallback: { healthy: boolean; reason: string; notifyUser: boolean }): { healthy: boolean; reason: string; notifyUser: boolean } {
@@ -203,13 +205,23 @@ export class CopilotReviewer {
     if (result.status !== 0) {
       const errSnippet = stderr.slice(0, 200) || stdout.slice(0, 200);
       console.error(`[CopilotReviewer] copilot exited ${result.status}: ${errSnippet}`);
-      return tagProviderDecision(fallback, "fallback", `exit code ${result.status}: ${errSnippet}`);
+      const fallbackReason = `exit code ${result.status}: ${errSnippet}`;
+      emitEvent(EVENTS.POLICY_PROVIDER_FALLBACK_DECISION, EVENT_DOMAIN.POLICY, `provider-fallback-${Date.now()}`, {
+        source: "fallback",
+        fallbackReason
+      });
+      return tagProviderDecision(fallback, "fallback", fallbackReason);
     }
 
     const parsed = tryExtractJson(merged);
     if (!parsed) {
       console.error(`[CopilotReviewer] failed to parse JSON from copilot output (${merged.length} chars)`);
-      return tagProviderDecision(fallback, "fallback", `JSON parse failed (${merged.length} chars of output)`);
+      const fallbackReason = `JSON parse failed (${merged.length} chars of output)`;
+      emitEvent(EVENTS.POLICY_PROVIDER_FALLBACK_DECISION, EVENT_DOMAIN.POLICY, `provider-fallback-${Date.now()}`, {
+        source: "fallback",
+        fallbackReason
+      });
+      return tagProviderDecision(fallback, "fallback", fallbackReason);
     }
     const validated = validator(parsed, fallback);
     this.lastUsage = { model: this.model, provider: "copilot" };
