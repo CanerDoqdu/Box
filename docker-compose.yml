@@ -9,7 +9,7 @@ services:
     volumes:
       - ./:/workspace
       - /var/run/docker.sock:/var/run/docker.sock
-    # npm ci ensures deps match package-lock.json exactly; --omit=dev skips
-    # devDependencies that are not needed at runtime in the container.
+    # tsx is a production dependency (all entrypoints use node --import tsx);
+    # --omit=dev skips type-checking and linting tools not needed at runtime.
     command: ["sh", "-c", "npm ci --omit=dev && npm run box:start"]
     restart: unless-stopped

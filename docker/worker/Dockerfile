@@ -24,10 +24,10 @@ RUN set -eux; \
     copilot --version || true
 
 WORKDIR /app
-COPY package.json ./
+COPY package.json package-lock.json ./
 COPY src ./src
 
-# Install dependencies required by worker scripts.
-RUN npm install --omit=dev
+# tsx is a production dependency; --omit=dev skips type-checking tools not needed at runtime.
+RUN npm ci --omit=dev
 
-CMD ["node", "/app/src/workers/run_task.js"]
+CMD ["node", "--import", "tsx", "src/workers/run_task.ts"]

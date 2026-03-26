@@ -112,7 +112,7 @@ async function boxOn(config: Config): Promise<void> {
   }
 
   // 4. Start dashboard (detached)
-  const dashPid = spawnDetached("node", ["src/dashboard/live_dashboard.ts"], root);
+  const dashPid = spawnDetached("node", ["--import", "tsx", "src/dashboard/live_dashboard.ts"], root);
   savePid(stateDir, "dashboard_bg", dashPid);
   console.log(`[box on] dashboard started pid=${dashPid} → http://localhost:8787`);
 
