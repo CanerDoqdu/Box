@@ -203,13 +203,13 @@ export class CopilotReviewer {
     if (result.status !== 0) {
       const errSnippet = stderr.slice(0, 200) || stdout.slice(0, 200);
       console.error(`[CopilotReviewer] copilot exited ${result.status}: ${errSnippet}`);
-      return tagProviderDecision(fallback, "fallback");
+      return tagProviderDecision(fallback, "fallback", `exit code ${result.status}: ${errSnippet}`);
     }
 
     const parsed = tryExtractJson(merged);
     if (!parsed) {
       console.error(`[CopilotReviewer] failed to parse JSON from copilot output (${merged.length} chars)`);
-      return tagProviderDecision(fallback, "fallback");
+      return tagProviderDecision(fallback, "fallback", `JSON parse failed (${merged.length} chars of output)`);
     }
     const validated = validator(parsed, fallback);
     this.lastUsage = { model: this.model, provider: "copilot" };

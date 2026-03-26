@@ -17,6 +17,7 @@
  */
 
 import path from "node:path";
+import fs from "node:fs/promises";
 import { appendProgress, appendAlert, ALERT_SEVERITY } from "./state_tracker.js";
 import { readStopRequest, writeDaemonPid, clearDaemonPid, clearStopRequest, readReloadRequest, clearReloadRequest } from "./daemon_control.js";
 import { loadConfig } from "../config.js";
@@ -56,6 +57,8 @@ import { validateAllPlans } from "./plan_contract_validator.js";
 import { resolveDependencyGraph, GRAPH_STATUS } from "./dependency_graph_resolver.js";
 import { isGovernanceCanaryBreachActive } from "./governance_canary.js";
 import { executeRollback, ROLLBACK_LEVEL, ROLLBACK_TRIGGER } from "./rollback_engine.js";
+import { initializeAggregateLiveLog } from "./live_log.js";
+import { buildRoleExecutionBatches } from "./worker_batch_planner.js";
 
 /**
  * Orchestrator health status enum.
@@ -423,8 +426,212 @@ export async function runDaemon(config) {
   await mainLoop(liveConfig);
 }
 
+async function wasDispatchInterrupted(stateDir) {
+  return false;
+}
+
+const DISPATCH_CHECKPOINT_FILE = "dispatch_checkpoint.json";
+
+function getDispatchCheckpointPath(stateDir) {
+  return path.join(stateDir, DISPATCH_CHECKPOINT_FILE);
+}
+
+async function readDispatchCheckpoint(config) {
+  const stateDir = config.paths?.stateDir || "state";
+  return readJson(getDispatchCheckpointPath(stateDir), null);
+}
+
+async function writeDispatchCheckpoint(config, checkpoint) {
+  const stateDir = config.paths?.stateDir || "state";
+  await writeJson(getDispatchCheckpointPath(stateDir), checkpoint);
+}
+
+function isDispatchCheckpointResumable(checkpoint) {
+  if (!checkpoint || checkpoint.status !== "dispatching") return false;
+  const totalPlans = Number(checkpoint.totalPlans || 0);
+  const completedPlans = Number(checkpoint.completedPlans || 0);
+  return totalPlans > 0 && completedPlans < totalPlans;
+}
+
+function isDispatchCheckpointCompleteForTotal(checkpoint, totalPlans) {
+  if (!checkpoint || checkpoint.status !== "complete") return false;
+  if (Number(checkpoint.totalPlans || 0) !== Number(totalPlans || 0)) return false;
+  return Number(checkpoint.completedPlans || 0) >= Number(totalPlans || 0);
+}
+
+async function beginDispatchCheckpoint(config, plans) {
+  const nowIso = new Date().toISOString();
+  const checkpoint = {
+    schemaVersion: 1,
+    status: "dispatching",
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    totalPlans: Array.isArray(plans) ? plans.length : 0,
+    completedPlans: 0
+  };
+  await writeDispatchCheckpoint(config, checkpoint);
+  return checkpoint;
+}
+
+async function updateDispatchCheckpointProgress(config, checkpoint, completedPlans) {
+  if (!checkpoint) return;
+  checkpoint.completedPlans = Math.max(0, Math.min(Number(completedPlans || 0), Number(checkpoint.totalPlans || 0)));
+  checkpoint.updatedAt = new Date().toISOString();
+  await writeDispatchCheckpoint(config, checkpoint);
+}
+
+async function completeDispatchCheckpoint(config, checkpoint) {
+  if (!checkpoint) return;
+  checkpoint.status = "complete";
+  checkpoint.completedPlans = Number(checkpoint.totalPlans || 0);
+  checkpoint.updatedAt = new Date().toISOString();
+  await writeDispatchCheckpoint(config, checkpoint);
+}
+
+function isDispatchOutcomeSuccessful(workerResult) {
+  const status = String(workerResult?.status || "").toLowerCase();
+  return status === "done" || status === "partial";
+}
+
+async function tryResumeDispatchFromCheckpoint(config, options: { force?: boolean } = {}) {
+  const stateDir = config.paths?.stateDir || "state";
+  const force = options?.force === true;
+  const activeWorkers = await hasActiveWorkersAsync(config);
+  if (activeWorkers) return false;
+
+  const athenaReview = await readJson(path.join(stateDir, "athena_plan_review.json"), null);
+  const prometheusAnalysis = await readJson(path.join(stateDir, "prometheus_analysis.json"), null);
+  const plans = Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans : [];
+  if (!athenaReview?.approved || plans.length === 0) return false;
+  const workerBatches = buildRoleExecutionBatches(plans, config);
+  if (workerBatches.length === 0) return false;
+
+  let checkpoint = await readDispatchCheckpoint(config);
+  const checkpointMatchesTotal = Number(checkpoint?.totalPlans || 0) === workerBatches.length;
+
+  if (!force && isDispatchCheckpointCompleteForTotal(checkpoint, workerBatches.length)) {
+    return false;
+  }
+
+  if (!isDispatchCheckpointResumable(checkpoint)) {
+    if (!force && checkpoint && checkpoint.status === "complete" && checkpointMatchesTotal) {
+      return false;
+    }
+    checkpoint = await beginDispatchCheckpoint(config, workerBatches);
+  }
+
+  const startIndex = Math.max(0, Math.min(Number(checkpoint.completedPlans || 0), workerBatches.length));
+  if (startIndex >= workerBatches.length) {
+    await completeDispatchCheckpoint(config, checkpoint);
+    return false;
+  }
+
+  await appendProgress(config,
+    force
+      ? `[RESUME] Force-resuming dispatch checkpoint: batch ${startIndex + 1}/${workerBatches.length}`
+      : checkpointMatchesTotal
+        ? `[RESUME] Resuming dispatch checkpoint: batch ${startIndex + 1}/${workerBatches.length}`
+        : `[RESUME] Existing approved plan detected — dispatching from batch ${startIndex + 1}/${workerBatches.length} without replanning`
+  );
+
+  await safeUpdatePipelineProgress(config, "workers_dispatching", `Resuming dispatch from batch ${startIndex + 1}/${workerBatches.length}`, {
+    workersTotal: workerBatches.length,
+    workersDone: startIndex,
+    resumedFromCheckpoint: true,
+    forcedResume: force
+  });
+
+  for (let index = startIndex; index < workerBatches.length; index += 1) {
+    const stopReq = await readStopRequest(config);
+    if (stopReq?.requestedAt) {
+      await appendProgress(config, `[RESUME] Stop requested — checkpoint preserved at batch ${index + 1}/${workerBatches.length}`);
+      return true;
+    }
+
+    const batch = workerBatches[index];
+    await safeUpdatePipelineProgress(config, "workers_running", `Resumed worker batch ${index + 1}/${workerBatches.length}: ${batch.role}`, {
+      workersTotal: workerBatches.length,
+      workersDone: index,
+      currentWorker: batch.role,
+      resumedFromCheckpoint: true,
+      forcedResume: force
+    });
+
+    let workerResult;
+    try {
+      workerResult = await dispatchWorker(config, batch);
+    } catch (err) {
+      const msg = String(err?.message || err).slice(0, 200);
+      await appendProgress(config, `[RESUME] Worker ${batch.role} failed: ${msg}`);
+      warn(`[orchestrator] resumed worker dispatch error: ${msg}`);
+      workerResult = { roleName: batch.role, status: "error", summary: msg };
+    }
+
+    await appendProgress(config, `[RESUME] ── Step 5: Athena postmortem for ${batch.role} ──`);
+    try {
+      await runAthenaPostmortem(config, workerResult, batch);
+    } catch (err) {
+      await appendProgress(config, `[RESUME] Athena postmortem failed for ${batch.role}: ${String(err?.message || err)}`);
+    }
+
+    if (!isDispatchOutcomeSuccessful(workerResult)) {
+      await appendProgress(config,
+        `[RESUME] Worker batch ${index + 1}/${workerBatches.length} ended with status=${workerResult?.status || "unknown"}; checkpoint not advanced so it can be retried`
+      );
+      return true;
+    }
+
+    await waitForWorkersToFinish(config);
+    await updateDispatchCheckpointProgress(config, checkpoint, index + 1);
+  }
+
+  await completeDispatchCheckpoint(config, checkpoint);
+
+  await safeUpdatePipelineProgress(config, "workers_finishing", "All resumed workers finishing up", {
+    workersTotal: workerBatches.length,
+    workersDone: workerBatches.length,
+    resumedFromCheckpoint: true,
+    forcedResume: force
+  });
+
+  await appendProgress(config, `[RESUME] Resumed dispatch complete — ${workerBatches.length} batch(es) processed`);
+  await safeUpdatePipelineProgress(config, "cycle_complete", `Resumed cycle complete — ${workerBatches.length} batch(es)`, {
+    workersTotal: workerBatches.length,
+    workersDone: workerBatches.length,
+    resumedFromCheckpoint: true,
+    forcedResume: force
+  });
+
+  return true;
+}
+
 export async function runOnce(config) {
+  const stateDir = config.paths?.stateDir || "state";
+  await fs.mkdir(stateDir, { recursive: true });
+  await Promise.all([
+    fs.writeFile(path.join(stateDir, "live_worker_jesus.log"), "[leadership_live]\n[run_once] Jesus live log ready...\n", "utf8"),
+    fs.writeFile(path.join(stateDir, "live_worker_athena.log"), "[leadership_live]\n[run_once] Athena live log ready...\n", "utf8"),
+    initializeAggregateLiveLog(stateDir, "run_once")
+  ]);
+
+  const resumed = await tryResumeDispatchFromCheckpoint(config);
+  if (resumed) return;
   await runSingleCycle(config);
+}
+
+export async function runResumeDispatch(config) {
+  const stateDir = config.paths?.stateDir || "state";
+  await fs.mkdir(stateDir, { recursive: true });
+  await Promise.all([
+    fs.writeFile(path.join(stateDir, "live_worker_jesus.log"), "[leadership_live]\n[resume] Jesus live log ready...\n", "utf8"),
+    fs.writeFile(path.join(stateDir, "live_worker_athena.log"), "[leadership_live]\n[resume] Athena live log ready...\n", "utf8"),
+    initializeAggregateLiveLog(stateDir, "resume")
+  ]);
+
+  const resumed = await tryResumeDispatchFromCheckpoint(config, { force: true });
+  if (!resumed) {
+    throw new Error("No resumable Step-4 checkpoint found (athena_plan_review approved + prometheus plans required)");
+  }
 }
 
 export async function runRebase(_config, _opts: Record<string, unknown> = {}) {
@@ -611,17 +818,38 @@ async function postCompletionCleanup(config) {
 
 async function dispatchWorker(config, plan) {
   const roleName = plan.role;
-  const task = plan.task;
-  const context = plan.context || "";
-  const verification = plan.verification || "";
+  const batchPlans = Array.isArray(plan?.plans) ? plan.plans : null;
+  const task = batchPlans
+    ? `Execute this bundled work package in a single worker session.\n${batchPlans.map((item, i) => `${i + 1}. ${String(item?.task || item?.title || "Untitled task")}`).join("\n")}`
+    : plan.task;
+  const context = batchPlans
+    ? batchPlans.map((item, i) => {
+        const taskLine = String(item?.task || item?.title || `Task ${i + 1}`);
+        const ctxLine = String(item?.context || item?.scope || "").trim();
+        return ctxLine ? `Task ${i + 1}: ${taskLine}\nContext: ${ctxLine}` : `Task ${i + 1}: ${taskLine}`;
+      }).join("\n\n")
+    : (plan.context || "");
+  const verification = batchPlans
+    ? batchPlans.map((item, i) => {
+        const rule = String(item?.verification || "").trim();
+        return rule ? `${i + 1}. ${rule}` : "";
+      }).filter(Boolean).join("\n")
+    : (plan.verification || "");
 
-  await appendProgress(config, `[DISPATCH] Sending task to ${roleName}: ${task}`);
+  const taskKind = plan.taskKind || plan.kind || "implementation";
+
+  if (batchPlans) {
+    const headline = String(batchPlans[0]?.task || batchPlans[0]?.title || "bundled tasks");
+    await appendProgress(config, `[DISPATCH] Sending ${batchPlans.length} plan(s) to ${roleName}: ${headline}`);
+  } else {
+    await appendProgress(config, `[DISPATCH] Sending task to ${roleName}: ${task}`);
+  }
 
   const result = await runWorkerConversation(config, roleName, {
     task,
     context,
     verification,
-    taskKind: plan.taskKind || plan.kind || "implementation"
+    taskKind
   });
 
   return {
@@ -639,6 +867,16 @@ async function dispatchWorker(config, plan) {
 
 async function countCompletedPlans(config, plans) {
   const stateDir = config.paths?.stateDir || "state";
+
+  const checkpoint = await readJson(path.join(stateDir, DISPATCH_CHECKPOINT_FILE), null);
+  if (checkpoint && Number(checkpoint.totalPlans || 0) === plans.length) {
+    const completedCount = Math.max(0, Math.min(Number(checkpoint.completedPlans || 0), plans.length));
+    return {
+      completed: plans.slice(0, completedCount).map((plan) => ({ plan, workerState: null, lastLog: null })),
+      pending: plans.slice(completedCount)
+    };
+  }
+
   const completed = [];
   const pending = [];
 
@@ -678,6 +916,9 @@ async function runSingleCycle(config) {
   // Audit critical state files at cycle start — writes orchestrator_health.json.
   // This ensures runOnce (used in tests and CLI) also surfaces corrupt state.
   await auditCriticalStateFiles(config, stateDir);
+
+  const resumed = await tryResumeDispatchFromCheckpoint(config);
+  if (resumed) return;
 
   // ── Preflight capability checks ───────────────────────────────────────────
   // Validate system readiness before spending premium requests.
@@ -987,177 +1228,68 @@ async function runSingleCycle(config) {
     }
   }
 
-  await safeUpdatePipelineProgress(config, "workers_dispatching", `Dispatching ${plans.length} worker(s)`, {
-    workersTotal: plans.length,
+  const workerBatches = buildRoleExecutionBatches(plans, config);
+  await safeUpdatePipelineProgress(config, "workers_dispatching", `Dispatching ${workerBatches.length} worker batch(es)`, {
+    workersTotal: workerBatches.length,
     workersDone: 0
   });
 
-  // ── Dispatch: DAG-scheduled or wave-parallel or sequential ─────────────────
-  // Primary: DAG scheduler (computeNextWaves from dag_scheduler.js)
-  // Fallback: prometheus dependencyGraph.waves (legacy wave dispatch)
-  // Last resort: sequential dispatch
-  let useDagScheduler = !config.runtime?.disableDagScheduler;
-  const useWaveParallel = !config.runtime?.disableWaveParallelDispatch
-    && prometheusAnalysis.dependencyGraph?.waves?.length > 0
-    && prometheusAnalysis.dependencyGraph?.status !== "cycle_detected";
-
+  const dispatchCheckpoint = await beginDispatchCheckpoint(config, workerBatches);
   let workersDone = 0;
 
-  /**
-   * Dispatch a single plan (worker + postmortem). Shared by both paths.
-   * @returns {{ workerResult: object, plan: object }}
-   */
-  const dispatchOne = async (plan) => {
+  for (const batch of workerBatches) {
+    const stopReq = await readStopRequest(config);
+    if (stopReq?.requestedAt) {
+      await appendProgress(config, `[CYCLE] Stop requested — halting dispatch`);
+      return;
+    }
+
+    await safeUpdatePipelineProgress(config, "workers_running", `Running worker batch ${workersDone + 1}/${workerBatches.length}: ${batch.role}`, {
+      workersTotal: workerBatches.length,
+      workersDone,
+      currentWorker: batch.role
+    });
+
     let workerResult;
     try {
-      workerResult = await dispatchWorker(config, plan);
+      workerResult = await dispatchWorker(config, batch);
     } catch (err) {
       const msg = String(err?.message || err).slice(0, 200);
-      await appendProgress(config, `[CYCLE] Worker ${plan.role} failed: ${msg}`);
+      await appendProgress(config, `[CYCLE] Worker ${batch.role} failed: ${msg}`);
       warn(`[orchestrator] worker dispatch error: ${msg}`);
-      workerResult = { roleName: plan.role, status: "error", summary: msg };
+      workerResult = { roleName: batch.role, status: "error", summary: msg };
     }
-    await appendProgress(config, `[CYCLE] ── Step 5: Athena postmortem for ${plan.role} ──`);
+
+    await appendProgress(config, `[CYCLE] ── Step 5: Athena postmortem for ${batch.role} ──`);
     try {
-      await runAthenaPostmortem(config, workerResult, plan);
+      await runAthenaPostmortem(config, workerResult, batch);
     } catch (err) {
-      await appendProgress(config, `[CYCLE] Athena postmortem failed for ${plan.role}: ${String(err?.message || err)}`);
+      await appendProgress(config, `[CYCLE] Athena postmortem failed for ${batch.role}: ${String(err?.message || err)}`);
     }
-    return { workerResult, plan };
-  };
 
-  // ── DAG scheduler path: dynamic dependency-aware dispatch ─────────────────
-  if (useDagScheduler) {
-    try {
-      const dagResult = computeNextWaves(plans, new Set(), new Set());
-      if (dagResult.status === "ok" && dagResult.readyWaves.length > 0) {
-        await appendProgress(config, `[CYCLE] DAG scheduler: ${dagResult.readyWaves.length} wave(s), ${dagResult.blocked.length} blocked`);
-        const completedIds = new Set();
-        const failedIds = new Set();
-
-        for (const wave of dagResult.readyWaves) {
-          const stopReq = await readStopRequest(config);
-          if (stopReq?.requestedAt) {
-            await appendProgress(config, `[CYCLE] Stop requested — halting dispatch`);
-            return;
-          }
-
-          const roles = wave.map(p => p.role).join(", ");
-          await appendProgress(config, `[CYCLE] DAG wave: dispatching ${wave.length} worker(s) [${roles}]`);
-          await safeUpdatePipelineProgress(config, "workers_running", `DAG wave: ${roles}`, {
-            workersTotal: plans.length,
-            workersDone
-          });
-
-          const results = await Promise.all(wave.map(plan => dispatchOne(plan)));
-          for (const { workerResult, plan } of results) {
-            const id = String(plan.task || plan.role || "");
-            if (workerResult?.status === "error") failedIds.add(id);
-            else completedIds.add(id);
-          }
-          workersDone += wave.length;
-          await waitForWorkersToFinish(config);
-        }
-
-        // Handle orphaned plans not in any DAG wave
-        const dagCovered = new Set(dagResult.readyWaves.flat().map(p => String(p.task || p.role || "")));
-        const orphans = plans.filter(p => !dagCovered.has(String(p.task || p.role || "")) && !dagResult.blocked.includes(p));
-        for (const plan of orphans) {
-          await dispatchOne(plan);
-          workersDone += 1;
-          await waitForWorkersToFinish(config);
-        }
-
-        // DAG handled dispatch — skip legacy paths
-        useDagScheduler = false; // signal: already dispatched
-      } else {
-        useDagScheduler = false; // fall through to legacy
-      }
-    } catch (err) {
-      warn(`[orchestrator] DAG scheduler failed (falling back to wave/sequential): ${String(err?.message || err)}`);
-      useDagScheduler = false;
+    if (!isDispatchOutcomeSuccessful(workerResult)) {
+      await appendProgress(config,
+        `[CYCLE] Worker batch ${workersDone + 1}/${workerBatches.length} ended with status=${workerResult?.status || "unknown"}; checkpoint not advanced so it can be retried`
+      );
+      return;
     }
+
+    workersDone += 1;
+    await updateDispatchCheckpointProgress(config, dispatchCheckpoint, workersDone);
+    await waitForWorkersToFinish(config);
   }
 
-  if (useDagScheduler === false && workersDone === 0 && useWaveParallel) {
-    // Build a lookup: taskId → plan
-    const planById = new Map();
-    for (const plan of plans) {
-      const id = String(plan.task || plan.role || "");
-      planById.set(id, plan);
-    }
-
-    const waves = prometheusAnalysis.dependencyGraph.waves;
-    await appendProgress(config, `[CYCLE] Wave-parallel dispatch: ${waves.length} wave(s)`);
-
-    for (const wave of waves) {
-      const stopReq = await readStopRequest(config);
-      if (stopReq?.requestedAt) {
-        await appendProgress(config, `[CYCLE] Stop requested — halting dispatch`);
-        return;
-      }
-
-      const wavePlans = wave.taskIds
-        .map(id => planById.get(id))
-        .filter(Boolean);
-
-      if (wavePlans.length === 0) continue;
-
-      const roles = wavePlans.map(p => p.role).join(", ");
-      await appendProgress(config, `[CYCLE] Wave ${wave.wave}: dispatching ${wavePlans.length} worker(s) in parallel [${roles}]`);
-      await safeUpdatePipelineProgress(config, "workers_running", `Wave ${wave.wave}: ${roles}`, {
-        workersTotal: plans.length,
-        workersDone,
-        currentWave: wave.wave
-      });
-
-      await Promise.all(wavePlans.map(plan => dispatchOne(plan)));
-      workersDone += wavePlans.length;
-      await waitForWorkersToFinish(config);
-    }
-
-    // Dispatch any plans not covered by waves (orphaned)
-    const coveredIds = new Set(waves.flatMap(w => w.taskIds));
-    const orphans = plans.filter(p => !coveredIds.has(String(p.task || p.role || "")));
-    for (const plan of orphans) {
-      await safeUpdatePipelineProgress(config, "workers_running", `Running orphan worker: ${plan.role}`, {
-        workersTotal: plans.length,
-        workersDone
-      });
-      await dispatchOne(plan);
-      workersDone += 1;
-      await waitForWorkersToFinish(config);
-    }
-  } else if (workersDone === 0) {
-    // Sequential fallback
-    for (const plan of plans) {
-      const stopReq = await readStopRequest(config);
-      if (stopReq?.requestedAt) {
-        await appendProgress(config, `[CYCLE] Stop requested — halting dispatch`);
-        return;
-      }
-
-      await safeUpdatePipelineProgress(config, "workers_running", `Running worker: ${plan.role}`, {
-        workersTotal: plans.length,
-        workersDone,
-        currentWorker: plan.role
-      });
-
-      await dispatchOne(plan);
-      workersDone += 1;
-      await waitForWorkersToFinish(config);
-    }
-  }
+  await completeDispatchCheckpoint(config, dispatchCheckpoint);
 
   await safeUpdatePipelineProgress(config, "workers_finishing", "All workers finishing up", {
-    workersTotal: plans.length,
-    workersDone: plans.length
+    workersTotal: workerBatches.length,
+    workersDone: workerBatches.length
   });
 
   await appendProgress(config, "[CYCLE] ── All workers dispatched and reviewed — cycle complete ──");
-  await safeUpdatePipelineProgress(config, "cycle_complete", `Cycle complete — ${plans.length} worker(s) processed`, {
-    workersTotal: plans.length,
-    workersDone: plans.length
+  await safeUpdatePipelineProgress(config, "cycle_complete", `Cycle complete — ${workerBatches.length} worker batch(es) processed`, {
+    workersTotal: workerBatches.length,
+    workersDone: workerBatches.length
   });
 
   // ── SLO check: compute and persist cycle-level SLO metrics ─────────────────

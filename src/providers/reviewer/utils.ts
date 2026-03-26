@@ -23,14 +23,25 @@ export function tryExtractJson(text: string | null | undefined): unknown {
   }
 }
 
+interface RawTask {
+  id?: unknown;
+  title?: unknown;
+  priority?: unknown;
+  kind?: unknown;
+}
+
 export function validatePlan(payload: Record<string, unknown> | null, fallbackTasks: unknown[]): { tasks: unknown[] } {
-  const tasks = safeArray((payload as any)?.tasks)
-    .map((task: any, idx: number) => ({
-      id: Number(task?.id ?? idx + 1),
-      title: String(task?.title || "").trim(),
-      priority: Number(task?.priority || 3),
-      kind: String(task?.kind || "general").trim().toLowerCase()
-    }))
+  const rawTasks = safeArray((payload as Record<string, unknown> | null)?.tasks);
+  const tasks = rawTasks
+    .map((task: unknown, idx: number) => {
+      const t = task as RawTask;
+      return {
+        id: Number(t?.id ?? idx + 1),
+        title: String(t?.title || "").trim(),
+        priority: Number(t?.priority || 3),
+        kind: String(t?.kind || "general").trim().toLowerCase()
+      };
+    })
     .filter((t) => Number.isFinite(t.id) && t.title.length > 0 && Number.isFinite(t.priority));
   return tasks.length > 0 ? { tasks } : { tasks: fallbackTasks };
 }

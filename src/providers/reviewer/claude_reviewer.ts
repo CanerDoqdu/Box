@@ -78,8 +78,9 @@ export class ClaudeReviewer {
       }
     }
     // All retries exhausted -- return tagged fallback so callers can inspect _source="fallback".
-    console.error(`[ClaudeReviewer] all retries exhausted, using deterministic fallback: ${lastError}`);
-    return tagProviderDecision(fallback, "fallback");
+    const failReason = lastError instanceof Error ? lastError.message : String(lastError);
+    console.error(`[ClaudeReviewer] all retries exhausted, using deterministic fallback: ${failReason}`);
+    return tagProviderDecision(fallback, "fallback", failReason);
   }
 
   async reviewPlan(summary: Record<string, unknown>, tasks: unknown[]): Promise<{ tasks: unknown[] }> {

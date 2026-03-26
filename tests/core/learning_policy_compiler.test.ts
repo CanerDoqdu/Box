@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { compileLessonsToPolicies, validatePlanAgainstPolicies, COMPILABLE_PATTERNS, hardGateRecurrenceToPolicies, checkCarryForwardGate } from "../../src/core/learning_policy_compiler.js";
+import { compileLessonsToPolicies, validatePlanAgainstPolicies, COMPILABLE_PATTERNS, hardGateRecurrenceToPolicies, checkCarryForwardGate, deriveRoutingAdjustments, buildPromptHardConstraints } from "../../src/core/learning_policy_compiler.js";
 
 describe("learning_policy_compiler", () => {
   describe("compileLessonsToPolicies", () => {
@@ -169,6 +169,107 @@ describe("learning_policy_compiler", () => {
       const plans = [{ task: "Must do X" }, { task: "Must do Y" }];
       const result = checkCarryForwardGate(pms, plans, { mandatoryCarryForward: ["Must do X", "Must do Y"] });
       assert.equal(result.missingMandatory.length, 0);
+    });
+  });
+
+  // ── Task 9: routing and prompt constraint feedback from recurring postmortems ─
+
+  describe("deriveRoutingAdjustments", () => {
+    it("returns empty array for null input", () => {
+      assert.deepEqual(deriveRoutingAdjustments(null), []);
+    });
+
+    it("returns empty array for empty policies", () => {
+      assert.deepEqual(deriveRoutingAdjustments([]), []);
+    });
+
+    it("maps known policy IDs to correct modelOverride values", () => {
+      const policies = [
+        { id: "glob-false-fail", severity: "critical" },
+        { id: "syntax-error", severity: "critical" },
+      ];
+      const result = deriveRoutingAdjustments(policies);
+      assert.equal(result.length, 2);
+      const sonnet = result.find((r) => r.policyId === "glob-false-fail");
+      const opus = result.find((r) => r.policyId === "syntax-error");
+      assert.equal(sonnet?.modelOverride, "force-sonnet");
+      assert.equal(opus?.modelOverride, "block-opus");
+    });
+
+    it("produces unique adjustments even with duplicate policy IDs", () => {
+      const policies = [
+        { id: "lint-failure", severity: "warning" },
+        { id: "lint-failure", severity: "warning" },
+      ];
+      const result = deriveRoutingAdjustments(policies);
+      assert.equal(result.length, 1);
+    });
+
+    it("ignores unknown policy IDs without throwing", () => {
+      const policies = [{ id: "completely-unknown-policy", severity: "warning" }];
+      const result = deriveRoutingAdjustments(policies);
+      assert.equal(result.length, 0);
+    });
+
+    it("handles hard-gated custom-recurrence- policies with force-sonnet default", () => {
+      const policies = [{ id: "custom-recurrence-abc", severity: "critical", _hardGated: true }];
+      const result = deriveRoutingAdjustments(policies);
+      assert.equal(result.length, 1);
+      assert.equal(result[0].modelOverride, "force-sonnet");
+    });
+
+    it("does not emit routing adjustment for custom-recurrence policy that is NOT hard-gated", () => {
+      const policies = [{ id: "custom-recurrence-abc", severity: "warning", _hardGated: false }];
+      const result = deriveRoutingAdjustments(policies);
+      assert.equal(result.length, 0);
+    });
+  });
+
+  describe("buildPromptHardConstraints", () => {
+    it("returns empty array for null input", () => {
+      assert.deepEqual(buildPromptHardConstraints(null), []);
+    });
+
+    it("returns empty array for empty policies", () => {
+      assert.deepEqual(buildPromptHardConstraints([]), []);
+    });
+
+    it("maps known policy IDs to correct constraint strings", () => {
+      const policies = [{ id: "missing-test", severity: "critical" }];
+      const result = buildPromptHardConstraints(policies);
+      assert.equal(result.length, 1);
+      assert.ok(result[0].constraint.startsWith("HARD CONSTRAINT:"));
+      assert.equal(result[0].blocking, true);
+    });
+
+    it("blocking flag matches the mapping definition (hardcoded-path is non-blocking)", () => {
+      const policies = [{ id: "hardcoded-path", severity: "warning" }];
+      const result = buildPromptHardConstraints(policies);
+      assert.equal(result.length, 1);
+      assert.equal(result[0].blocking, false);
+    });
+
+    it("produces unique constraints for duplicate policy IDs", () => {
+      const policies = [
+        { id: "lint-failure", severity: "warning" },
+        { id: "lint-failure", severity: "warning" },
+      ];
+      const result = buildPromptHardConstraints(policies);
+      assert.equal(result.length, 1);
+    });
+
+    it("generates generic constraint for hard-gated custom-recurrence policy", () => {
+      const policies = [{ id: "custom-recurrence-xyz", severity: "critical", _hardGated: true, assertion: "Never delete state files" }];
+      const result = buildPromptHardConstraints(policies);
+      assert.equal(result.length, 1);
+      assert.ok(result[0].constraint.includes("Never delete state files"));
+      assert.equal(result[0].blocking, true, "critical severity must set blocking=true");
+    });
+
+    it("negative: non-hard-gated custom-recurrence policy does not produce a constraint", () => {
+      const policies = [{ id: "custom-recurrence-xyz", severity: "warning", _hardGated: false }];
+      const result = buildPromptHardConstraints(policies);
+      assert.equal(result.length, 0);
     });
   });
 });

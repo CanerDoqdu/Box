@@ -354,13 +354,20 @@ function validatePlanItems(plans, planSchema) {
  *   Pass options.mode = "warn" to downgrade hard failures to warnings (status="warn").
  *   Default is "enforce". Never set mode=warn in production without explicit config opt-in.
  *
+/** Options accepted by {@link validateLeadershipContract}. */
+export interface ValidateLeadershipContractOptions {
+  /** "enforce" (default) — validation failures return status="blocked".
+   *  "warn"    — validation failures return status="warn" instead of blocking. */
+  mode?: "enforce" | "warn";
+}
+
+/**
  * @param {string} contractType  — one of LEADERSHIP_CONTRACT_TYPE values
- * @param {any}    payload       — parsed provider output (untrusted)
- * @param {object} [options]
- * @param {string} [options.mode="enforce"]  — "enforce" | "warn"
+ * @param {unknown}    payload       — parsed provider output (untrusted)
+ * @param {ValidateLeadershipContractOptions} [options]
  * @returns {{ ok: boolean, status: "ok"|"blocked"|"warn", reasonCode: string, errors: object[] }}
  */
-export function validateLeadershipContract(contractType, payload, options: any = {}) {
+export function validateLeadershipContract(contractType: string, payload: unknown, options: ValidateLeadershipContractOptions = {}) {
   const mode = options.mode === "warn" ? "warn" : "enforce";
   const sourceFile = LEADERSHIP_SCHEMA_PATH;
 
@@ -513,15 +520,20 @@ export function trustBoundaryRetryDelayMs(attempt) {
  *
  * Usage in provider requestJson methods:
  *   return tagProviderDecision(validatedPayload, "provider");
- *   return tagProviderDecision(fallback,         "fallback");
+ *   return tagProviderDecision(fallback, "fallback", "API call failed: 429 rate limit");
  *
- * @param decision  - validated decision payload
- * @param source    - "provider" (AI response) | "fallback" (deterministic fallback)
- * @returns decision with _source field attached
+ * @param decision       - validated decision payload
+ * @param source         - "provider" (AI response) | "fallback" (deterministic fallback)
+ * @param fallbackReason - why the fallback was used (only meaningful when source="fallback")
+ * @returns decision with _source field (and _fallbackReason when source="fallback")
  */
 export function tagProviderDecision<T extends Record<string, unknown>>(
   decision: T,
-  source: "provider" | "fallback"
-): T & { _source: "provider" | "fallback" } {
+  source: "provider" | "fallback",
+  fallbackReason?: string
+): T & { _source: "provider" | "fallback"; _fallbackReason?: string } {
+  if (source === "fallback" && fallbackReason !== undefined) {
+    return { ...decision, _source: source, _fallbackReason: fallbackReason };
+  }
   return { ...decision, _source: source };
 }

@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { writeFileSync, readFileSync, existsSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { loadConfig } from "./config.js";
-import { runOnce, runDaemon, runRebase } from "./core/orchestrator.js";
+import { runOnce, runDaemon, runRebase, runResumeDispatch } from "./core/orchestrator.js";
 import { runDoctor } from "./core/doctor.js";
 import { readSiControl, writeSiControl, isSelfImprovementActive, readSiLiveLog, siLogAsync } from "./core/si_control.js";
 import {
@@ -192,6 +192,12 @@ async function main(): Promise<void> {
   if (command === "rebase") {
     const result = await runRebase(config, { trigger: "cli-rebase" });
     console.log(`[box] rebase completed triggered=${result?.triggered ? "true" : "false"} reason=${result?.reason || "unknown"}`);
+    return;
+  }
+
+  if (command === "resume") {
+    await runResumeDispatch(config);
+    console.log("[box] resume completed from dispatch checkpoint");
     return;
   }
 

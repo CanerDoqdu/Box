@@ -6,7 +6,8 @@ import {
   hardenTaskForAthena,
   repairPrometheusTask,
   shouldHaltOnPreReviewReject,
-  shouldRetryAthenaPreReview
+  shouldRetryAthenaPreReview,
+  checkScopeConformance,
 } from "../../src/core/evolution_executor.js";
 
 describe("assessStatusCheckRollup", () => {
@@ -166,5 +167,84 @@ describe("Athena missing-item injection", () => {
 
     assert.ok(updated.scope.includes("Need deterministic degraded state definition"));
     assert.ok(updated.acceptance_criteria.some(c => c.includes("Need deterministic degraded state definition")));
+  });
+});
+
+// ── Scope Conformance Gate (Task 7) ───────────────────────────────────────────
+
+describe("checkScopeConformance", () => {
+  it("passes when all touched files are within declared scope", () => {
+    const result = checkScopeConformance(
+      ["src/core/foo.ts", "tests/core/foo.test.ts"],
+      ["src/core/foo.ts", "tests/core/foo.test.ts"]
+    );
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.unrelatedFiles, []);
+    assert.equal(result.recoveryInstruction, "");
+  });
+
+  it("passes when touched file is under a declared directory prefix", () => {
+    const result = checkScopeConformance(
+      ["src/core/orchestrator.ts", "src/core/policy_engine.ts"],
+      ["src/core/"]
+    );
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.unrelatedFiles, []);
+  });
+
+  it("blocks when an unrelated file is touched", () => {
+    const result = checkScopeConformance(
+      ["src/core/foo.ts", "src/dashboard/live_dashboard.ts"],
+      ["src/core/foo.ts"]
+    );
+    assert.equal(result.ok, false);
+    assert.ok(result.unrelatedFiles.includes("src/dashboard/live_dashboard.ts"));
+    assert.ok(result.recoveryInstruction.includes("SCOPE VIOLATION"));
+    assert.ok(result.recoveryInstruction.includes("git checkout"));
+  });
+
+  it("passes when no files_hint declared (cannot enforce without scope)", () => {
+    const result = checkScopeConformance(
+      ["src/core/foo.ts", "src/core/bar.ts"],
+      []
+    );
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.unrelatedFiles, []);
+  });
+
+  it("passes when no files are touched", () => {
+    const result = checkScopeConformance([], ["src/core/foo.ts"]);
+    assert.equal(result.ok, true);
+  });
+
+  it("recovery instruction names all unrelated files", () => {
+    const result = checkScopeConformance(
+      ["src/core/foo.ts", "scripts/deploy.sh", "docker/Dockerfile"],
+      ["src/core/foo.ts"]
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.unrelatedFiles.length, 2);
+    assert.ok(result.recoveryInstruction.includes("scripts/deploy.sh"));
+    assert.ok(result.recoveryInstruction.includes("docker/Dockerfile"));
+  });
+
+  it("handles Windows-style backslash paths in filesTouched", () => {
+    const result = checkScopeConformance(
+      ["src\\core\\foo.ts"],
+      ["src/core/foo.ts"]
+    );
+    assert.equal(result.ok, true, "backslash paths must be normalized for comparison");
+  });
+
+  it("negative: multiple unrelated files all appear in recoveryInstruction", () => {
+    const result = checkScopeConformance(
+      ["src/core/foo.ts", "README.md", "package.json", ".env"],
+      ["src/core/foo.ts"]
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.unrelatedFiles.length, 3);
+    for (const f of result.unrelatedFiles) {
+      assert.ok(result.recoveryInstruction.includes(f), `recoveryInstruction must mention ${f}`);
+    }
   });
 });

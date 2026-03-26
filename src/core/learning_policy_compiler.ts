@@ -291,3 +291,139 @@ export function hardGateRecurrenceToPolicies(postmortems, existingPolicyIds = []
 
   return { newPolicies, escalations };
 }
+
+// ── Routing adjustments (Task 9) ──────────────────────────────────────────────
+
+/**
+ * @typedef {object} RoutingAdjustment
+ * @property {string} policyId — the compiled policy that triggered this adjustment
+ * @property {string} modelOverride — model routing override (e.g. "force-sonnet", "block-opus")
+ * @property {string} reason — why this routing adjustment was applied
+ * @property {"critical"|"warning"} severity — mirrors the triggering policy severity
+ */
+
+/**
+ * Map from policy ID to the routing adjustment it should trigger.
+ * Critical policies (recurring failures) route to safer, more predictable models.
+ * Import-related issues block Opus escalation since model complexity is not the problem.
+ */
+const POLICY_ROUTING_MAP: Record<string, { modelOverride: string; reason: string }> = {
+  "glob-false-fail":          { modelOverride: "force-sonnet", reason: "glob failures are tooling issues, not reasoning gaps — Sonnet sufficient" },
+  "lint-failure":             { modelOverride: "force-sonnet", reason: "lint failures require precision, not reasoning depth" },
+  "hardcoded-path":           { modelOverride: "force-sonnet", reason: "path issues are mechanical — Sonnet sufficient" },
+  "import-error":             { modelOverride: "block-opus",   reason: "import errors indicate env/dependency issues, not model capability gaps" },
+  "missing-error-handling":   { modelOverride: "force-sonnet", reason: "error handling is a discipline issue, not a reasoning issue" },
+  "missing-test":             { modelOverride: "force-sonnet", reason: "test coverage is discipline-driven, not model-driven" },
+  "state-corruption":         { modelOverride: "force-sonnet", reason: "state atomicity is a tooling discipline; model change unhelpful" },
+  "syntax-error":             { modelOverride: "block-opus",   reason: "syntax errors are never fixed by a more expensive model" },
+};
+
+/**
+ * Derive routing adjustments from compiled policies.
+ *
+ * Recurring failure classes adjust model routing to prevent the same model from
+ * being used on tasks where it has demonstrated repeated failure.
+ *
+ * @param {CompiledPolicy[]} policies — active compiled policies (from compileLessonsToPolicies or hardGateRecurrenceToPolicies)
+ * @returns {RoutingAdjustment[]}
+ */
+export function deriveRoutingAdjustments(policies) {
+  if (!Array.isArray(policies)) return [];
+
+  const adjustments = [];
+  const seen = new Set<string>();
+
+  for (const policy of policies) {
+    const id = String(policy?.id || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+
+    const mapping = POLICY_ROUTING_MAP[id];
+    if (mapping) {
+      adjustments.push({
+        policyId: id,
+        modelOverride: mapping.modelOverride,
+        reason: mapping.reason,
+        severity: policy.severity || "warning",
+      });
+    }
+    // For hard-gated custom recurrence policies, default to force-sonnet
+    else if (id.startsWith("custom-recurrence-") && (policy as any)._hardGated) {
+      adjustments.push({
+        policyId: id,
+        modelOverride: "force-sonnet",
+        reason: `Recurring custom failure class: ${policy.assertion?.slice(0, 80) || id}`,
+        severity: policy.severity || "warning",
+      });
+    }
+  }
+
+  return adjustments;
+}
+
+/**
+ * @typedef {object} PromptHardConstraint
+ * @property {string} policyId — the compiled policy that triggered this constraint
+ * @property {string} constraint — the hard constraint to inject into the worker prompt
+ * @property {boolean} blocking — if true, violation of this constraint causes immediate rework
+ * @property {"critical"|"warning"} severity — mirrors the triggering policy severity
+ */
+
+/**
+ * Map from policy ID to the prompt hard constraint it injects.
+ * Hard constraints are injected into the worker prompt preamble so the model
+ * cannot silently violate them — violation triggers an immediate rework gate.
+ */
+const POLICY_PROMPT_CONSTRAINT_MAP: Record<string, { constraint: string; blocking: boolean }> = {
+  "glob-false-fail":          { constraint: "HARD CONSTRAINT: Use 'npm test' only. Never use 'node --test tests/**' glob patterns.", blocking: true },
+  "missing-test":             { constraint: "HARD CONSTRAINT: Every code change must include or update at least one test file.", blocking: true },
+  "lint-failure":             { constraint: "HARD CONSTRAINT: Run 'npm run lint' before marking done. Zero new lint errors are required.", blocking: true },
+  "import-error":             { constraint: "HARD CONSTRAINT: Verify all imports resolve before committing. Run 'node -e \"import('./path')\"' on new imports.", blocking: true },
+  "state-corruption":         { constraint: "HARD CONSTRAINT: All state file writes must use writeJson (atomic write). Never use fs.writeFile directly on JSON state.", blocking: true },
+  "syntax-error":             { constraint: "HARD CONSTRAINT: Syntax-check all changed files before commit. No SyntaxError is acceptable.", blocking: true },
+  "hardcoded-path":           { constraint: "HARD CONSTRAINT: Use path.join() for all file paths. No hardcoded separators (/ or \\\\).", blocking: false },
+  "missing-error-handling":   { constraint: "HARD CONSTRAINT: All async operations at system boundaries must have explicit try/catch with logged errors.", blocking: false },
+};
+
+/**
+ * Build prompt hard constraints from compiled policies.
+ *
+ * These constraints are injected into the worker prompt so the model has
+ * explicit in-context rules derived from recurring postmortem failure classes.
+ *
+ * @param {CompiledPolicy[]} policies — active compiled policies
+ * @returns {PromptHardConstraint[]}
+ */
+export function buildPromptHardConstraints(policies) {
+  if (!Array.isArray(policies)) return [];
+
+  const constraints = [];
+  const seen = new Set<string>();
+
+  for (const policy of policies) {
+    const id = String(policy?.id || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+
+    const mapping = POLICY_PROMPT_CONSTRAINT_MAP[id];
+    if (mapping) {
+      constraints.push({
+        policyId: id,
+        constraint: mapping.constraint,
+        blocking: mapping.blocking,
+        severity: policy.severity || "warning",
+      });
+    }
+    // For hard-gated custom recurrence policies, generate a generic constraint
+    else if (id.startsWith("custom-recurrence-") && (policy as any)._hardGated) {
+      constraints.push({
+        policyId: id,
+        constraint: `HARD CONSTRAINT (recurring): ${policy.assertion?.slice(0, 120) || id}`,
+        blocking: policy.severity === "critical",
+        severity: policy.severity || "warning",
+      });
+    }
+  }
+
+  return constraints;
+}

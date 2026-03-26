@@ -91,7 +91,7 @@ export function parseVerificationReport(output) {
   const match = text.match(/VERIFICATION_REPORT:\s*([^\n\r]+)/i);
   if (!match) return null;
 
-  const report: Record<string, any> = {};
+  const report: Record<string, string> = {};
   const pairs = match[1].split(";").map(s => s.trim()).filter(Boolean);
   for (const pair of pairs) {
     const eqIdx = pair.indexOf("=");
@@ -136,7 +136,7 @@ export function parseResponsiveMatrix(output) {
   const match = text.match(/RESPONSIVE_MATRIX:\s*([^\n\r]+)/i);
   if (!match) return null;
 
-  const matrix: Record<string, any> = {};
+  const matrix: Record<string, string> = {};
   const pairs = match[1].split(",").map(s => s.trim()).filter(Boolean);
   for (const pair of pairs) {
     const eqIdx = pair.indexOf("=");
@@ -148,16 +148,23 @@ export function parseResponsiveMatrix(output) {
   return Object.keys(matrix).length > 0 ? matrix : null;
 }
 
+/** Options for {@link validateWorkerContract}. */
+export interface ValidateWorkerContractOptions {
+  /** Config.gates object to upgrade optional evidence fields to required. */
+  gatesConfig?: Record<string, unknown>;
+  /** When false, skips the post-merge artifact gate (git SHA + npm test output). Default: true. */
+  requirePostMergeArtifact?: boolean;
+}
+
 /**
  * Validate a worker's output against its role's verification profile.
  *
  * @param {string} workerKind — the role kind from box.config.json (e.g. "frontend", "backend")
  * @param {object} parsedResponse — output from parseWorkerResponse() in worker_runner.js
- * @param {object} [options] — optional overrides
- * @param {object} [options.gatesConfig] — config.gates to upgrade optional fields to required
+ * @param {ValidateWorkerContractOptions} [options] — optional overrides
  * @returns {{ passed: boolean, gaps: string[], evidence: object }}
  */
-export function validateWorkerContract(workerKind, parsedResponse, options: any = {}) {
+export function validateWorkerContract(workerKind: string, parsedResponse: Record<string, unknown>, options: ValidateWorkerContractOptions = {}) {
   const baseProfile = getVerificationProfile(workerKind);
   const profile = options.gatesConfig ? applyConfigOverrides(baseProfile, options.gatesConfig) : baseProfile;
   const output = parsedResponse?.fullOutput || parsedResponse?.summary || "";
@@ -165,8 +172,8 @@ export function validateWorkerContract(workerKind, parsedResponse, options: any 
   const responsiveMatrix = parseResponsiveMatrix(output);
   const prUrl = parsePrUrl(output);
 
-  const gaps = [];
-  const evidence = {
+  const gaps: string[] = [];
+  const evidence: Record<string, unknown> = {
     hasReport: !!report,
     report: report || {},
     responsiveMatrix: responsiveMatrix || {},
@@ -201,7 +208,7 @@ export function validateWorkerContract(workerKind, parsedResponse, options: any 
   const requireArtifact = options.requirePostMergeArtifact !== false && hasRequiredFields;
   if (requireArtifact) {
     const artifact = checkPostMergeArtifact(output);
-    (evidence as any).postMergeArtifact = artifact;
+    evidence.postMergeArtifact = artifact;
     if (artifact.hasUnfilledPlaceholder) {
       gaps.push("POST_MERGE_TEST_OUTPUT placeholder is still unfilled — replace it with actual test output");
     }

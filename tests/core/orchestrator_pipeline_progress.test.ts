@@ -51,6 +51,7 @@ describe("orchestrator pipeline progress — resilience", () => {
   });
 
   afterEach(async () => {
+    mock.restoreAll();
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -250,6 +251,76 @@ describe("orchestrator governance pre-dispatch gate", () => {
     assert.ok(incident.incidentId, "incident must have an incidentId");
     assert.ok(incident.trigger === "CANARY_ROLLBACK" || incident.level === "config-only",
       `unexpected incident trigger/level: trigger=${incident.trigger} level=${incident.level}`
+    );
+  });
+
+  it("should block dispatch when governance freeze is active without guardrail override", async () => {
+    const plans = [
+      { id: "T1", task: "high-risk task", role: "backend", dependsOn: [], filesInScope: ["src/core/orchestrator.ts"] }
+    ];
+
+    const freezeOnlyConfig = {
+      ...config,
+      systemGuardian: { enabled: false },
+      canary: { enabled: false },
+      governanceFreeze: { enabled: true, manualOverrideActive: true }
+    };
+
+    const result = await evaluatePreDispatchGovernanceGate(freezeOnlyConfig, plans, "freeze-only-cycle-1");
+
+    assert.equal(result.blocked, true, "dispatch must be blocked by freeze when no higher-precedence guardrail is active");
+    assert.ok(
+      result.reason.startsWith("governance_freeze_active:"),
+      `expected FREEZE reason, got: ${result.reason}`
+    );
+    assert.equal(result.action, undefined, "freeze block should not trigger rollback action");
+  });
+
+  it("continues non-fatally and emits warning signal when guardrail check throws", async () => {
+    const warnings = [];
+    mock.method(console, "warn", (...args) => {
+      warnings.push(args.map(v => String(v)).join(" "));
+    });
+
+    const guardrailThrowConfig = {
+      ...config,
+      // Invalid path type forces isGuardrailActive(path.join) to throw.
+      paths: { stateDir: Symbol("invalid-state-dir") },
+      canary: { enabled: false }
+    };
+
+    await assert.doesNotReject(
+      () => evaluatePreDispatchGovernanceGate(guardrailThrowConfig, [], "guardrail-throw-cycle-1"),
+      "guardrail exceptions must be handled as warning-only and not thrown"
+    );
+
+    const result = await evaluatePreDispatchGovernanceGate(guardrailThrowConfig, [], "guardrail-throw-cycle-2");
+    assert.equal(result.blocked, false, "guardrail exception path must safely fall through when no other gate is active");
+    assert.equal(result.reason, null);
+    assert.ok(
+      warnings.some(msg => msg.includes("pre-dispatch guardrail check failed")),
+      "warning signal must be emitted when guardrail check throws"
+    );
+  });
+
+  it("covers gate wrapper catch path with safe fallthrough on unexpected guard exception", async () => {
+    const guardrailThrowFreezeConfig = {
+      ...config,
+      paths: { stateDir: Symbol("invalid-state-dir-2") },
+      canary: { enabled: false },
+      governanceFreeze: { enabled: true, manualOverrideActive: true }
+    };
+
+    const result = await evaluatePreDispatchGovernanceGate(
+      guardrailThrowFreezeConfig,
+      [],
+      "guardrail-wrapper-catch-cycle-1"
+    );
+
+    assert.equal(result.blocked, true, "unexpected guardrail exception must not crash gate evaluation");
+    assert.ok(
+      result.reason.startsWith("governance_freeze_active:"),
+      `freeze gate must still evaluate after guard exception; got: ${result.reason}`
     );
   });
 

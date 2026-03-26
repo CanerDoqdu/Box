@@ -522,4 +522,33 @@ describe("tagProviderDecision -- explicit fallback tagging at trust boundary", (
     const fromProvider = tagProviderDecision(d, "provider");
     assert.notEqual(fromFallback._source, fromProvider._source);
   });
+
+  it("attaches _fallbackReason when source='fallback' and reason is provided (T3)", () => {
+    const fallback = { approved: false, reason: "deterministic fallback" };
+    const tagged = tagProviderDecision(fallback, "fallback", "API 429 rate limit");
+    assert.equal(tagged._source, "fallback");
+    assert.equal(tagged._fallbackReason, "API 429 rate limit");
+  });
+
+  it("omits _fallbackReason when source='provider' (T3)", () => {
+    const decision = { approved: true, reason: "ok" };
+    const tagged = tagProviderDecision(decision, "provider");
+    assert.equal(tagged._source, "provider");
+    assert.equal((tagged as any)._fallbackReason, undefined, "_fallbackReason must not appear on provider-source tags");
+  });
+
+  it("omits _fallbackReason when fallbackReason is not passed (T3)", () => {
+    const fallback = { approved: false, reason: "deterministic" };
+    const tagged = tagProviderDecision(fallback, "fallback");
+    assert.equal(tagged._source, "fallback");
+    assert.equal((tagged as any)._fallbackReason, undefined, "_fallbackReason must be absent when not supplied");
+  });
+
+  it("negative: fallback without reason still has _source='fallback' (T3)", () => {
+    const fallback = { approved: false, reason: "no api key" };
+    const tagged = tagProviderDecision(fallback, "fallback");
+    assert.equal(tagged._source, "fallback");
+    // Should pass gates check: source is machine-readable
+    assert.ok(["provider", "fallback"].includes(tagged._source));
+  });
 });

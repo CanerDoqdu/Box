@@ -92,6 +92,14 @@ export const EVENTS = Object.freeze({
   GOVERNANCE_SELF_IMPROVEMENT_RUN:   "box.v1.governance.selfImprovementRun",
   GOVERNANCE_EVOLUTION_TASK_STARTED: "box.v1.governance.evolutionTaskStarted",
   GOVERNANCE_EVOLUTION_TASK_DONE:    "box.v1.governance.evolutionTaskDone",
+
+  // Governance domain — pre-dispatch gate decision (Task 8)
+  // Payload fields: blocked (boolean), reason (string|null), inputSnapshot (object)
+  GOVERNANCE_GATE_EVALUATED:         "box.v1.governance.gateEvaluated",
+
+  // Policy domain — provider fallback decision (Task 8)
+  // Payload fields: source ("provider"|"fallback"), fallbackReason (string|null), inputSnapshot (object)
+  POLICY_PROVIDER_FALLBACK_DECISION: "box.v1.policy.providerFallbackDecision",
 });
 
 /** Flat set of all valid event name strings — for O(1) lookup. */
@@ -224,10 +232,10 @@ export const EVENT_ERROR_CODE = Object.freeze({
  * @param {object} payload
  * @returns {object} — new object with sensitive values replaced by REDACTED
  */
-export function redactSensitiveFields(payload) {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload;
-  const result: Record<string, any> = {};
-  for (const [k, v] of Object.entries(payload)) {
+export function redactSensitiveFields(payload: unknown): Record<string, unknown> {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return payload as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(payload as Record<string, unknown>)) {
     result[k] = SENSITIVE_FIELD_DENYLIST.includes(k.toLowerCase()) ? REDACTED : v;
   }
   return result;
@@ -333,7 +341,7 @@ export function validateEvent(event) {
  * @param {object} [payload]   — event-specific data (will be redacted)
  * @returns {object}           — validated, redacted event envelope
  */
-export function buildEvent(eventName, domain, correlationId, payload: any = {}) {
+export function buildEvent(eventName: string, domain: string, correlationId: string, payload: Record<string, unknown> = {}) {
   const envelope = {
     event: eventName,
     version: EVENT_SCHEMA_VERSION,
@@ -346,8 +354,8 @@ export function buildEvent(eventName, domain, correlationId, payload: any = {}) 
   const result = validateEvent(envelope);
   if (!result.ok) {
     const err = new Error(`buildEvent: invalid event — ${result.message}`);
-    (err as any).code = result.code;
-    (err as any).field = result.field || null;
+    (err as NodeJS.ErrnoException & { code?: string; field?: string }).code = result.code ?? undefined;
+    (err as NodeJS.ErrnoException & { code?: string; field?: string }).field = result.field || null;
     throw err;
   }
 

@@ -85,6 +85,17 @@ type SpawnAsyncResult = {
   timedOut?: boolean;
 };
 
+// ── Scope conformance types ───────────────────────────────────────────────────
+
+export type ScopeConformanceResult = {
+  /** True when all touched files are within the declared files_hint scope. */
+  ok: boolean;
+  /** Files touched by the worker that are outside the declared scope. */
+  unrelatedFiles: string[];
+  /** Human-readable recovery instruction emitted when ok=false. */
+  recoveryInstruction: string;
+};
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const PROGRESS_FILE = "state/evolution_progress.json";
@@ -92,6 +103,71 @@ const DEFAULT_MAX_ATTEMPTS = 3;
 const EVOLUTION_WORKER_SLUG = "evolution-worker";
 const ATHENA_PRE_REVIEW_MAX_RETRIES = 1;
 const ATHENA_REVIEW_TIMEOUT_MS = 5 * 60 * 1000;
+
+// ── Scope conformance check (Task 7) ─────────────────────────────────────────
+
+/**
+ * Check whether all worker-touched files fall within the task's declared files_hint scope.
+ *
+ * A file is considered "in scope" when it:
+ *   - Exactly matches a hint path, OR
+ *   - Is a path prefix match (e.g. hint "src/core/" covers "src/core/foo.ts"), OR
+ *   - Is a test file whose base name corresponds to an in-scope source file.
+ *
+ * When files outside scope are detected, returns ok=false with an explicit
+ * recovery instruction so the worker can revert unrelated changes before
+ * re-attempting finalization. This prevents silent scope creep.
+ *
+ * @param filesTouched - files reported by BOX_FILES_TOUCHED in worker output
+ * @param filesHint    - declared scope from task.files_hint
+ * @returns ScopeConformanceResult
+ */
+export function checkScopeConformance(
+  filesTouched: string[],
+  filesHint: string[]
+): ScopeConformanceResult {
+  // No declared scope or no files touched → pass-through (cannot enforce without a scope)
+  if (!Array.isArray(filesHint) || filesHint.length === 0) {
+    return { ok: true, unrelatedFiles: [], recoveryInstruction: "" };
+  }
+  if (!Array.isArray(filesTouched) || filesTouched.length === 0) {
+    return { ok: true, unrelatedFiles: [], recoveryInstruction: "" };
+  }
+
+  const normalizedHints = filesHint.map(h => h.replace(/\\/g, "/").toLowerCase());
+
+  const unrelatedFiles: string[] = [];
+  for (const file of filesTouched) {
+    const normalized = file.replace(/\\/g, "/").toLowerCase();
+    const inScope = normalizedHints.some(hint => {
+      // Exact match
+      if (normalized === hint) return true;
+      // Prefix match (hint is a directory prefix)
+      if (normalized.startsWith(hint.endsWith("/") ? hint : hint + "/")) return true;
+      // Test file corresponding to a hinted source file (e.g. foo.ts → foo.test.ts)
+      const hintBase = hint.replace(/\.(ts|js)$/, "");
+      if (normalized.includes(hintBase)) return true;
+      return false;
+    });
+    if (!inScope) {
+      unrelatedFiles.push(file);
+    }
+  }
+
+  if (unrelatedFiles.length === 0) {
+    return { ok: true, unrelatedFiles: [], recoveryInstruction: "" };
+  }
+
+  const recoveryInstruction = [
+    `SCOPE VIOLATION: ${unrelatedFiles.length} file(s) modified outside declared task scope.`,
+    `Unrelated files: ${unrelatedFiles.join(", ")}`,
+    `Recovery: revert unrelated changes with 'git checkout -- <file>' for each file listed above,`,
+    `then re-run verification and re-submit. Only files in scope may be modified:`,
+    `  ${filesHint.join(", ")}`
+  ].join("\n");
+
+  return { ok: false, unrelatedFiles, recoveryInstruction };
+}
 
 const ATHENA_RETRYABLE_REVIEW_PATTERNS = [
   /untestable/i,
@@ -835,6 +911,24 @@ export async function runEvolutionLoop(config, options: { fromTaskId?: string; d
         await appendProgress(config, `[EVO] ${task.task_id} — artifact gate failed: ${gaps.join("; ")}`);
         await saveProgress(stateDir, progress);
         console.warn(`[evolution] Artifact gate failed — scheduling rework (${gaps.join(", ")})`);
+        continue;
+      }
+
+      // 4b-scope. Scope conformance gate: block finalization when the worker
+      // modified files outside the declared task scope (Task 7).
+      // Allows no-hint tasks through (scope guard requires explicit files_hint).
+      const scopeCheck = checkScopeConformance(
+        Array.isArray(workerResult.filesTouched) ? workerResult.filesTouched as string[] : [],
+        activeTask.files_hint || []
+      );
+      if (!scopeCheck.ok) {
+        taskState.status = "rework";
+        taskState.error = `scope-violation: ${scopeCheck.unrelatedFiles.join(", ")}`;
+        await appendProgress(config,
+          `[EVO] ${task.task_id} — scope conformance gate failed: ${scopeCheck.unrelatedFiles.length} unrelated file(s) touched`
+        );
+        await saveProgress(stateDir, progress);
+        console.warn(`[evolution] Scope violation — scheduling rework\n${scopeCheck.recoveryInstruction}`);
         continue;
       }
 

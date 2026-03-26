@@ -524,3 +524,95 @@ describe("AC18: Risk level acknowledgement", () => {
     assert.ok(true, "risk=HIGH acknowledged; see billing and alert tests in this suite");
   });
 });
+
+// ── Task 8: Typed event emission for governance gate and provider fallback ───
+
+describe("Task 8 — GOVERNANCE_GATE_EVALUATED typed event", () => {
+  it("is a valid canonical event name in EVENTS + VALID_EVENT_NAMES", () => {
+    assert.ok(EVENTS.GOVERNANCE_GATE_EVALUATED, "event key must exist");
+    assert.ok(
+      EVENT_NAME_PATTERN.test(EVENTS.GOVERNANCE_GATE_EVALUATED),
+      "GOVERNANCE_GATE_EVALUATED must match event name pattern"
+    );
+    assert.ok(VALID_EVENT_NAMES.has(EVENTS.GOVERNANCE_GATE_EVALUATED), "must be in VALID_EVENT_NAMES");
+  });
+
+  it("buildEvent succeeds with reason and inputSnapshot payload fields", () => {
+    const envelope = buildEvent(
+      EVENTS.GOVERNANCE_GATE_EVALUATED,
+      EVENT_DOMAIN.GOVERNANCE,
+      "gate-test-corr-001",
+      { blocked: false, reason: null, inputSnapshot: { planCount: 3, cycleId: "cycle-1" } }
+    );
+    assert.equal(envelope.event, EVENTS.GOVERNANCE_GATE_EVALUATED);
+    assert.equal(envelope.domain, EVENT_DOMAIN.GOVERNANCE);
+    assert.equal(envelope.payload.blocked, false);
+    assert.equal(envelope.payload.reason, null);
+    assert.ok(typeof envelope.payload.inputSnapshot === "object");
+  });
+
+  it("passes full validateEvent schema check for blocked=true case", () => {
+    const envelope = buildEvent(
+      EVENTS.GOVERNANCE_GATE_EVALUATED,
+      EVENT_DOMAIN.GOVERNANCE,
+      "gate-validate-corr-001",
+      { blocked: true, reason: "governance_freeze_active:month-12" }
+    );
+    const result = validateEvent(envelope);
+    assert.equal(result.ok, true, `validateEvent returned not-ok: ${result.message}`);
+  });
+});
+
+describe("Task 8 — POLICY_PROVIDER_FALLBACK_DECISION typed event", () => {
+  it("is a valid canonical event name in EVENTS + VALID_EVENT_NAMES", () => {
+    assert.ok(EVENTS.POLICY_PROVIDER_FALLBACK_DECISION, "event key must exist");
+    assert.ok(
+      EVENT_NAME_PATTERN.test(EVENTS.POLICY_PROVIDER_FALLBACK_DECISION),
+      "POLICY_PROVIDER_FALLBACK_DECISION must match event name pattern"
+    );
+    assert.ok(
+      VALID_EVENT_NAMES.has(EVENTS.POLICY_PROVIDER_FALLBACK_DECISION),
+      "must be in VALID_EVENT_NAMES"
+    );
+  });
+
+  it("buildEvent succeeds with source and fallbackReason fields", () => {
+    const envelope = buildEvent(
+      EVENTS.POLICY_PROVIDER_FALLBACK_DECISION,
+      EVENT_DOMAIN.POLICY,
+      "fallback-test-corr-001",
+      { source: "fallback", fallbackReason: "API 429 rate limit", inputSnapshot: { taskId: "T-001" } }
+    );
+    assert.equal(envelope.event, EVENTS.POLICY_PROVIDER_FALLBACK_DECISION);
+    assert.equal(envelope.domain, EVENT_DOMAIN.POLICY);
+    assert.equal(envelope.payload.source, "fallback");
+    assert.equal(envelope.payload.fallbackReason, "API 429 rate limit");
+  });
+
+  it("passes full validateEvent schema check for provider source", () => {
+    const envelope = buildEvent(
+      EVENTS.POLICY_PROVIDER_FALLBACK_DECISION,
+      EVENT_DOMAIN.POLICY,
+      "fallback-validate-corr-001",
+      { source: "provider", fallbackReason: null }
+    );
+    const result = validateEvent(envelope);
+    assert.equal(result.ok, true, `validateEvent returned not-ok: ${result.message}`);
+  });
+
+  it("negative: invalid domain throws with INVALID_DOMAIN code", () => {
+    let err: unknown;
+    try {
+      buildEvent(
+        EVENTS.POLICY_PROVIDER_FALLBACK_DECISION,
+        "bad-domain",
+        "neg-corr-001",
+        { source: "fallback" }
+      );
+    } catch (e) {
+      err = e;
+    }
+    assert.ok(err, "must throw when domain is invalid");
+    assert.equal((err as NodeJS.ErrnoException).code, "INVALID_DOMAIN");
+  });
+});
