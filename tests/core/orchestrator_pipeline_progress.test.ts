@@ -8,6 +8,7 @@
  *   - AC3:  idle/cycle_complete timestamps
  *   - Task 1 (resume governance gate): checkpoint resume blocked by pre-dispatch governance gate
  *   - Task 2 (event emission): GOVERNANCE_GATE_EVALUATED and PLANNING_PLAN_REJECTED emitted
+ *   - Task N (degraded event): ORCHESTRATION_HEALTH_DEGRADED emitted in governance gate exception catch paths
  */
 
 import { describe, it, beforeEach, afterEach, mock } from "node:test";
@@ -604,5 +605,97 @@ describe("orchestrator typed event emission — GOVERNANCE_GATE_EVALUATED", () =
       assert.ok(typeof ev.event === "string", "every emitted event must have a string event field");
       assert.ok(typeof ev.domain === "string", "every emitted event must have a string domain");
     }
+  });
+});
+
+// ── Governance gate exception — degraded event emission ───────────────────────
+
+describe("orchestrator governance gate exception — ORCHESTRATION_HEALTH_DEGRADED emission", () => {
+  let tmpDir;
+  let config;
+  let emittedEvents;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-gate-degrade-"));
+    emittedEvents = [];
+    config = {
+      paths: {
+        stateDir: tmpDir,
+        progressFile: path.join(tmpDir, "progress.txt"),
+        policyFile:   path.join(tmpDir, "policy.json")
+      },
+      env: {
+        copilotCliCommand: "__missing_copilot_binary__",
+        targetRepo: "CanerDoqdu/Box"
+      },
+      roleRegistry: {
+        ceoSupervisor: { name: "Jesus",     model: "Claude Sonnet 4.6" },
+        deepPlanner:   { name: "Prometheus", model: "GPT-5.3-Codex" },
+        qualityReviewer: { name: "Athena",  model: "Claude Sonnet 4.6" }
+      },
+      copilot: { leadershipAutopilot: false },
+      systemGuardian: { enabled: false }
+    };
+    await fs.writeFile(config.paths.policyFile, JSON.stringify({ blockedCommands: [] }, null, 2), "utf8");
+
+    mock.method(console, "log", (line) => {
+      try {
+        const obj = JSON.parse(line);
+        if (obj && typeof obj.event === "string") emittedEvents.push(obj);
+      } catch { /* not JSON */ }
+    });
+  });
+
+  afterEach(async () => {
+    mock.restoreAll();
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it("emits ORCHESTRATION_HEALTH_DEGRADED and stays non-fatal when governance gate throws during resume", async () => {
+    // Write an approved athena review with plans so resume path reaches the governance gate.
+    const athenaReview = {
+      approved: true,
+      patchedPlans: [
+        { id: "T1", task: "task one", role: "evolution-worker", dependsOn: [], filesInScope: [] }
+      ]
+    };
+    await fs.writeFile(
+      path.join(tmpDir, "athena_plan_review.json"),
+      JSON.stringify(athenaReview),
+      "utf8"
+    );
+
+    // Inject a governance canary config getter that throws synchronously.
+    // getGovernanceCanaryConfig() accesses `config.canary.governance` before any
+    // early-return guard, so this propagates out of evaluatePreDispatchGovernanceGate
+    // and into the outer catch block in tryResumeDispatchFromCheckpoint.
+    const throwingConfig = Object.assign({}, config, {
+      canary: {
+        enabled: false,
+        get governance() {
+          throw new Error("simulated governance gate exception");
+        }
+      }
+    });
+
+    // The cycle must not throw — non-fatality is the primary contract.
+    await assert.doesNotReject(
+      () => runResumeDispatch(throwingConfig),
+      "runResumeDispatch must not throw when the governance gate itself throws — outer catch must absorb it"
+    );
+
+    const degradedEvents = emittedEvents.filter(e => e.event === EVENTS.ORCHESTRATION_HEALTH_DEGRADED);
+    assert.ok(
+      degradedEvents.length >= 1,
+      `expected at least one ORCHESTRATION_HEALTH_DEGRADED event when gate throws; got ${degradedEvents.length}`
+    );
+    const ev = degradedEvents[0];
+    assert.equal(ev.domain, "orchestration", "degraded event domain must be orchestration");
+    assert.equal(ev.payload.reason, "governance_gate_exception", "payload.reason must be governance_gate_exception");
+    assert.equal(ev.payload.context, "resume_dispatch", "payload.context must be resume_dispatch");
+    assert.ok(
+      typeof ev.payload.error === "string" && ev.payload.error.length > 0,
+      "payload.error must be a non-empty string with the exception message"
+    );
   });
 });

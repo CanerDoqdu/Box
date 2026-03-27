@@ -560,6 +560,11 @@ async function tryResumeDispatchFromCheckpoint(config, options: { force?: boolea
     }
   } catch (err) {
     warn(`[orchestrator] Pre-dispatch governance gate failed during resume (non-fatal): ${String(err?.message || err)}`);
+    emitEvent(EVENTS.ORCHESTRATION_HEALTH_DEGRADED, EVENT_DOMAIN.ORCHESTRATION, resumeCycleId, {
+      reason: "governance_gate_exception",
+      error: String(err?.message || err),
+      context: "resume_dispatch"
+    });
   }
 
   await appendProgress(config,
@@ -666,8 +671,6 @@ export async function runOnce(config) {
     initializeAggregateLiveLog(stateDir, "run_once")
   ]);
 
-  const resumed = await tryResumeDispatchFromCheckpoint(config);
-  if (resumed) return;
   await runSingleCycle(config);
 }
 
@@ -996,9 +999,6 @@ async function runSingleCycle(config) {
   // This ensures runOnce (used in tests and CLI) also surfaces corrupt state.
   await auditCriticalStateFiles(config, stateDir);
 
-  const resumed = await tryResumeDispatchFromCheckpoint(config);
-  if (resumed) return;
-
   // ── Preflight capability checks ───────────────────────────────────────────
   // Validate system readiness before spending premium requests.
   if (config.runtime?.disablePreflight !== true) {
@@ -1267,6 +1267,11 @@ async function runSingleCycle(config) {
       }
     } catch (err) {
       warn(`[orchestrator] Pre-dispatch governance gate failed (non-fatal): ${String(err?.message || err)}`);
+      emitEvent(EVENTS.ORCHESTRATION_HEALTH_DEGRADED, EVENT_DOMAIN.ORCHESTRATION, cycleId, {
+        reason: "governance_gate_exception",
+        error: String(err?.message || err),
+        context: "cycle_dispatch"
+      });
     }
   }
 
