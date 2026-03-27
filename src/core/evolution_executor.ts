@@ -27,7 +27,7 @@ import { appendProgress } from "./state_tracker.js";
 import { buildAgentArgs, parseAgentOutput } from "./agent_loader.js";
 import { spawnAsync } from "./fs_utils.js";
 import { getRoleRegistry } from "./role_registry.js";
-import { checkPostMergeArtifact, ARTIFACT_GAP, ARTIFACT_GATE_ERROR_PREFIX } from "./verification_gate.js";
+import { checkPostMergeArtifact, ARTIFACT_GAP, ARTIFACT_GATE_ERROR_PREFIX, isArtifactGateRequired } from "./verification_gate.js";
 import { VERIFICATION_DEFAULTS } from "./verification_command_registry.js";
 
 type EvolutionTask = {
@@ -950,18 +950,23 @@ export async function runEvolutionLoop(config, options: { fromTaskId?: string; d
       // 4c. Run verification commands
       // 4b-gate. Artifact gate: worker output must contain a post-merge git SHA
       // and raw npm test output to prove the change was actually committed and tested.
-      const artifact = checkPostMergeArtifact(workerResult.fullOutput || workerResult.summary || "");
-      if (!artifact.hasArtifact) {
-        const gaps: string[] = [];
-        if (artifact.hasUnfilledPlaceholder) gaps.push(ARTIFACT_GAP.UNFILLED_PLACEHOLDER);
-        if (!artifact.hasSha) gaps.push(ARTIFACT_GAP.MISSING_SHA);
-        if (!artifact.hasTestOutput) gaps.push(ARTIFACT_GAP.MISSING_TEST_OUTPUT);
-        taskState.status = "rework";
-        taskState.error = `${ARTIFACT_GATE_ERROR_PREFIX}: ${gaps.join("; ")}`;
-        await appendProgress(config, `[EVO] ${task.task_id} — artifact gate failed: ${gaps.join("; ")}`);
-        await saveProgress(stateDir, progress);
-        console.warn(`[evolution] Artifact gate failed — scheduling rework (${gaps.join(", ")})`);
-        continue;
+      // Non-merge task kinds (scan, doc, observation, diagnosis) are exempt.
+      const evolutionTaskKind = instruction.taskKind || "backend";
+      const evolutionWorkerKind = "backend"; // evolution-worker is always backend-lane
+      if (isArtifactGateRequired(evolutionWorkerKind, evolutionTaskKind)) {
+        const artifact = checkPostMergeArtifact(workerResult.fullOutput || workerResult.summary || "");
+        if (!artifact.hasArtifact) {
+          const gaps: string[] = [];
+          if (artifact.hasUnfilledPlaceholder) gaps.push(ARTIFACT_GAP.UNFILLED_PLACEHOLDER);
+          if (!artifact.hasSha) gaps.push(ARTIFACT_GAP.MISSING_SHA);
+          if (!artifact.hasTestOutput) gaps.push(ARTIFACT_GAP.MISSING_TEST_OUTPUT);
+          taskState.status = "rework";
+          taskState.error = `${ARTIFACT_GATE_ERROR_PREFIX}: ${gaps.join("; ")}`;
+          await appendProgress(config, `[EVO] ${task.task_id} — artifact gate failed: ${gaps.join("; ")}`);
+          await saveProgress(stateDir, progress);
+          console.warn(`[evolution] Artifact gate failed — scheduling rework (${gaps.join(", ")})`);
+          continue;
+        }
       }
 
       // 4b-scope. Scope conformance gate: block finalization when the worker

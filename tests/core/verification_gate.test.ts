@@ -8,6 +8,8 @@ import {
   validateWorkerContract,
   checkPostMergeArtifact,
   POST_MERGE_PLACEHOLDER,
+  NON_MERGE_TASK_KINDS,
+  isArtifactGateRequired,
 } from "../../src/core/verification_gate.js";
 
 describe("verification_gate parse helpers", () => {
@@ -374,6 +376,154 @@ describe("verification_gate — artifact check mandatory across all completion p
     assert.ok(
       result.gaps.some(g => /placeholder/i.test(g)),
       `expected placeholder gap; got: [${result.gaps.join("; ")}]`
+    );
+  });
+});
+
+// ── Task 1: Refined done gate — NON_MERGE_TASK_KINDS + isArtifactGateRequired ─
+
+describe("verification_gate — NON_MERGE_TASK_KINDS constant", () => {
+  it("exports a Set containing the canonical non-merge task kinds", () => {
+    assert.ok(NON_MERGE_TASK_KINDS instanceof Set, "NON_MERGE_TASK_KINDS must be a Set");
+    assert.ok(NON_MERGE_TASK_KINDS.has("scan"), "scan must be in NON_MERGE_TASK_KINDS");
+    assert.ok(NON_MERGE_TASK_KINDS.has("doc"), "doc must be in NON_MERGE_TASK_KINDS");
+    assert.ok(NON_MERGE_TASK_KINDS.has("observation"), "observation must be in NON_MERGE_TASK_KINDS");
+    assert.ok(NON_MERGE_TASK_KINDS.has("diagnosis"), "diagnosis must be in NON_MERGE_TASK_KINDS");
+  });
+
+  it("does not include implementation or rework kinds", () => {
+    assert.ok(!NON_MERGE_TASK_KINDS.has("backend"), "backend must NOT be in NON_MERGE_TASK_KINDS");
+    assert.ok(!NON_MERGE_TASK_KINDS.has("rework"), "rework must NOT be in NON_MERGE_TASK_KINDS");
+    assert.ok(!NON_MERGE_TASK_KINDS.has("general"), "general must NOT be in NON_MERGE_TASK_KINDS");
+  });
+});
+
+describe("verification_gate — isArtifactGateRequired", () => {
+  it("returns true for backend role with implementation taskKind", () => {
+    assert.equal(isArtifactGateRequired("backend", "backend"), true);
+  });
+
+  it("returns true for backend role with no taskKind", () => {
+    assert.equal(isArtifactGateRequired("backend", null), true);
+    assert.equal(isArtifactGateRequired("backend", undefined), true);
+  });
+
+  it("returns false for fully-exempt role (scanA) regardless of taskKind", () => {
+    assert.equal(isArtifactGateRequired("scanA", "backend"), false);
+    assert.equal(isArtifactGateRequired("scanA", null), false);
+  });
+
+  it("returns false for backend role when taskKind is scan (non-merge)", () => {
+    assert.equal(isArtifactGateRequired("backend", "scan"), false);
+  });
+
+  it("returns false for backend role when taskKind is doc (non-merge)", () => {
+    assert.equal(isArtifactGateRequired("backend", "doc"), false);
+  });
+
+  it("returns false for backend role when taskKind is observation (non-merge)", () => {
+    assert.equal(isArtifactGateRequired("backend", "observation"), false);
+  });
+
+  it("returns false for backend role when taskKind is diagnosis (non-merge)", () => {
+    assert.equal(isArtifactGateRequired("backend", "diagnosis"), false);
+  });
+
+  it("returns true for backend role when taskKind is rework (re-implementation)", () => {
+    assert.equal(isArtifactGateRequired("backend", "rework"), true);
+  });
+
+  it("returns true for backend role when taskKind is general (ambiguous, conservative default)", () => {
+    assert.equal(isArtifactGateRequired("backend", "general"), true);
+  });
+
+  it("is case-insensitive for taskKind", () => {
+    assert.equal(isArtifactGateRequired("backend", "SCAN"), false);
+    assert.equal(isArtifactGateRequired("backend", "Doc"), false);
+  });
+});
+
+describe("verification_gate — task-kind aware artifact gate in validateWorkerContract", () => {
+  const SCAN_OUTPUT_NO_ARTIFACT = [
+    "VERIFICATION_REPORT: BUILD=n/a; TESTS=n/a; EDGE_CASES=n/a",
+    "Scanned 42 files. No changes required.",
+    // No git SHA, no npm test output — legitimate for scan task
+  ].join("\n");
+
+  it("backend role with scan taskKind: done without artifact passes gate", () => {
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: SCAN_OUTPUT_NO_ARTIFACT
+    }, { taskKind: "scan" });
+
+    const artifactGap = result.gaps.find(g => /sha|npm|post-merge/i.test(g));
+    assert.equal(
+      artifactGap, undefined,
+      `scan taskKind must skip artifact gate; unexpected gap: ${artifactGap}`
+    );
+  });
+
+  it("backend role with doc taskKind: done without artifact passes gate", () => {
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: SCAN_OUTPUT_NO_ARTIFACT
+    }, { taskKind: "doc" });
+
+    const artifactGap = result.gaps.find(g => /sha|npm|post-merge/i.test(g));
+    assert.equal(
+      artifactGap, undefined,
+      `doc taskKind must skip artifact gate; unexpected gap: ${artifactGap}`
+    );
+  });
+
+  it("backend role with backend taskKind: done without artifact still fails gate", () => {
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: [
+        "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass; SECURITY=n/a; API=n/a; RESPONSIVE=n/a",
+        "BOX_PR_URL=https://github.com/org/repo/pull/99"
+        // No git SHA or npm test block
+      ].join("\n")
+    }, { taskKind: "backend" });
+
+    assert.equal(result.passed, false);
+    const hasArtifactGap = result.gaps.some(g => /sha|test output|npm/i.test(g));
+    assert.ok(hasArtifactGap,
+      `implementation taskKind must still require artifact; gaps: [${result.gaps.join("; ")}]`
+    );
+  });
+
+  it("backend role with rework taskKind: done without artifact still fails gate (re-implementation)", () => {
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: [
+        "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass; SECURITY=n/a; API=n/a; RESPONSIVE=n/a",
+        "BOX_PR_URL=https://github.com/org/repo/pull/77"
+      ].join("\n")
+    }, { taskKind: "rework" });
+
+    assert.equal(result.passed, false);
+    const hasArtifactGap = result.gaps.some(g => /sha|test output|npm/i.test(g));
+    assert.ok(hasArtifactGap,
+      `rework taskKind must still require artifact; gaps: [${result.gaps.join("; ")}]`
+    );
+  });
+
+  it("negative path: scan taskKind with unfilled placeholder is still rejected", () => {
+    // Placeholder is always rejected regardless of task kind — it signals
+    // the worker did not replace the template with real output.
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: `POST_MERGE_TEST_OUTPUT placeholder here`
+    }, { taskKind: "scan" });
+
+    // For scan taskKind: artifact gate is skipped entirely, so placeholder
+    // check does NOT fire (no artifact gate = no placeholder check).
+    // This is correct: a scan worker won't include npm output at all.
+    const artifactGap = result.gaps.find(g => /sha|npm|post-merge|placeholder/i.test(g));
+    assert.equal(
+      artifactGap, undefined,
+      `scan taskKind skips artifact gate entirely (including placeholder check); got: ${artifactGap}`
     );
   });
 });

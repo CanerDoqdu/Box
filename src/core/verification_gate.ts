@@ -162,12 +162,54 @@ export function parseResponsiveMatrix(output) {
   return Object.keys(matrix).length > 0 ? matrix : null;
 }
 
+/**
+ * Task kinds that are non-merge by nature — they do not involve committing
+ * or merging code, so the post-merge artifact gate (git SHA + npm test output)
+ * does not apply.  Implementation and rework kinds are NOT in this set.
+ */
+export const NON_MERGE_TASK_KINDS = Object.freeze(new Set([
+  "scan",
+  "doc",
+  "observation",
+  "diagnosis",
+]));
+
+/**
+ * Determine whether the post-merge artifact gate should run for a given
+ * worker kind + task kind combination.
+ *
+ * Returns false (gate skipped) when:
+ *   - The worker role is fully exempt (all evidence fields = "exempt"), OR
+ *   - The task kind is a non-merge task (scan, doc, observation, diagnosis).
+ *
+ * @param {string} workerKind — role kind (e.g. "backend", "scanA")
+ * @param {string|null|undefined} taskKind — instruction task kind
+ * @returns {boolean} — true when the artifact gate must run
+ */
+export function isArtifactGateRequired(workerKind: string, taskKind?: string | null): boolean {
+  // Exempt roles (scan/doc workers) never need artifacts
+  const profile = getVerificationProfile(workerKind);
+  const allExempt = Object.values(profile.evidence).every(v => v === "exempt");
+  if (allExempt) return false;
+
+  // Non-merge task kinds never produce a git SHA or test output
+  if (taskKind && NON_MERGE_TASK_KINDS.has(String(taskKind).toLowerCase())) return false;
+
+  return true;
+}
+
 /** Options for {@link validateWorkerContract}. */
 export interface ValidateWorkerContractOptions {
   /** Config.gates object to upgrade optional evidence fields to required. */
   gatesConfig?: Record<string, unknown>;
   /** When false, skips the post-merge artifact gate (git SHA + npm test output). Default: true. */
   requirePostMergeArtifact?: boolean;
+  /**
+   * The task kind from the instruction (e.g. "backend", "scan", "doc").
+   * Non-merge task kinds (scan, doc, observation, diagnosis) are exempt from
+   * the artifact gate even when the worker role is done-capable.
+   */
+  taskKind?: string | null;
 }
 
 /**
@@ -217,9 +259,13 @@ export function validateWorkerContract(workerKind: string, parsedResponse: Recor
 
   // ── Post-merge verification artifact gate ───────────────────────────────
   // Done-capable lanes (roles with at least one required evidence field) must
-  // include a git SHA + raw test output when reporting done. Roles whose
-  // evidence fields are all optional or exempt are not subject to this gate.
-  const requireArtifact = options.requirePostMergeArtifact !== false && hasRequiredFields;
+  // include a git SHA + raw test output when reporting done, UNLESS the task
+  // kind is a non-merge kind (scan, doc, observation, diagnosis) — those tasks
+  // do not produce a merged commit and are exempt from artifact requirements.
+  const artifactGateRequired = options.requirePostMergeArtifact !== false
+    && hasRequiredFields
+    && isArtifactGateRequired(workerKind, options.taskKind);
+  const requireArtifact = artifactGateRequired;
   if (requireArtifact) {
     const artifact = checkPostMergeArtifact(output);
     evidence.postMergeArtifact = artifact;
