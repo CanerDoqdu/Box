@@ -926,6 +926,41 @@ export function validatePatchedPlan(plan: unknown): { valid: boolean; issues: st
   return { valid: issues.length === 0, issues };
 }
 
+// ── Patched-plan normalization at handoff (Task 2) ───────────────────────────
+
+/**
+ * Idempotent normalization of patched plans at the Athena → dispatch handoff seam.
+ *
+ * Athena may return patchedPlans that passed validatePatchedPlan but still lack
+ * dispatch-critical fields (dependencies array, canonical role, positive wave).
+ * This function ensures those fields are present with safe defaults so the
+ * orchestrator's dependency-graph resolver and contract validator never see gaps.
+ *
+ * Idempotent: applying twice produces an identical result.
+ *
+ * @param plans - validated patchedPlans array from Athena
+ * @returns new array with each plan carrying all dispatch-required fields
+ */
+export function normalizePatchedPlansForDispatch(plans: unknown[]): Record<string, unknown>[] {
+  if (!Array.isArray(plans)) return [];
+  return plans.map((plan) => {
+    if (!plan || typeof plan !== "object") return plan as Record<string, unknown>;
+    const p = plan as Record<string, unknown>;
+    return {
+      ...p,
+      // Normalise target_files alias so dispatch always finds the canonical field.
+      target_files: Array.isArray(p.target_files) ? p.target_files
+        : Array.isArray(p.targetFiles) ? p.targetFiles : [],
+      // dependencies must be an array for the dependency-graph resolver.
+      dependencies: Array.isArray(p.dependencies) ? p.dependencies : [],
+      // role must be a non-empty string for worker dispatch routing.
+      role: p.role && String(p.role).trim() ? String(p.role).trim() : "evolution-worker",
+      // wave must be a positive integer; malformed values fall back to 1.
+      wave: Number.isFinite(Number(p.wave)) && Number(p.wave) >= 1 ? Number(p.wave) : 1,
+    };
+  });
+}
+
 
 const EXPLICIT_APPROVAL_STATUS_VALUES = new Set([
   "approved", "approve", "pass", "passed", "accept", "accepted",
@@ -1397,6 +1432,14 @@ IMPORTANT: Always include "patchedPlans" with the FULL corrected plan array. Eve
         reason: blockReason,
       };
     }
+  }
+
+  // ── Patched-plan normalization at handoff ─────────────────────────────────
+  // After validation confirms no placeholders or missing fields, normalize
+  // dispatch-critical fields so patchedPlans are fully dispatch-ready when
+  // consumed by the orchestrator. This is idempotent: applying twice is safe.
+  if (Array.isArray(result.patchedPlans) && result.patchedPlans.length > 0) {
+    result.patchedPlans = normalizePatchedPlansForDispatch(result.patchedPlans);
   }
 
   await writeJson(path.join(stateDir, "athena_plan_review.json"), result);

@@ -6,6 +6,7 @@ import {
   MANDATORY_ACTIONABLE_PACKET_FIELDS,
   PREMORTEM_RISK_LEVEL,
   validatePatchedPlan,
+  normalizePatchedPlansForDispatch,
 } from "../../src/core/athena_reviewer.js";
 
 const BASE_PLANS = [
@@ -272,4 +273,90 @@ describe("validatePatchedPlan (Task 3)", () => {
   });
 });
 
+// ── Task 2: normalizePatchedPlansForDispatch — handoff normalization ───────────
+
+describe("normalizePatchedPlansForDispatch", () => {
+  it("returns empty array for non-array input", () => {
+    assert.deepEqual(normalizePatchedPlansForDispatch(null as any), []);
+    assert.deepEqual(normalizePatchedPlansForDispatch(undefined as any), []);
+  });
+
+  it("ensures dependencies is an array when missing", () => {
+    const result = normalizePatchedPlansForDispatch([
+      { task: "do something", role: "evolution-worker", wave: 1, target_files: ["src/x.ts"], scope: "src/", acceptance_criteria: ["test passes"] }
+    ]);
+    assert.ok(Array.isArray(result[0].dependencies), "dependencies must be an array");
+    assert.deepEqual(result[0].dependencies, []);
+  });
+
+  it("preserves existing dependencies array without modification", () => {
+    const result = normalizePatchedPlansForDispatch([
+      { task: "do something", role: "evolution-worker", wave: 1, dependencies: ["T-001"], target_files: ["src/x.ts"], scope: "src/", acceptance_criteria: ["test passes"] }
+    ]);
+    assert.deepEqual(result[0].dependencies, ["T-001"]);
+  });
+
+  it("sets role to evolution-worker when missing or empty", () => {
+    const missing = normalizePatchedPlansForDispatch([
+      { task: "x", wave: 1, target_files: ["src/x.ts"], scope: "src/", acceptance_criteria: ["done"] }
+    ]);
+    assert.equal(missing[0].role, "evolution-worker");
+
+    const empty = normalizePatchedPlansForDispatch([
+      { task: "x", role: "", wave: 1, target_files: ["src/x.ts"], scope: "src/", acceptance_criteria: ["done"] }
+    ]);
+    assert.equal(empty[0].role, "evolution-worker");
+  });
+
+  it("preserves explicit role when provided", () => {
+    const result = normalizePatchedPlansForDispatch([
+      { task: "x", role: "athena", wave: 1, target_files: ["src/x.ts"], scope: "src/", acceptance_criteria: ["done"] }
+    ]);
+    assert.equal(result[0].role, "athena");
+  });
+
+  it("normalizes wave to 1 when invalid or missing", () => {
+    const noWave = normalizePatchedPlansForDispatch([
+      { task: "x", role: "evolution-worker", target_files: ["src/x.ts"], scope: "src/", acceptance_criteria: ["done"] }
+    ]);
+    assert.equal(noWave[0].wave, 1);
+
+    const zeroWave = normalizePatchedPlansForDispatch([
+      { task: "x", role: "evolution-worker", wave: 0, target_files: ["src/x.ts"], scope: "src/", acceptance_criteria: ["done"] }
+    ]);
+    assert.equal(zeroWave[0].wave, 1);
+  });
+
+  it("preserves valid wave value", () => {
+    const result = normalizePatchedPlansForDispatch([
+      { task: "x", role: "evolution-worker", wave: 3, target_files: ["src/x.ts"], scope: "src/", acceptance_criteria: ["done"] }
+    ]);
+    assert.equal(result[0].wave, 3);
+  });
+
+  it("normalises targetFiles alias to target_files", () => {
+    const result = normalizePatchedPlansForDispatch([
+      { task: "x", role: "evolution-worker", wave: 1, targetFiles: ["src/y.ts"], scope: "src/", acceptance_criteria: ["done"] }
+    ]);
+    assert.deepEqual(result[0].target_files, ["src/y.ts"]);
+  });
+
+  it("is idempotent — applying twice produces the same result", () => {
+    const input = [
+      { task: "fix", role: "evolution-worker", wave: 2, target_files: ["src/a.ts"], scope: "src/", acceptance_criteria: ["done"], dependencies: ["T-1"] }
+    ];
+    const once = normalizePatchedPlansForDispatch(input);
+    const twice = normalizePatchedPlansForDispatch(once);
+    assert.deepEqual(once[0].dependencies, twice[0].dependencies);
+    assert.equal(once[0].role, twice[0].role);
+    assert.equal(once[0].wave, twice[0].wave);
+  });
+
+  it("negative path: non-object entries are passed through without throwing", () => {
+    assert.doesNotThrow(() => {
+      const result = normalizePatchedPlansForDispatch([null, undefined, "string"] as any[]);
+      assert.ok(Array.isArray(result));
+    });
+  });
+});
 

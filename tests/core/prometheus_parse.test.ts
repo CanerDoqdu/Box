@@ -883,6 +883,21 @@ describe("buildDriftDebtTasks", () => {
     assert.ok(typeof task.requestROI === "number" && task.requestROI > 0, "requestROI must be a positive number");
     assert.ok(Array.isArray(task.verification_targets) && task.verification_targets.length > 0,
       "verification_targets must be a non-empty array");
+    // dispatch-survivable fields
+    assert.ok(Array.isArray(task.dependencies), "dependencies must be an array for dependency-graph resolver");
+    assert.ok(typeof task.scope === "string" && task.scope.length > 0, "scope must be a non-empty string");
+    assert.ok(typeof task.owner === "string" && task.owner.length > 0, "owner must be a non-empty string");
+  });
+
+  it("deprecated-token debt task also carries dispatch-survivable fields", () => {
+    const report = {
+      staleReferences: [],
+      deprecatedTokenRefs: [{ docPath: "docs/b.md", token: "old_token", hint: "use new_token", line: 5 }],
+    };
+    const [task] = buildDriftDebtTasks(report);
+    assert.ok(Array.isArray(task.dependencies), "dependencies must be an array");
+    assert.equal(task.scope, "docs/b.md", "scope must equal the source document path");
+    assert.equal(task.owner, "evolution-worker");
   });
 
   it("negative path: handles malformed staleReferences entries without throwing", () => {

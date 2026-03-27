@@ -1397,6 +1397,13 @@ export function buildDriftDebtTasks(
       verification_targets: [verificationTarget],
       riskLevel: "low",
       role: "evolution-worker",
+      owner: "evolution-worker",
+      // dependencies must be an array so the dependency-graph resolver and
+      // validatePlanContract (WARNING check) do not flag this task.
+      dependencies: [],
+      // scope derived from the target document so validatePatchedPlan accepts
+      // this task when Athena returns it in patchedPlans without modification.
+      scope: doc,
       // capacityDelta and requestROI are mandatory contract fields (plan_contract_validator).
       // Debt remediation tasks improve documentation quality by a small, measurable amount.
       capacityDelta: 0.05,
@@ -1439,6 +1446,9 @@ export function buildDriftDebtTasks(
       verification_targets: [verificationTarget],
       riskLevel: "low",
       role: "evolution-worker",
+      owner: "evolution-worker",
+      dependencies: [],
+      scope: doc,
       capacityDelta: 0.05,
       requestROI: 1.2,
       leverage_rank: ["quality"],
