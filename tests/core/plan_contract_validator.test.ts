@@ -113,6 +113,50 @@ describe("plan_contract_validator", () => {
       assert.equal(result.valid, false);
       assert.ok(result.violations.some(v => v.field === "verification" && v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL));
     });
+
+    it("detects forbidden command in verification_commands array", () => {
+      const plan = {
+        task: "Implement something long enough here",
+        role: "worker",
+        wave: 1,
+        verification: "npm test",
+        verification_commands: ["npm test", "node --test tests/**/*.test.ts"],
+        dependencies: [],
+        acceptance_criteria: ["pass"],
+      };
+      const result = validatePlanContract(plan);
+      assert.equal(result.valid, false);
+      assert.ok(result.violations.some(v => v.field === "verification_commands[1]" && v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL));
+    });
+
+    it("passes when all verification_commands are safe", () => {
+      const plan = {
+        task: "Implement something long enough here",
+        role: "worker",
+        wave: 1,
+        verification: "npm test",
+        verification_commands: ["npm test", "npm run lint"],
+        dependencies: [],
+        acceptance_criteria: ["pass"],
+      };
+      const result = validatePlanContract(plan);
+      assert.equal(result.valid, true);
+    });
+
+    it("detects forbidden command only in verification_commands when verification is clean", () => {
+      const plan = {
+        task: "Implement something long enough here",
+        role: "worker",
+        wave: 1,
+        verification: "npm test",
+        verification_commands: ["node --test src/**/*.test.ts"],
+        dependencies: [],
+        acceptance_criteria: ["pass"],
+      };
+      const result = validatePlanContract(plan);
+      assert.equal(result.valid, false);
+      assert.ok(result.violations.some(v => v.field === "verification_commands[0]" && v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL));
+    });
   });
 
   describe("validateAllPlans", () => {

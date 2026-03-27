@@ -60,12 +60,26 @@ export function validatePlanContract(plan) {
     violations.push({ field: "acceptance_criteria", message: "Acceptance criteria must be a non-empty array — plans without measurable AC are rejected", severity: PLAN_VIOLATION_SEVERITY.CRITICAL });
   }
 
-  // Forbidden verification command gate (Packet 5) — uses centralized registry
-  const verif = String(plan.verification || "");
-  const forbidden = checkForbiddenCommands(verif);
-  if (forbidden.forbidden) {
-    for (const v of forbidden.violations) {
-      violations.push({ field: "verification", message: `Forbidden command: ${v.reason}`, severity: PLAN_VIOLATION_SEVERITY.CRITICAL });
+  // Forbidden verification command gate (Packet 5) — uses centralized registry.
+  // Check all command-bearing fields: verification (string) and
+  // verification_commands (array) so Windows false-fails can't slip through
+  // a non-primary command field.
+  const commandsToCheck: Array<{ field: string; value: string }> = [
+    { field: "verification", value: String(plan.verification || "") },
+  ];
+
+  if (Array.isArray(plan.verification_commands)) {
+    plan.verification_commands.forEach((cmd: unknown, idx: number) => {
+      commandsToCheck.push({ field: `verification_commands[${idx}]`, value: String(cmd || "") });
+    });
+  }
+
+  for (const { field, value } of commandsToCheck) {
+    const forbidden = checkForbiddenCommands(value);
+    if (forbidden.forbidden) {
+      for (const v of forbidden.violations) {
+        violations.push({ field, message: `Forbidden command: ${v.reason}`, severity: PLAN_VIOLATION_SEVERITY.CRITICAL });
+      }
     }
   }
 
