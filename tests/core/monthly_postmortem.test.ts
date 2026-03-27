@@ -868,3 +868,143 @@ describe("persistMonthlyPostmortem — successful write (AC11)", () => {
     assert.equal(written.status,   "ok");
   });
 });
+
+// ── Task 2: POSTMORTEM_DEGRADED_REASON enum and evidence schema ───────────────
+
+import {
+  POSTMORTEM_DEGRADED_REASON,
+  validateCompoundingEffect,
+} from "../../src/core/self_improvement.js";
+
+describe("POSTMORTEM_DEGRADED_REASON enum (Task 2)", () => {
+  it("is frozen with all required codes", () => {
+    assert.ok(Object.isFrozen(POSTMORTEM_DEGRADED_REASON));
+    assert.equal(POSTMORTEM_DEGRADED_REASON.IMPROVEMENT_REPORTS_ABSENT,          "IMPROVEMENT_REPORTS_ABSENT");
+    assert.equal(POSTMORTEM_DEGRADED_REASON.IMPROVEMENT_REPORTS_INVALID,         "IMPROVEMENT_REPORTS_INVALID");
+    assert.equal(POSTMORTEM_DEGRADED_REASON.EXPERIMENT_REGISTRY_ABSENT,          "EXPERIMENT_REGISTRY_ABSENT");
+    assert.equal(POSTMORTEM_DEGRADED_REASON.EXPERIMENT_REGISTRY_INVALID,         "EXPERIMENT_REGISTRY_INVALID");
+    assert.equal(POSTMORTEM_DEGRADED_REASON.ATHENA_POSTMORTEMS_ABSENT,           "ATHENA_POSTMORTEMS_ABSENT");
+    assert.equal(POSTMORTEM_DEGRADED_REASON.ATHENA_POSTMORTEMS_INVALID,          "ATHENA_POSTMORTEMS_INVALID");
+    assert.equal(POSTMORTEM_DEGRADED_REASON.ATHENA_POSTMORTEMS_MIGRATION_FAILED, "ATHENA_POSTMORTEMS_MIGRATION_FAILED");
+    assert.equal(POSTMORTEM_DEGRADED_REASON.ATHENA_POSTMORTEMS_MIGRATION_ERROR,  "ATHENA_POSTMORTEMS_MIGRATION_ERROR");
+  });
+
+  it("has exactly 8 entries (no undocumented codes)", () => {
+    assert.equal(Object.keys(POSTMORTEM_DEGRADED_REASON).length, 8);
+  });
+});
+
+describe("MONTHLY_POSTMORTEM_SCHEMA evidence schema fields (Task 2)", () => {
+  it("compoundingEffectRequiredFields includes all minimum evidence fields", () => {
+    for (const f of ["pattern", "score", "occurrences", "severity", "evidence"]) {
+      assert.ok(MONTHLY_POSTMORTEM_SCHEMA.compoundingEffectRequiredFields.includes(f),
+        `compoundingEffectRequiredFields must include: ${f}`);
+    }
+  });
+
+  it("evidenceItemMinLength is at least 1", () => {
+    assert.ok(typeof MONTHLY_POSTMORTEM_SCHEMA.evidenceItemMinLength === "number");
+    assert.ok(MONTHLY_POSTMORTEM_SCHEMA.evidenceItemMinLength >= 1);
+  });
+});
+
+describe("validateCompoundingEffect (Task 2)", () => {
+  it("returns ok=true for a fully valid effect", () => {
+    const effect = {
+      pattern: "timeout: Workers exceeded limit",
+      score: 6,
+      occurrences: 3,
+      severity: "critical",
+      evidence: ["2025-03-10T00:00:00Z", "2025-03-15T00:00:00Z"],
+    };
+    const result = validateCompoundingEffect(effect);
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.violations, []);
+  });
+
+  it("returns ok=true for effect with empty evidence array", () => {
+    const effect = { pattern: "x: y", score: 1, occurrences: 1, severity: "info", evidence: [] };
+    assert.equal(validateCompoundingEffect(effect).ok, true);
+  });
+
+  it("returns ok=false with violations for null input", () => {
+    const result = validateCompoundingEffect(null);
+    assert.equal(result.ok, false);
+    assert.ok(result.violations.length > 0);
+  });
+
+  it("returns ok=false when required field is missing", () => {
+    const result = validateCompoundingEffect({ pattern: "x", score: 1, occurrences: 1, severity: "info" }); // missing evidence
+    assert.equal(result.ok, false);
+    assert.ok(result.violations.some(v => v.includes("evidence")));
+  });
+
+  it("returns ok=false when evidence is not an array", () => {
+    const result = validateCompoundingEffect({
+      pattern: "x", score: 1, occurrences: 1, severity: "info", evidence: "not-array"
+    });
+    assert.equal(result.ok, false);
+    assert.ok(result.violations.some(v => v.includes("evidence must be an array")));
+  });
+
+  it("returns ok=false when evidence item is an empty string", () => {
+    const result = validateCompoundingEffect({
+      pattern: "x", score: 1, occurrences: 1, severity: "info", evidence: [""]
+    });
+    assert.equal(result.ok, false);
+    assert.ok(result.violations.some(v => v.includes("evidence[0]")));
+  });
+
+  it("negative path: non-object input returns violation", () => {
+    const result = validateCompoundingEffect("not-an-object");
+    assert.equal(result.ok, false);
+    assert.ok(result.violations.length > 0);
+  });
+});
+
+describe("generateMonthlyPostmortem — degradedSources use POSTMORTEM_DEGRADED_REASON codes (Task 2)", () => {
+  let tmpDir;
+  let result;
+
+  before(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-t030-degraded-codes-"));
+    // 4 reports (passes cycleCount check), but no registry or postmortems
+    const reports = {
+      reports: Array.from({ length: 4 }, (_, i) =>
+        makeReport(`2025-03-${String(i + 5).padStart(2, "0")}T12:00:00.000Z`)
+      )
+    };
+    await writeTestJson(tmpDir, "improvement_reports.json", reports);
+    result = await generateMonthlyPostmortem(makeConfig(tmpDir), "2025-03");
+  });
+
+  after(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("status is degraded", () => {
+    assert.equal(result.status, MONTHLY_POSTMORTEM_STATUS.DEGRADED);
+  });
+
+  it("degradedSources only contains values from POSTMORTEM_DEGRADED_REASON enum", () => {
+    const validCodes = new Set(Object.values(POSTMORTEM_DEGRADED_REASON));
+    for (const code of result.postmortem.degradedSources) {
+      assert.ok(validCodes.has(code),
+        `degradedSources must only contain POSTMORTEM_DEGRADED_REASON values, got: "${code}"`);
+    }
+  });
+
+  it("degradedSources contains EXPERIMENT_REGISTRY_ABSENT for missing registry", () => {
+    assert.ok(
+      result.postmortem.degradedSources.includes(POSTMORTEM_DEGRADED_REASON.EXPERIMENT_REGISTRY_ABSENT),
+      "degradedSources must include EXPERIMENT_REGISTRY_ABSENT"
+    );
+  });
+
+  it("degradedSources contains ATHENA_POSTMORTEMS_ABSENT for missing postmortems", () => {
+    assert.ok(
+      result.postmortem.degradedSources.includes(POSTMORTEM_DEGRADED_REASON.ATHENA_POSTMORTEMS_ABSENT),
+      "degradedSources must include ATHENA_POSTMORTEMS_ABSENT"
+    );
+  });
+});

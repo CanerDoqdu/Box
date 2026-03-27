@@ -99,3 +99,66 @@ describe("worker_batch_planner", () => {
     assert.ok(planCBatch, "planC should be in some batch");
   });
 });
+
+// ── Task 3: dependency graph wave and conflict integration ────────────────────
+
+describe("worker_batch_planner — dependency graph optimization (Task 3)", () => {
+  const baseConfig = { copilot: { defaultModel: "Claude Sonnet 4.6", modelContextReserveTokens: 0 } };
+
+  it("uses graph wave to order plans that lack an explicit wave field", () => {
+    // planB depends on planA — graph should place planA in wave 1, planB in wave 2.
+    // No wave field on either plan: graph-derived ordering should be respected.
+    const planA = { role: "Evolution Worker", task: "task-alpha", filesInScope: ["src/a.ts"] };
+    const planB = { role: "Evolution Worker", task: "task-beta",  filesInScope: ["src/b.ts"], dependencies: ["task-alpha"] };
+
+    const batches = buildRoleExecutionBatches([planB, planA], baseConfig);
+    // Both plans are for the same role — graph resolves planA wave=1, planB wave=2.
+    // The batch for planA (wave 1) should come before planB (wave 2).
+    const allPlans = batches.flatMap(b => b.plans);
+    const posA = allPlans.indexOf(planA);
+    const posB = allPlans.indexOf(planB);
+    assert.ok(posA !== -1, "planA must be in batches");
+    assert.ok(posB !== -1, "planB must be in batches");
+    assert.ok(posA < posB, `planA (wave 1) must appear before planB (wave 2); posA=${posA} posB=${posB}`);
+  });
+
+  it("separates plans with filesInScope conflict via graph (no capabilityPoolResult needed)", () => {
+    // planX and planY share a filesInScope file — graph detects conflict.
+    // Without capabilityPoolResult, only graph-based detection applies.
+    const planX = { role: "Evolution Worker", task: "task-x", filesInScope: ["src/shared.ts"] };
+    const planY = { role: "Evolution Worker", task: "task-y", filesInScope: ["src/shared.ts"] };
+    const planZ = { role: "Evolution Worker", task: "task-z", filesInScope: ["src/other.ts"] };
+
+    const batches = buildRoleExecutionBatches([planX, planY, planZ], baseConfig);
+    const allBatchPlanSets = batches.map(b => b.plans);
+    const conflictCoexists = allBatchPlanSets.some(bp => bp.includes(planX) && bp.includes(planY));
+    assert.equal(conflictCoexists, false, "graph-detected conflicting plans must not share a batch");
+  });
+
+  it("plans without graph hints behave identically to pre-optimization (backward-compatible)", () => {
+    // No filesInScope, no dependencies: graph hints are absent → no change in behavior.
+    const plans = Array.from({ length: 3 }, (_, i) => ({
+      role: "Evolution Worker",
+      task: `Task ${i}`,
+      wave: 1,
+      priority: i,
+    }));
+    const batches = buildRoleExecutionBatches(plans, baseConfig);
+    assert.equal(batches.length, 1, "3 small plans without hints should fit in one batch");
+    assert.equal(batches[0].plans.length, 3);
+  });
+
+  it("graph wave assignment respects explicit wave field over graph wave", () => {
+    // planA is marked wave=2 explicitly; planB is wave=1 explicitly.
+    // Even if graph would order them differently, explicit wave fields take priority.
+    const planA = { role: "Evolution Worker", task: "task-a", wave: 2, filesInScope: ["src/a.ts"] };
+    const planB = { role: "Evolution Worker", task: "task-b", wave: 1, filesInScope: ["src/b.ts"] };
+
+    const batches = buildRoleExecutionBatches([planA, planB], baseConfig);
+    const allPlans = batches.flatMap(b => b.plans);
+    const posA = allPlans.indexOf(planA);
+    const posB = allPlans.indexOf(planB);
+    // planB (wave=1) must come before planA (wave=2)
+    assert.ok(posB < posA, `explicit wave field must override graph wave; posB=${posB} posA=${posA}`);
+  });
+});

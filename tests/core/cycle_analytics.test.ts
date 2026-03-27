@@ -627,3 +627,102 @@ describe("Negative paths (AC7)", () => {
     assert.ok(typeof entry.unknownReason === "string" && entry.unknownReason.length > 0);
   });
 });
+
+// ── Funnel counts and ratios ───────────────────────────────────────────────────
+
+describe("computeCycleAnalytics — funnel (Task 1)", () => {
+  it("schema requires funnel field", () => {
+    assert.ok(CYCLE_ANALYTICS_SCHEMA.cycleRecord.required.includes("funnel"),
+      "schema.cycleRecord.required must list 'funnel'");
+  });
+
+  it("funnel field is present on every record regardless of funnelCounts input", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {});
+    assert.ok("funnel" in record, "funnel must be present");
+  });
+
+  it("funnel contains all six expected keys", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {
+      funnelCounts: { generated: 10, approved: 8, dispatched: 7, completed: 5 },
+    });
+    for (const k of ["generated", "approved", "dispatched", "completed", "approvalRate", "dispatchRate", "completionRate"]) {
+      assert.ok(k in record.funnel, `funnel missing key: ${k}`);
+    }
+  });
+
+  it("funnel stores provided counts verbatim", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {
+      funnelCounts: { generated: 10, approved: 8, dispatched: 6, completed: 4 },
+    });
+    assert.equal(record.funnel.generated,  10);
+    assert.equal(record.funnel.approved,    8);
+    assert.equal(record.funnel.dispatched,  6);
+    assert.equal(record.funnel.completed,   4);
+  });
+
+  it("funnel computes approvalRate = approved / generated", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {
+      funnelCounts: { generated: 10, approved: 8, dispatched: 8, completed: 8 },
+    });
+    assert.equal(record.funnel.approvalRate, 0.8);
+  });
+
+  it("funnel computes dispatchRate = dispatched / approved", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {
+      funnelCounts: { generated: 10, approved: 8, dispatched: 4, completed: 4 },
+    });
+    assert.equal(record.funnel.dispatchRate, 0.5);
+  });
+
+  it("funnel computes completionRate = completed / dispatched", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {
+      funnelCounts: { generated: 10, approved: 10, dispatched: 10, completed: 3 },
+    });
+    assert.equal(record.funnel.completionRate, 0.3);
+  });
+
+  it("funnel rates are null when denominator stage is absent (no silent zero-fill)", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {
+      funnelCounts: { generated: null, approved: null, dispatched: null, completed: null },
+    });
+    assert.equal(record.funnel.approvalRate,   null, "approvalRate must be null when generated is null");
+    assert.equal(record.funnel.dispatchRate,   null, "dispatchRate must be null when approved is null");
+    assert.equal(record.funnel.completionRate, null, "completionRate must be null when dispatched is null");
+  });
+
+  it("funnel rates are null when funnelCounts is absent", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {});
+    assert.equal(record.funnel.generated,      null);
+    assert.equal(record.funnel.approvalRate,   null);
+    assert.equal(record.funnel.dispatchRate,   null);
+    assert.equal(record.funnel.completionRate, null);
+  });
+
+  it("funnel rate is null when denominator is zero (no division by zero)", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {
+      funnelCounts: { generated: 0, approved: 0, dispatched: 0, completed: 0 },
+    });
+    assert.equal(record.funnel.approvalRate,   null, "approvalRate must be null when generated=0");
+    assert.equal(record.funnel.dispatchRate,   null, "dispatchRate must be null when approved=0");
+    assert.equal(record.funnel.completionRate, null, "completionRate must be null when dispatched=0");
+  });
+
+  it("100% funnel (all plans complete) produces ratios of 1", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, {
+      funnelCounts: { generated: 5, approved: 5, dispatched: 5, completed: 5 },
+    });
+    assert.equal(record.funnel.approvalRate,   1);
+    assert.equal(record.funnel.dispatchRate,   1);
+    assert.equal(record.funnel.completionRate, 1);
+  });
+});

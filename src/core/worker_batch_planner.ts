@@ -1,5 +1,6 @@
 import { getRoleRegistry } from "./role_registry.js";
 import { enforceModelPolicy } from "./model_policy.js";
+import { resolveDependencyGraph, GRAPH_STATUS } from "./dependency_graph_resolver.js";
 
 const CHARS_PER_TOKEN = 4;
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 100000;
@@ -211,8 +212,53 @@ function buildSharedBranchName(roleName, plans) {
 }
 
 export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResult = null) {
-  const sortedPlans = [...plans].sort((a, b) => {
-    const waveDelta = Number(a?.wave || 0) - Number(b?.wave || 0);
+  // ── Dependency graph resolution ───────────────────────────────────────────
+  // When any plan carries explicit dependency or file-scope hints, resolve the
+  // full dependency graph to (a) assign accurate wave numbers and (b) detect
+  // file-conflict pairs that lane detection may not cover (e.g. when no
+  // capabilityPoolResult is available).
+  // Graph resolution is advisory — a failure never blocks scheduling.
+  const graphWaveByPlanId = new Map<string, number>();
+  const graphConflictList: Array<[string, string]> = [];
+
+  const hasGraphHints = (plans as any[]).some(p =>
+    (Array.isArray(p.filesInScope)   && p.filesInScope.length   > 0) ||
+    (Array.isArray(p.dependsOn)      && p.dependsOn.length      > 0) ||
+    (Array.isArray(p.dependencies)   && p.dependencies.length   > 0)
+  );
+
+  if (hasGraphHints) {
+    try {
+      const graphTasks = (plans as any[]).map(p => ({
+        id:          String(p.task_id || p.task || p.role || ""),
+        dependsOn:   Array.isArray(p.dependsOn)    ? p.dependsOn
+                   : Array.isArray(p.dependencies) ? p.dependencies
+                   : [],
+        filesInScope: Array.isArray(p.filesInScope) ? p.filesInScope : [],
+      }));
+      const graph = resolveDependencyGraph(graphTasks);
+      if (graph.status === GRAPH_STATUS.OK) {
+        for (const wave of (graph.waves || [])) {
+          for (const id of wave.taskIds) {
+            graphWaveByPlanId.set(id, wave.wave);
+          }
+        }
+        for (const cp of (graph.conflictPairs || [])) {
+          graphConflictList.push([cp.taskA, cp.taskB]);
+        }
+      }
+    } catch {
+      // advisory — never block scheduling on graph resolution error
+    }
+  }
+
+  const sortedPlans = [...(plans as any[])].sort((a, b) => {
+    const idA   = String(a?.task_id || a?.task || a?.role || "");
+    const idB   = String(b?.task_id || b?.task || b?.role || "");
+    // Use graph-derived wave when the plan lacks an explicit wave field
+    const waveA = Number(a?.wave ?? graphWaveByPlanId.get(idA) ?? 0);
+    const waveB = Number(b?.wave ?? graphWaveByPlanId.get(idB) ?? 0);
+    const waveDelta = waveA - waveB;
     if (waveDelta !== 0) return waveDelta;
     return Number(a?.priority || 0) - Number(b?.priority || 0);
   });
@@ -262,13 +308,31 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
     });
   }
 
+  // Build a plan-ID-based conflict set from the dependency graph resolution.
+  // This supplements lane-based conflicts and covers cases where capabilityPoolResult is absent.
+  const graphConflictIdPairs = new Set<string>();
+  for (const [taskA, taskB] of graphConflictList) {
+    graphConflictIdPairs.add(`${taskA}:${taskB}`);
+    graphConflictIdPairs.add(`${taskB}:${taskA}`);
+  }
+
   /**
-   * Determine whether two plans (identified by their assignment indices) are
-   * in conflict (same lane, overlapping target files).
+   * Determine whether two plan objects are in conflict via either:
+   *  (a) lane-based file overlap detected by the capability pool, or
+   *  (b) file-scope conflict detected by the dependency graph resolver.
    */
-  function arePlanIndexesConflicting(idxA, idxB) {
-    if (idxA === -1 || idxB === -1) return false;
-    return conflictedPairs.has(`${idxA}:${idxB}`);
+  function arePlansConflicting(planA: any, planB: any) {
+    const idxA = planToAssignmentIndex.get(planA) ?? -1;
+    const idxB = planToAssignmentIndex.get(planB) ?? -1;
+    // Lane-based conflict (assignment index pair)
+    if (idxA !== -1 && idxB !== -1 && conflictedPairs.has(`${idxA}:${idxB}`)) return true;
+    // Graph-based conflict (plan ID pair)
+    if (graphConflictIdPairs.size > 0) {
+      const planAId = String((planA as any)?.task_id || (planA as any)?.task || (planA as any)?.role || "");
+      const planBId = String((planB as any)?.task_id || (planB as any)?.task || (planB as any)?.role || "");
+      if (planAId && planBId && graphConflictIdPairs.has(`${planAId}:${planBId}`)) return true;
+    }
+    return false;
   }
 
   const roleBuckets = new Map();
@@ -292,15 +356,11 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
 
     for (let i = 0; i < rolePlans.length; i++) {
       const plan = rolePlans[i];
-      const planIdx = planToAssignmentIndex.get(plan) ?? -1;
 
       // Find the first group that has no conflict with this plan
       let placed = false;
       for (let g = 0; g < subGroups.length; g++) {
-        const hasConflict = subGroups[g].some((existing) => {
-          const existingIdx = planToAssignmentIndex.get(existing) ?? -1;
-          return arePlanIndexesConflicting(planIdx, existingIdx);
-        });
+        const hasConflict = subGroups[g].some((existing) => arePlansConflicting(plan, existing));
         if (!hasConflict) {
           subGroups[g].push(plan);
           assignedGroup[i] = g;

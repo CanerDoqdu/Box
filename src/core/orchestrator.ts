@@ -1356,6 +1356,9 @@ async function runSingleCycle(config) {
     ? planReview.patchedPlans
     : prometheusAnalysis.plans;
 
+  // Funnel tracking: capture approved count before quality/freeze gates reduce plans.
+  const funnelApprovedCount: number = plans.length;
+
   // ── Capability pool: assign workers based on task capability matching ──────
   let capabilityPoolResult = null;
   try {
@@ -1516,6 +1519,9 @@ async function runSingleCycle(config) {
     }
   }
 
+  // Funnel tracking: capture dispatched count after all quality/freeze gates.
+  const funnelDispatchedCount: number = plans.length;
+
   const workerBatches = buildRoleExecutionBatches(plans, config, capabilityPoolResult);
   await safeUpdatePipelineProgress(config, "workers_dispatching", `Dispatching ${workerBatches.length} worker batch(es)`, {
     workersTotal: workerBatches.length,
@@ -1663,6 +1669,12 @@ async function runSingleCycle(config) {
       planCount: Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans.length : null,
       phase: CYCLE_PHASE.COMPLETED,
       parserBaselineRecovery: baselineRecoveryRecord ?? null,
+      funnelCounts: {
+        generated:  Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans.length : null,
+        approved:   funnelApprovedCount,
+        dispatched: funnelDispatchedCount,
+        completed:  allWorkerResults.filter(r => r.status === "done" || r.status === "success").length,
+      },
     });
     await persistCycleAnalytics(config, analyticsRecord);
     await appendProgress(config, `[ANALYTICS] Cycle analytics written — confidence=${analyticsRecord.confidence.level} sloStatus=${analyticsRecord.kpis.sloStatus} phase=${analyticsRecord.phase}`);

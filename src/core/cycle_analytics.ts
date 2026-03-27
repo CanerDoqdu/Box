@@ -48,6 +48,17 @@ import path from "node:path";
 import { readJson, writeJson } from "./fs_utils.js";
 import { SLO_TIMESTAMP_CONTRACT, SLO_METRIC } from "./slo_checker.js";
 
+// ── Funnel helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Safely divide two nullable numbers, returning null when the denominator is
+ * zero or either value is absent.  Rounded to 3 decimal places.
+ */
+function safeRatio(numerator: number | null | undefined, denominator: number | null | undefined): number | null {
+  if (typeof numerator !== "number" || typeof denominator !== "number" || denominator === 0) return null;
+  return Math.round((numerator / denominator) * 1000) / 1000;
+}
+
 // ── Enums ──────────────────────────────────────────────────────────────────────
 
 /** Pipeline phase at the time analytics were generated. */
@@ -113,6 +124,7 @@ export const CYCLE_ANALYTICS_SCHEMA = Object.freeze({
       "phase",
       "outcomes",
       "kpis",
+      "funnel",
       "confidence",
       "causalLinks",
       "canonicalEvents",
@@ -331,6 +343,11 @@ function computeOutcomeStatus(phase, workerResults, planCount) {
  * @param {number|null} opts.planCount               Total plans dispatched this cycle. May be null.
  * @param {string}      opts.phase                   CYCLE_PHASE value.
  * @param {object|null} opts.parserBaselineRecovery  Output of computeBaselineRecoveryState(). May be null.
+ * @param {object|null} opts.funnelCounts            Prometheus→Athena→Dispatch→Complete funnel. May be null.
+ * @param {number|null} opts.funnelCounts.generated  Plans produced by Prometheus.
+ * @param {number|null} opts.funnelCounts.approved   Plans approved by Athena (before quality/freeze gate).
+ * @param {number|null} opts.funnelCounts.dispatched Plans actually dispatched (after all gates).
+ * @param {number|null} opts.funnelCounts.completed  Plans completed successfully.
  * @returns {object} Analytics record conforming to CYCLE_ANALYTICS_SCHEMA.cycleRecord.
  */
 export function computeCycleAnalytics(config, {
@@ -340,6 +357,7 @@ export function computeCycleAnalytics(config, {
   planCount = null,
   phase = CYCLE_PHASE.COMPLETED,
   parserBaselineRecovery = null,
+  funnelCounts = null,
 }: any = {}) {
   const missingData = [];
   const stageTimestamps = pipelineProgress?.stageTimestamps || null;
@@ -441,12 +459,30 @@ export function computeCycleAnalytics(config, {
 
   const cycleId = pipelineProgress?.startedAt ?? sloRecord?.cycleId ?? null;
 
+  // ── Funnel: Prometheus→Athena→Dispatch→Complete counts and conversion rates ──
+  // Rates are null when the denominator stage count is absent (no silent zero-fill).
+  const rawGenerated  = (funnelCounts && typeof funnelCounts.generated  === "number") ? funnelCounts.generated  : null;
+  const rawApproved   = (funnelCounts && typeof funnelCounts.approved   === "number") ? funnelCounts.approved   : null;
+  const rawDispatched = (funnelCounts && typeof funnelCounts.dispatched === "number") ? funnelCounts.dispatched : null;
+  const rawCompleted  = (funnelCounts && typeof funnelCounts.completed  === "number") ? funnelCounts.completed  : null;
+
+  const funnel = {
+    generated:      rawGenerated,
+    approved:       rawApproved,
+    dispatched:     rawDispatched,
+    completed:      rawCompleted,
+    approvalRate:   safeRatio(rawApproved,   rawGenerated),
+    dispatchRate:   safeRatio(rawDispatched, rawApproved),
+    completionRate: safeRatio(rawCompleted,  rawDispatched),
+  };
+
   return {
     cycleId,
     generatedAt: new Date().toISOString(),
     phase,
     outcomes,
     kpis,
+    funnel,
     confidence,
     causalLinks,
     canonicalEvents,

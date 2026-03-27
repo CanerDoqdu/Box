@@ -854,6 +854,34 @@ export const MONTHLY_POSTMORTEM_STATUS = Object.freeze({
 });
 
 /**
+ * Deterministic reason codes for degraded postmortem sources.
+ *
+ * Used in the `degradedSources` array of a degraded postmortem.
+ * Distinguishes absent (ENOENT) from invalid (bad JSON / schema) inputs,
+ * and covers all three source files read by generateMonthlyPostmortem.
+ *
+ * @enum {string}
+ */
+export const POSTMORTEM_DEGRADED_REASON = Object.freeze({
+  /** improvement_reports.json not found on disk. */
+  IMPROVEMENT_REPORTS_ABSENT:           "IMPROVEMENT_REPORTS_ABSENT",
+  /** improvement_reports.json found but fails structural validation. */
+  IMPROVEMENT_REPORTS_INVALID:          "IMPROVEMENT_REPORTS_INVALID",
+  /** experiment_registry.json not found on disk. */
+  EXPERIMENT_REGISTRY_ABSENT:           "EXPERIMENT_REGISTRY_ABSENT",
+  /** experiment_registry.json found but fails structural validation. */
+  EXPERIMENT_REGISTRY_INVALID:          "EXPERIMENT_REGISTRY_INVALID",
+  /** athena_postmortems.json not found on disk. */
+  ATHENA_POSTMORTEMS_ABSENT:            "ATHENA_POSTMORTEMS_ABSENT",
+  /** athena_postmortems.json found but fails structural validation. */
+  ATHENA_POSTMORTEMS_INVALID:           "ATHENA_POSTMORTEMS_INVALID",
+  /** Schema migration of athena_postmortems.json returned ok=false. */
+  ATHENA_POSTMORTEMS_MIGRATION_FAILED:  "ATHENA_POSTMORTEMS_MIGRATION_FAILED",
+  /** Schema migration of athena_postmortems.json threw an exception. */
+  ATHENA_POSTMORTEMS_MIGRATION_ERROR:   "ATHENA_POSTMORTEMS_MIGRATION_ERROR",
+});
+
+/**
  * Decision quality trend values for a monthly postmortem.
  * Computed deterministically from first-half vs second-half weighted scores.
  * @enum {string}
@@ -926,8 +954,57 @@ export const MONTHLY_POSTMORTEM_SCHEMA = Object.freeze({
   trendDeltaThreshold: 0.05,
 
   /** Seed question format rule: must end in "?" and have >= this many characters. */
-  seedQuestionMinLength: 20
+  seedQuestionMinLength: 20,
+
+  /**
+   * Minimum required fields on each compounding-effect record (AC13).
+   * Validated by validateCompoundingEffect().
+   */
+  compoundingEffectRequiredFields: Object.freeze([
+    "pattern", "score", "occurrences", "severity", "evidence"
+  ]),
+
+  /** Each item in the evidence array must be a non-empty string (cycleAt timestamp). */
+  evidenceItemMinLength: 1,
 });
+
+// ── Evidence schema validation ─────────────────────────────────────────────────
+
+/**
+ * Validate a single compounding-effect object against the minimum evidence schema
+ * defined in MONTHLY_POSTMORTEM_SCHEMA.compoundingEffectRequiredFields.
+ *
+ * Returns { ok: true } when all required fields are present and evidence is a valid array.
+ * Returns { ok: false, violations: string[] } when any field is missing or malformed.
+ *
+ * @param {unknown} effect
+ * @returns {{ ok: boolean, violations: string[] }}
+ */
+export function validateCompoundingEffect(effect: unknown): { ok: boolean; violations: string[] } {
+  const violations: string[] = [];
+  if (effect === null || effect === undefined || typeof effect !== "object" || Array.isArray(effect)) {
+    return { ok: false, violations: ["effect must be a non-null object"] };
+  }
+  const e = effect as Record<string, unknown>;
+  for (const field of MONTHLY_POSTMORTEM_SCHEMA.compoundingEffectRequiredFields) {
+    if (!(field in e)) {
+      violations.push(`missing required field: ${field}`);
+    }
+  }
+  // evidence must be an array of non-empty strings
+  if ("evidence" in e) {
+    if (!Array.isArray(e.evidence)) {
+      violations.push("evidence must be an array");
+    } else {
+      for (let i = 0; i < e.evidence.length; i++) {
+        if (typeof e.evidence[i] !== "string" || (e.evidence[i] as string).length < MONTHLY_POSTMORTEM_SCHEMA.evidenceItemMinLength) {
+          violations.push(`evidence[${i}] must be a non-empty string`);
+        }
+      }
+    }
+  }
+  return { ok: violations.length === 0, violations };
+}
 
 // ── Compounding Effect Scoring ─────────────────────────────────────────────────
 
@@ -1308,8 +1385,8 @@ export async function generateMonthlyPostmortem(config, monthKey) {
   if (!reportsRaw.ok) {
     degradedSources.push(
       reportsRaw.reason === READ_JSON_REASON.MISSING
-        ? "IMPROVEMENT_REPORTS_ABSENT"
-        : "IMPROVEMENT_REPORTS_INVALID"
+        ? POSTMORTEM_DEGRADED_REASON.IMPROVEMENT_REPORTS_ABSENT
+        : POSTMORTEM_DEGRADED_REASON.IMPROVEMENT_REPORTS_INVALID
     );
   } else {
     allReports = Array.isArray(reportsRaw.data?.reports) ? reportsRaw.data.reports : [];
@@ -1360,8 +1437,8 @@ export async function generateMonthlyPostmortem(config, monthKey) {
   if (!registryRaw.ok) {
     degradedSources.push(
       registryRaw.reason === READ_JSON_REASON.MISSING
-        ? "EXPERIMENT_REGISTRY_ABSENT"
-        : "EXPERIMENT_REGISTRY_INVALID"
+        ? POSTMORTEM_DEGRADED_REASON.EXPERIMENT_REGISTRY_ABSENT
+        : POSTMORTEM_DEGRADED_REASON.EXPERIMENT_REGISTRY_INVALID
     );
   } else {
     allExperiments = Array.isArray(registryRaw.data?.experiments) ? registryRaw.data.experiments : [];
@@ -1388,8 +1465,8 @@ export async function generateMonthlyPostmortem(config, monthKey) {
   if (!postmortemsRaw.ok) {
     degradedSources.push(
       postmortemsRaw.reason === READ_JSON_REASON.MISSING
-        ? "ATHENA_POSTMORTEMS_ABSENT"
-        : "ATHENA_POSTMORTEMS_INVALID"
+        ? POSTMORTEM_DEGRADED_REASON.ATHENA_POSTMORTEMS_ABSENT
+        : POSTMORTEM_DEGRADED_REASON.ATHENA_POSTMORTEMS_INVALID
     );
   } else {
     try {
@@ -1397,10 +1474,10 @@ export async function generateMonthlyPostmortem(config, monthKey) {
       if (migrated.ok) {
         postmortems = extractPostmortemEntries(migrated.data);
       } else {
-        degradedSources.push("ATHENA_POSTMORTEMS_MIGRATION_FAILED");
+        degradedSources.push(POSTMORTEM_DEGRADED_REASON.ATHENA_POSTMORTEMS_MIGRATION_FAILED);
       }
     } catch {
-      degradedSources.push("ATHENA_POSTMORTEMS_MIGRATION_ERROR");
+      degradedSources.push(POSTMORTEM_DEGRADED_REASON.ATHENA_POSTMORTEMS_MIGRATION_ERROR);
     }
   }
 
