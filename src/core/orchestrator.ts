@@ -70,6 +70,7 @@ import {
   saveLedgerFull,
   shouldBlockOnDebt,
 } from "./carry_forward_ledger.js";
+import { loadBudget, canUseClaude } from "./budget_controller.js";
 
 /**
  * Orchestrator health status enum.
@@ -340,6 +341,28 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
     }
   } catch (err) {
     warn(`[orchestrator] carry-forward debt gate failed (non-fatal): ${String(err?.message || err)}`);
+  }
+
+  // ── Budget reconciliation gate ────────────────────────────────────────────
+  // Block dispatch when the remaining budget falls below the Claude usage
+  // threshold.  Only evaluated when config.paths.budgetFile is configured —
+  // unconfigured budget paths are treated as "unlimited" (fail-open).
+  // Fail-open on any budget read error so a corrupt file never halts work.
+  if (config?.paths?.budgetFile) {
+    try {
+      const budget = await loadBudget(config);
+      if (!canUseClaude(budget)) {
+        return {
+          blocked: true,
+          reason: `budget_exhausted:remainingUsd=${budget.remainingUsd}`,
+          action: undefined,
+          graphResult,
+          cycleId,
+        };
+      }
+    } catch (err) {
+      warn(`[orchestrator] budget gate failed (non-fatal): ${String(err?.message || err)}`);
+    }
   }
 
   return {

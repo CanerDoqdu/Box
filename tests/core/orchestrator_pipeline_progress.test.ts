@@ -991,3 +991,95 @@ describe("carry-forward debt gate — pre-dispatch governance gate integration",
       "closed critical entries must not count toward the overdue threshold");
   });
 });
+
+// ── Budget reconciliation gate — evaluatePreDispatchGovernanceGate integration ─
+
+describe("budget reconciliation gate — pre-dispatch governance gate integration", () => {
+  let tmpDir;
+  let config;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-budget-gate-"));
+    config = {
+      paths: { stateDir: tmpDir },
+      env: { copilotCliCommand: "__missing__", targetRepo: "CanerDoqdu/Box", budgetUsd: 5 },
+      systemGuardian: { enabled: false },
+      canary:          { enabled: false },
+    };
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("allows dispatch when budget is above the Claude usage threshold", async () => {
+    const budgetFile = path.join(tmpDir, "budget.json");
+    await fs.writeFile(
+      budgetFile,
+      JSON.stringify({ initialUsd: 5, remainingUsd: 3.0, claudeCalls: 1, workerRuns: 1, updatedAt: new Date().toISOString() }),
+      "utf8"
+    );
+    const cfg = { ...config, paths: { ...config.paths, budgetFile } };
+
+    const result = await evaluatePreDispatchGovernanceGate(cfg, [], "budget-gate-allowed");
+
+    assert.equal(result.blocked, false,
+      "dispatch must proceed when remaining budget exceeds the Claude usage threshold");
+    assert.equal(result.reason, null);
+  });
+
+  it("blocks dispatch when remaining budget is at or below the Claude usage threshold", async () => {
+    const budgetFile = path.join(tmpDir, "budget.json");
+    await fs.writeFile(
+      budgetFile,
+      JSON.stringify({ initialUsd: 5, remainingUsd: 0.15, claudeCalls: 10, workerRuns: 5, updatedAt: new Date().toISOString() }),
+      "utf8"
+    );
+    const cfg = { ...config, paths: { ...config.paths, budgetFile } };
+
+    const result = await evaluatePreDispatchGovernanceGate(cfg, [], "budget-gate-blocked");
+
+    assert.equal(result.blocked, true,
+      "dispatch must be blocked when remaining budget is below the Claude usage threshold");
+    assert.ok(
+      result.reason?.startsWith("budget_exhausted:"),
+      `reason must reflect budget exhaustion; got: ${result.reason}`
+    );
+    assert.equal(result.action, undefined,
+      "budget block must not trigger rollback action");
+    assert.ok(
+      result.reason?.includes("remainingUsd=0.15"),
+      `reason must include the remaining amount for observability; got: ${result.reason}`
+    );
+  });
+
+  it("negative path: blocks when remaining budget is exactly 0.2 (boundary — not above threshold)", async () => {
+    const budgetFile = path.join(tmpDir, "budget.json");
+    await fs.writeFile(
+      budgetFile,
+      JSON.stringify({ initialUsd: 5, remainingUsd: 0.2, claudeCalls: 10, workerRuns: 5, updatedAt: new Date().toISOString() }),
+      "utf8"
+    );
+    const cfg = { ...config, paths: { ...config.paths, budgetFile } };
+
+    const result = await evaluatePreDispatchGovernanceGate(cfg, [], "budget-gate-boundary");
+
+    assert.equal(result.blocked, true,
+      "remaining budget of exactly 0.2 must block dispatch (threshold requires strictly greater than 0.2)");
+  });
+
+  it("fails open (allows dispatch) when budget file path is not configured", async () => {
+    // No budgetFile in paths — budget gate is skipped entirely when path is not set
+    const cfgNoBudgetPath = {
+      ...config,
+      paths: { stateDir: tmpDir },
+      env: { ...config.env, budgetUsd: 5 },
+    };
+
+    const result = await evaluatePreDispatchGovernanceGate(cfgNoBudgetPath, [], "budget-gate-no-path");
+
+    assert.equal(result.blocked, false,
+      "unconfigured budgetFile path must skip the budget gate and allow dispatch");
+  });
+});
+
