@@ -1,7 +1,12 @@
 import { tryExtractJson, validatePlan, validateDecision, validateOpusDecision } from "./utils.js";
-import { tagProviderDecision } from "../../core/trust_boundary.js";
+import { tagProviderDecision, validateLeadershipContract, LEADERSHIP_CONTRACT_TYPE } from "../../core/trust_boundary.js";
 import { emitEvent } from "../../core/logger.js";
 import { EVENTS, EVENT_DOMAIN } from "../../core/event_schema.js";
+
+/** Narrow the Claude HTTP response JSON to its known shape. */
+interface ClaudeApiResponse {
+  content?: Array<{ text?: string }>;
+}
 
 const API_URL = "https://api.anthropic.com/v1/messages";
 
@@ -70,13 +75,17 @@ export class ClaudeReviewer {
           throw new Error(`claude request failed: ${response.status} ${body}`);
         }
 
-        const json = await response.json();
-        const text = (json as any)?.content?.map((c) => c.text).filter(Boolean).join("\n") || "";
+        const json: unknown = await response.json();
+        const apiResponse = json as ClaudeApiResponse;
+        const text = Array.isArray(apiResponse?.content)
+          ? apiResponse.content.map((c) => (typeof c?.text === "string" ? c.text : "")).filter(Boolean).join("\n")
+          : "";
         const parsed = tryExtractJson(text);
         const validated = validator(parsed, fallback);
         // Detect validator-level fallback for malformed provider output
-        if ((validated as any)?._source === "fallback") {
-          const reason = String((validated as any)._fallbackReason || "malformed provider output");
+        const validatedObj = validated as Record<string, unknown>;
+        if (validatedObj?._source === "fallback") {
+          const reason = String(validatedObj._fallbackReason || "malformed provider output");
           emitEvent(EVENTS.POLICY_PROVIDER_FALLBACK_DECISION, EVENT_DOMAIN.POLICY, `provider-fallback-${Date.now()}`, {
             source: "fallback",
             fallbackReason: reason
@@ -177,7 +186,19 @@ export class ClaudeReviewer {
       this.reviewMaxTokens,
       { approved: Boolean(gates.ok), reason: "fallback deterministic decision" },
       validateDecision
-    );
+    ).then((decision) => {
+      // Leadership contract validation — warn mode (non-blocking) validates approved field shape
+      const contractCheck = validateLeadershipContract(LEADERSHIP_CONTRACT_TYPE.REVIEWER, decision, { mode: "warn" });
+      if (!contractCheck.ok) {
+        const errSummary = contractCheck.errors.map((e: { payloadPath: string; message: string }) => `${e.payloadPath}: ${e.message}`).join(" | ");
+        emitEvent(EVENTS.POLICY_PROVIDER_FALLBACK_DECISION, EVENT_DOMAIN.POLICY, `contract-warn-${Date.now()}`, {
+          source: "contract_warn",
+          contractType: "reviewer",
+          errors: errSummary
+        });
+      }
+      return decision;
+    });
   }
 
   async recommendOpusForTask(task: Record<string, unknown>, summary: Record<string, unknown>, budget: Record<string, unknown>): Promise<{ allowOpus: boolean; reason: string }> {

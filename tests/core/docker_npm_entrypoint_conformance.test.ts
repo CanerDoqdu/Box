@@ -105,12 +105,14 @@ describe("docker_npm_entrypoint_conformance", () => {
 
   it("worker Dockerfile CMD entry point file exists on disk", () => {
     const files = extractDockerfileCmdFiles(workerDockerfile);
-    assert.ok(files.length > 0, "worker Dockerfile should have a CMD referencing a .ts or .js entry point");
+    assert.ok(files.length > 0,
+      "worker Dockerfile must have a CMD referencing at least one .ts or .js entry point file"
+    );
     for (const relPath of files) {
       const fullPath = path.join(ROOT, relPath);
       assert.ok(
         fs.existsSync(fullPath),
-        `worker Dockerfile CMD references non-existent file: ${relPath}`
+        `worker Dockerfile CMD references non-existent file: ${relPath} (full path: ${fullPath})`
       );
     }
   });
@@ -152,15 +154,19 @@ describe("docker_npm_entrypoint_conformance", () => {
 
   it("worker Dockerfile CMD is consistent with worker:run npm script", () => {
     const workerRunScript = packageScripts["worker:run"];
-    assert.ok(workerRunScript, 'package.json must define "worker:run" script');
+    assert.ok(workerRunScript,
+      'package.json must define a "worker:run" script — this is the canonical container entrypoint'
+    );
 
     const cmdFiles = extractDockerfileCmdFiles(workerDockerfile);
-    assert.ok(cmdFiles.length > 0, "worker Dockerfile must have a CMD with a file entry point");
+    assert.ok(cmdFiles.length > 0,
+      "worker Dockerfile must have a CMD with at least one .ts or .js file entry point (no CMD found or CMD uses unsupported non-array syntax)"
+    );
 
     const cmdEntryPoint = cmdFiles[0];
     assert.ok(
       workerRunScript.includes(cmdEntryPoint),
-      `worker Dockerfile CMD entry point "${cmdEntryPoint}" is not referenced by "worker:run" script ("${workerRunScript}")`
+      `worker Dockerfile CMD entry point "${cmdEntryPoint}" must appear verbatim in the "worker:run" npm script ("${workerRunScript}") — CMD and npm script have drifted`
     );
   });
 
@@ -184,8 +190,13 @@ describe("docker_npm_entrypoint_conformance", () => {
       ...extractNpmRunScripts(workerDockerfile),
       ...extractNpmRunScripts(orchestratorDockerfile),
     ];
+    assert.ok(allDockerScripts.length > 0,
+      "expected at least one npm run script across Docker artifacts (compose + worker + orchestrator Dockerfiles)"
+    );
     for (const s of allDockerScripts) {
-      assert.ok(s.trim().length > 0, "extracted docker npm script name should not be empty");
+      assert.ok(s.trim().length > 0,
+        `every npm run script name extracted from Docker artifacts must be non-empty; got: "${s}"`
+      );
     }
   });
 });

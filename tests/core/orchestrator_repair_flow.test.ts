@@ -290,3 +290,66 @@ describe("SI disabled: health audit fallback", () => {
     assert.equal(flow.siSkipped, false);
   });
 });
+
+// ── Combined lifecycle integration test ─────────────────────────────────────
+
+/**
+ * Simulate the full combined orchestration lifecycle in one deterministic path:
+ *   SI active → Athena reject → REPLAN_ONCE → Athena approve → workers_dispatched
+ *   → health audit HEALTHY → continue
+ *
+ * Validates governance gate outcomes and artifact state across both the repair
+ * loop and the health audit phase in a single end-to-end pass.
+ */
+describe("combined orchestration lifecycle — governance and artifact outcomes", () => {
+  it("SI active: reject → REPLAN_ONCE → approve → dispatch → health HEALTHY → continue [integration]", () => {
+    // ── Phase A: SI gate and repair loop ──────────────────────────────────────
+    const repairFlow = simulateRepairFlowWithSiGate({
+      athenaReview1: { approved: false, corrections: ["missing verification_command"] },
+      siGate: { active: true, status: SI_STATUS.ACTIVE },
+      repairGate: REPAIR_GATE.REPLAN_ONCE,
+      athenaReview2: { approved: true },
+    });
+
+    // Repair loop outcome: workers must be dispatched after the second approval
+    assert.equal(repairFlow.outcome, "workers_dispatched",
+      "combined lifecycle must reach workers_dispatched after REPLAN_ONCE succeeds"
+    );
+    assert.equal(repairFlow.athenaReviewCount, 2,
+      "exactly 2 Athena reviews must occur: initial reject + post-repair approve"
+    );
+    assert.equal(repairFlow.escalated, false,
+      "no escalation must occur when the second review approves"
+    );
+    assert.equal(repairFlow.siSkipped, false,
+      "SI gate must be active throughout the repair loop — siSkipped must be false"
+    );
+
+    // ── Phase B: health audit ─────────────────────────────────────────────────
+    const healthFlow = simulateHealthAuditWithSiGate({
+      siGate: { active: true, status: SI_STATUS.ACTIVE },
+      gateDecision: HEALTH_GATE.HEALTHY,
+    });
+
+    // Health audit outcome: system is healthy, pipeline continues
+    assert.equal(healthFlow.outcome, "continue",
+      "health audit must return continue when system is HEALTHY after successful dispatch"
+    );
+    assert.equal(healthFlow.escalated, false,
+      "health audit must not escalate when outcome is HEALTHY"
+    );
+    assert.equal(healthFlow.siSkipped, false,
+      "health audit must run (not be skipped) when SI gate is active"
+    );
+
+    // ── Combined artifact governance invariants ───────────────────────────────
+    // These invariants must hold across both phases of the lifecycle:
+    //   1. Total Athena reviews across the full lifecycle: exactly 2 (no 3rd attempt)
+    //   2. No escalation path triggered in either phase
+    //   3. SI gate remained active throughout — no short-circuit skip
+    assert.ok(
+      repairFlow.athenaReviewCount === 2 && !repairFlow.escalated && !healthFlow.escalated,
+      "governance artifact invariant: 2 reviews, 0 escalations across both lifecycle phases"
+    );
+  });
+});

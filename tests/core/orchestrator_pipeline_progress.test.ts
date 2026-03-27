@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { runOnce, evaluatePreDispatchGovernanceGate } from "../../src/core/orchestrator.js";
+import { runOnce, runResumeDispatch, evaluatePreDispatchGovernanceGate } from "../../src/core/orchestrator.js";
 import { readPipelineProgress, PIPELINE_STAGE_ENUM } from "../../src/core/pipeline_progress.js";
 import { EVENTS } from "../../src/core/event_schema.js";
 
@@ -257,7 +257,7 @@ describe("orchestrator governance pre-dispatch gate", () => {
     );
   });
 
-  it("should block dispatch when governance freeze is active without guardrail override", async () => {
+  it("governance_freeze_active: blocks pre-dispatch when freeze gate is active [T-040/AC1]", async () => {
     const plans = [
       { id: "T1", task: "high-risk task", role: "backend", dependsOn: [], filesInScope: ["src/core/orchestrator.ts"] }
     ];
@@ -443,8 +443,7 @@ describe("orchestrator checkpoint resume — pre-dispatch governance gate", () =
       governanceFreeze: { enabled: true, manualOverrideActive: true }
     };
 
-    // runOnce enters tryResumeDispatchFromCheckpoint → evaluatePreDispatchGovernanceGate
-    // The freeze gate blocks dispatch; the function returns true and runOnce exits early.
+    // runOnce: basic non-throw assertion covering the normal cycle path
     await assert.doesNotReject(
       () => runOnce(freezeConfig),
       "runOnce must not throw when governance gate blocks resumed dispatch"
@@ -455,6 +454,26 @@ describe("orchestrator checkpoint resume — pre-dispatch governance gate", () =
     assert.ok(
       progressLog.includes("[RESUME]") || progressLog.includes("[CYCLE]"),
       "progress log must record orchestration activity even when gate blocks"
+    );
+
+    // Checkpoint-aware: use runResumeDispatch to exercise tryResumeDispatchFromCheckpoint.
+    // With freeze active, the governance gate must block dispatch and NOT advance the
+    // checkpoint to "complete" — so a future resume can retry from the same position.
+    await assert.doesNotReject(
+      () => runResumeDispatch(freezeConfig),
+      "runResumeDispatch must not throw when governance freeze blocks dispatch — early return expected"
+    );
+
+    const checkpointPath = path.join(tmpDir, "dispatch_checkpoint.json");
+    const checkpointRaw = await fs.readFile(checkpointPath, "utf8").catch(() => null);
+    assert.ok(checkpointRaw !== null,
+      "dispatch_checkpoint.json must be written by tryResumeDispatchFromCheckpoint even when the gate blocks"
+    );
+    const checkpoint = JSON.parse(checkpointRaw!);
+    assert.notEqual(
+      checkpoint.status,
+      "complete",
+      "dispatch_checkpoint.json must NOT be marked complete when pre-dispatch gate blocks — retry must remain possible"
     );
   });
 
@@ -476,6 +495,29 @@ describe("orchestrator checkpoint resume — pre-dispatch governance gate", () =
     await assert.doesNotReject(
       () => runOnce(config),
       "runOnce must not throw when governance gate passes for resumed dispatch"
+    );
+
+    // Checkpoint-aware: explicitly invoke runResumeDispatch to verify that the dispatch
+    // checkpoint is created and populated when all gates are clear.
+    await assert.doesNotReject(
+      () => runResumeDispatch(config),
+      "runResumeDispatch must not throw when all pre-dispatch governance gates are clear"
+    );
+
+    const checkpointPath = path.join(tmpDir, "dispatch_checkpoint.json");
+    const checkpointExists = await fs.access(checkpointPath).then(() => true).catch(() => false);
+    assert.ok(
+      checkpointExists,
+      "dispatch_checkpoint.json must be written when the governance gate is clear and resume dispatch is entered"
+    );
+    const checkpoint = JSON.parse(await fs.readFile(checkpointPath, "utf8"));
+    assert.ok(
+      typeof checkpoint.status === "string",
+      "dispatch_checkpoint.json must have a string status field"
+    );
+    assert.ok(
+      typeof checkpoint.totalPlans === "number" && checkpoint.totalPlans > 0,
+      `dispatch_checkpoint.json must record totalPlans > 0 when plans are present; got totalPlans=${checkpoint.totalPlans}`
     );
   });
 });
@@ -527,8 +569,8 @@ describe("orchestrator typed event emission — GOVERNANCE_GATE_EVALUATED", () =
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   });
 
-  it("emits GOVERNANCE_GATE_EVALUATED event during a normal cycle dispatch path", async () => {
-    // Write an approved Athena review so orchestrator reaches the gate
+  it("emits GOVERNANCE_GATE_EVALUATED event during explicit resume dispatch", async () => {
+    // Write an approved Athena review so explicit resume reaches the gate
     const athenaReview = {
       approved: true,
       patchedPlans: [
@@ -541,7 +583,7 @@ describe("orchestrator typed event emission — GOVERNANCE_GATE_EVALUATED", () =
       "utf8"
     );
 
-    await runOnce(config);
+    await runResumeDispatch(config);
 
     const gateEvents = emittedEvents.filter(e => e.event === EVENTS.GOVERNANCE_GATE_EVALUATED);
     assert.ok(

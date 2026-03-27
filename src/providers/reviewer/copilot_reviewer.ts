@@ -1,13 +1,13 @@
 import { spawnSync } from "node:child_process";
 import { toCopilotModelSlug } from "../../core/agent_loader.js";
-import { tagProviderDecision } from "../../core/trust_boundary.js";
+import { tagProviderDecision, validateLeadershipContract, LEADERSHIP_CONTRACT_TYPE } from "../../core/trust_boundary.js";
 import { emitEvent } from "../../core/logger.js";
 import { EVENTS, EVENT_DOMAIN } from "../../core/event_schema.js";
 import { safeArray, tryExtractJson, validatePlan, validateDecision, validateOpusDecision } from "./utils.js";
 
-function validateAutonomyAudit(payload: Record<string, unknown> | null, fallback: { healthy: boolean; reason: string; notifyUser: boolean }): { healthy: boolean; reason: string; notifyUser: boolean } {
+function validateAutonomyAudit(payload: Record<string, unknown> | null, fallback: { healthy: boolean; reason: string; notifyUser: boolean }): { healthy: boolean; reason: string; notifyUser: boolean; _source?: "fallback"; _fallbackReason?: string } {
   if (typeof payload?.healthy !== "boolean") {
-    return fallback;
+    return { ...fallback, _source: "fallback", _fallbackReason: "healthy field is not boolean" };
   }
   return {
     healthy: payload.healthy,
@@ -16,10 +16,10 @@ function validateAutonomyAudit(payload: Record<string, unknown> | null, fallback
   };
 }
 
-function validateLoopDecision(payload: Record<string, unknown> | null, fallback: { mode: string; reason: string }): { mode: string; reason: string } {
+function validateLoopDecision(payload: Record<string, unknown> | null, fallback: { mode: string; reason: string }): { mode: string; reason: string; _source?: "fallback"; _fallbackReason?: string } {
   const mode = String(payload?.mode || "").trim().toLowerCase();
   if (mode !== "strategic" && mode !== "tactical") {
-    return fallback;
+    return { ...fallback, _source: "fallback", _fallbackReason: `mode "${String(payload?.mode || "")}" is not "strategic" or "tactical"` };
   }
   return {
     mode,
@@ -27,9 +27,9 @@ function validateLoopDecision(payload: Record<string, unknown> | null, fallback:
   };
 }
 
-function validatePlannerTriggerDecision(payload: Record<string, unknown> | null, fallback: { shouldPlan: boolean; reason: string }): { shouldPlan: boolean; reason: string } {
+function validatePlannerTriggerDecision(payload: Record<string, unknown> | null, fallback: { shouldPlan: boolean; reason: string }): { shouldPlan: boolean; reason: string; _source?: "fallback"; _fallbackReason?: string } {
   if (typeof payload?.shouldPlan !== "boolean") {
-    return fallback;
+    return { ...fallback, _source: "fallback", _fallbackReason: "shouldPlan field is not boolean" };
   }
   return {
     shouldPlan: payload.shouldPlan,
@@ -37,11 +37,11 @@ function validatePlannerTriggerDecision(payload: Record<string, unknown> | null,
   };
 }
 
-function validateFailureChainDecision(payload: Record<string, unknown> | null, fallback: { action: string; reason: string }): { action: string; reason: string } {
+function validateFailureChainDecision(payload: Record<string, unknown> | null, fallback: { action: string; reason: string }): { action: string; reason: string; _source?: "fallback"; _fallbackReason?: string } {
   const action = String(payload?.action || "").trim().toLowerCase();
   const allowed = new Set(["retry", "split", "park", "escalate_jesus"]);
   if (!allowed.has(action)) {
-    return fallback;
+    return { ...fallback, _source: "fallback", _fallbackReason: `action "${String(payload?.action || "")}" is not an allowed failure chain action` };
   }
   return {
     action,
@@ -49,11 +49,11 @@ function validateFailureChainDecision(payload: Record<string, unknown> | null, f
   };
 }
 
-function validateEscalatedFailureResolution(payload: Record<string, unknown> | null, fallback: { action: string; reason: string; notifyUser: boolean }): { action: string; reason: string; notifyUser: boolean } {
+function validateEscalatedFailureResolution(payload: Record<string, unknown> | null, fallback: { action: string; reason: string; notifyUser: boolean }): { action: string; reason: string; notifyUser: boolean; _source?: "fallback"; _fallbackReason?: string } {
   const action = String(payload?.action || "").trim().toLowerCase();
   const allowed = new Set(["retry", "park", "notify_user"]);
   if (!allowed.has(action)) {
-    return fallback;
+    return { ...fallback, _source: "fallback", _fallbackReason: `action "${String(payload?.action || "")}" is not an allowed escalation resolution action` };
   }
   return {
     action,
@@ -62,12 +62,12 @@ function validateEscalatedFailureResolution(payload: Record<string, unknown> | n
   };
 }
 
-function validateWaveDistributionDecision(payload: Record<string, unknown> | null, fallback: { orderedTaskIds: number[]; deferTaskIds: number[]; reason: string }): { orderedTaskIds: number[]; deferTaskIds: number[]; reason: string } {
+function validateWaveDistributionDecision(payload: Record<string, unknown> | null, fallback: { orderedTaskIds: number[]; deferTaskIds: number[]; reason: string }): { orderedTaskIds: number[]; deferTaskIds: number[]; reason: string; _source?: "fallback"; _fallbackReason?: string } {
   const orderedTaskIdsRaw = safeArray(payload?.orderedTaskIds).map((item) => Number(item)).filter((item) => Number.isFinite(item));
   const deferTaskIdsRaw = safeArray(payload?.deferTaskIds).map((item) => Number(item)).filter((item) => Number.isFinite(item));
 
   if (orderedTaskIdsRaw.length === 0 && deferTaskIdsRaw.length === 0) {
-    return fallback;
+    return { ...fallback, _source: "fallback", _fallbackReason: "orderedTaskIds and deferTaskIds are both empty or missing" };
   }
 
   return {
@@ -77,7 +77,7 @@ function validateWaveDistributionDecision(payload: Record<string, unknown> | nul
   };
 }
 
-function validateProjectAnalysis(payload: Record<string, unknown> | null, fallback: { frameworks: string[]; domains: string[]; criticalPaths: string[]; objectives: string[]; risks: string[] }): { frameworks: string[]; domains: string[]; criticalPaths: string[]; objectives: string[]; risks: string[] } {
+function validateProjectAnalysis(payload: Record<string, unknown> | null, fallback: { frameworks: string[]; domains: string[]; criticalPaths: string[]; objectives: string[]; risks: string[] }): { frameworks: string[]; domains: string[]; criticalPaths: string[]; objectives: string[]; risks: string[]; _source?: "fallback"; _fallbackReason?: string } {
   const frameworks = safeArray(payload?.frameworks).map((item) => String(item).trim()).filter(Boolean);
   const domains = safeArray(payload?.domains).map((item) => String(item).trim()).filter(Boolean);
   const criticalPaths = safeArray(payload?.criticalPaths).map((item) => String(item).trim()).filter(Boolean);
@@ -85,7 +85,7 @@ function validateProjectAnalysis(payload: Record<string, unknown> | null, fallba
   const risks = safeArray(payload?.risks).map((item) => String(item).trim()).filter(Boolean);
 
   if (frameworks.length === 0 && domains.length === 0 && criticalPaths.length === 0 && objectives.length === 0) {
-    return fallback;
+    return { ...fallback, _source: "fallback", _fallbackReason: "frameworks, domains, criticalPaths, and objectives are all empty or missing" };
   }
 
   return {
@@ -97,9 +97,9 @@ function validateProjectAnalysis(payload: Record<string, unknown> | null, fallba
   };
 }
 
-function validateIdleRecoveryDecision(payload: Record<string, unknown> | null, fallback: { activate_idle_path: boolean; force_strategic_mode: boolean; task_seeding_trigger: boolean; docker_containers_needed: number; notes: string }): { activate_idle_path: boolean; force_strategic_mode: boolean; task_seeding_trigger: boolean; docker_containers_needed: number; notes: string } {
+function validateIdleRecoveryDecision(payload: Record<string, unknown> | null, fallback: { activate_idle_path: boolean; force_strategic_mode: boolean; task_seeding_trigger: boolean; docker_containers_needed: number; notes: string }): { activate_idle_path: boolean; force_strategic_mode: boolean; task_seeding_trigger: boolean; docker_containers_needed: number; notes: string; _source?: "fallback"; _fallbackReason?: string } {
   if (typeof payload?.activate_idle_path !== "boolean") {
-    return fallback;
+    return { ...fallback, _source: "fallback", _fallbackReason: "activate_idle_path field is not boolean" };
   }
   return {
     activate_idle_path: Boolean(payload.activate_idle_path),
@@ -110,10 +110,10 @@ function validateIdleRecoveryDecision(payload: Record<string, unknown> | null, f
   };
 }
 
-function validateAthenaCoordinationDecision(payload: Record<string, unknown> | null, fallback: { tasks_to_queue: unknown[]; idle_path_tasks_triggered: boolean; notes: string }): { tasks_to_queue: unknown[]; idle_path_tasks_triggered: boolean; notes: string } {
+function validateAthenaCoordinationDecision(payload: Record<string, unknown> | null, fallback: { tasks_to_queue: unknown[]; idle_path_tasks_triggered: boolean; notes: string }): { tasks_to_queue: unknown[]; idle_path_tasks_triggered: boolean; notes: string; _source?: "fallback"; _fallbackReason?: string } {
   const tasksToQueue = safeArray(payload?.tasks_to_queue).filter((t) => t && typeof t === "object");
   if (typeof payload?.idle_path_tasks_triggered !== "boolean" && tasksToQueue.length === 0) {
-    return fallback;
+    return { ...fallback, _source: "fallback", _fallbackReason: "idle_path_tasks_triggered not boolean and tasks_to_queue is empty" };
   }
   return {
     tasks_to_queue: tasksToQueue.map((t: any) => ({
@@ -225,8 +225,9 @@ export class CopilotReviewer {
     }
     const validated = validator(parsed, fallback);
     // Detect validator-level fallback: if the validator returned a fallback marker, tag as fallback
-    if ((validated as any)?._source === "fallback") {
-      const reason = String((validated as any)._fallbackReason || "malformed provider output");
+    const validatedObj = validated as Record<string, unknown>;
+    if (validatedObj?._source === "fallback") {
+      const reason = String(validatedObj._fallbackReason || "malformed provider output");
       this.lastUsage = { model: this.model, provider: "copilot" };
       emitEvent(EVENTS.POLICY_PROVIDER_FALLBACK_DECISION, EVENT_DOMAIN.POLICY, `provider-fallback-${Date.now()}`, {
         source: "fallback",
@@ -303,6 +304,18 @@ export class CopilotReviewer {
     ].join("\n");
 
     const decision = this.requestJson(prompt, fallback, validateDecision);
+
+    // Leadership contract validation — warn mode (non-blocking) validates approved field shape
+    const contractCheck = validateLeadershipContract(LEADERSHIP_CONTRACT_TYPE.REVIEWER, decision, { mode: "warn" });
+    if (!contractCheck.ok) {
+      const errSummary = contractCheck.errors.map((e: { payloadPath: string; message: string }) => `${e.payloadPath}: ${e.message}`).join(" | ");
+      emitEvent(EVENTS.POLICY_PROVIDER_FALLBACK_DECISION, EVENT_DOMAIN.POLICY, `contract-warn-${Date.now()}`, {
+        source: "contract_warn",
+        contractType: "reviewer",
+        errors: errSummary
+      });
+    }
+
     return {
       ...decision,
       model: this.model,

@@ -30,8 +30,20 @@ describe("run_task.js — containerised worker entry point", () => {
       TARGET_REPO: "",
       GITHUB_TOKEN: "",
     });
-    assert.equal(result.status, 1, "expected exit code 1");
-    assert.match(result.stderr, /Missing required environment variable/);
+    assert.equal(result.status, 1,
+      "expected exit code 1 when all required env vars are absent (WORKER_ROLE, TASK_PAYLOAD, TARGET_REPO, GITHUB_TOKEN)"
+    );
+    assert.match(result.stderr, /Missing required environment variable/,
+      "stderr must name at least one missing required variable"
+    );
+    // Verify each required env var name appears in the combined output
+    const combined = result.stderr + result.stdout;
+    const requiredVars = ["WORKER_ROLE", "TASK_PAYLOAD", "TARGET_REPO", "GITHUB_TOKEN"];
+    const reported = requiredVars.filter(v => combined.includes(v));
+    assert.ok(
+      reported.length > 0,
+      `at least one of [${requiredVars.join(", ")}] must be named in the missing-var output; got: ${combined.slice(0, 300)}`
+    );
   });
 
   it("exits 1 when TASK_PAYLOAD is not valid JSON", () => {
@@ -41,8 +53,10 @@ describe("run_task.js — containerised worker entry point", () => {
       TARGET_REPO: "owner/repo",
       GITHUB_TOKEN: "ghp_fake",
     });
-    assert.equal(result.status, 1, "expected exit code 1 for bad JSON");
-    assert.match(result.stderr, /not valid JSON/);
+    assert.equal(result.status, 1, "expected exit code 1 when TASK_PAYLOAD is not valid JSON");
+    assert.match(result.stderr, /not valid JSON/,
+      'stderr must contain "not valid JSON" to describe the parse failure'
+    );
   });
 
   it("exits 0 and logs startup info when all env vars are valid", () => {
@@ -53,8 +67,14 @@ describe("run_task.js — containerised worker entry point", () => {
       TARGET_REPO: "owner/repo",
       GITHUB_TOKEN: "ghp_fake",
     });
-    assert.equal(result.status, 0, `expected exit 0, got stderr: ${result.stderr}`);
-    assert.match(result.stdout, /role=noah/);
-    assert.match(result.stdout, /id=t-1/);
+    assert.equal(result.status, 0,
+      `expected exit 0 when all env vars are valid; stderr: ${result.stderr}`
+    );
+    assert.match(result.stdout, /role=noah/,
+      'stdout must log "role=noah" to confirm the worker role is echoed on startup'
+    );
+    assert.match(result.stdout, /id=t-1/,
+      'stdout must log "id=t-1" to confirm the task id is echoed on startup'
+    );
   });
 });
