@@ -850,26 +850,56 @@ function normalizePlanReviewEntry(entry, plan, index) {
   };
 }
 
+/**
+ * Mandatory fields that MUST be present (as explicit values, not synthesized) in every
+ * actionable packet returned by the AI reviewer. If any of these are absent, `runAthenaPlanReview`
+ * will issue an explicit rejection rather than proceeding with synthesized fallbacks.
+ *
+ * - `approved`    — must be an explicit boolean or an unambiguous status/verdict string
+ * - `planReviews` — must be an explicit array (not built from plan data as a fallback)
+ */
+export const MANDATORY_ACTIONABLE_PACKET_FIELDS = Object.freeze(["approved", "planReviews"] as const);
+
+/** Status strings that constitute an explicit approval/rejection signal (alias for `approved`). */
+const EXPLICIT_APPROVAL_STATUS_VALUES = new Set([
+  "approved", "approve", "pass", "passed", "accept", "accepted",
+  "rejected", "reject", "fail", "failed", "blocked"
+]);
+
 export function normalizeAthenaReviewPayload(raw, plans = []) {
   const payload = pickReviewerPayload(raw);
   const synthesizedFields = [];
+  // `missingFields` tracks fields that had NO basis in the payload (truly absent, not just aliased).
+  // Used by runAthenaPlanReview to trigger explicit rejection rather than silent synthesis.
+  const missingFields: string[] = [];
 
   let normalizedPlanReviews: any[];
   if (Array.isArray(payload.planReviews)) {
     normalizedPlanReviews = payload.planReviews.map((entry, index) => normalizePlanReviewEntry(entry, plans[index], index));
   } else if (Array.isArray(payload.plan_reviews)) {
+    // `plan_reviews` is an accepted alias — data is present, just differently named
     normalizedPlanReviews = payload.plan_reviews.map((entry, index) => normalizePlanReviewEntry(entry, plans[index], index));
     synthesizedFields.push("planReviews");
   } else {
+    // No plan review data at all — fallback built entirely from plan metadata
     normalizedPlanReviews = plans.map((plan, index) => buildFallbackPlanReview(plan, index));
     synthesizedFields.push("planReviews");
+    missingFields.push("planReviews");
   }
 
   const corrections = collectReviewerCorrections(payload, normalizedPlanReviews);
   if (!Array.isArray(payload.corrections)) synthesizedFields.push("corrections");
 
   const approved = inferApprovalFromReviewerPayload(payload, normalizedPlanReviews, corrections);
-  if (typeof payload.approved !== "boolean") synthesizedFields.push("approved");
+  if (typeof payload.approved !== "boolean") {
+    synthesizedFields.push("approved");
+    // Only "missing" if there is no unambiguous status/verdict string either.
+    // An explicit status such as "approved" or "rejected" is an acceptable alias.
+    const statusStr = String(payload?.status || payload?.verdict || "").trim().toLowerCase();
+    if (!EXPLICIT_APPROVAL_STATUS_VALUES.has(statusStr)) {
+      missingFields.push("approved");
+    }
+  }
 
   // ── Extract patchedPlans if Athena provided in-place repairs ─────────────
   const patchedPlans = Array.isArray(payload.patchedPlans) ? payload.patchedPlans : null;
@@ -894,6 +924,7 @@ export function normalizeAthenaReviewPayload(raw, plans = []) {
       unresolvedIssues,
     },
     synthesizedFields: [...new Set(synthesizedFields)],
+    missingFields,
   };
 }
 
@@ -1158,6 +1189,28 @@ IMPORTANT: Always include "patchedPlans" with the FULL corrected plan array. Eve
     await appendProgress(config,
       `[ATHENA] Reviewer payload normalized before trust-boundary validation — synthesized=${normalizedReview.synthesizedFields.join(",")}`
     );
+  }
+
+  // ── Mandatory actionable-packet field guard ─────────────────────────────
+  // Explicit rejection when the AI omits fields that must not be synthesized.
+  // Aliases (e.g. plan_reviews, status) are accepted; pure fallback synthesis is not.
+  const missingMandatory = normalizedReview.missingFields.filter(
+    (f) => (MANDATORY_ACTIONABLE_PACKET_FIELDS as readonly string[]).includes(f)
+  );
+  if (missingMandatory.length > 0) {
+    const reason = {
+      code: "MISSING_ACTIONABLE_PACKET_FIELDS",
+      message: `Reviewer response is missing mandatory fields (${missingMandatory.join(", ")}) — explicit values required, synthesis not permitted`
+    };
+    await appendProgress(config, `[ATHENA] Plan review REJECTED — ${reason.message}`);
+    chatLog(stateDir, athenaName, `Plan review rejected: missing mandatory fields ${missingMandatory.join(", ")}`);
+    await appendAlert(config, {
+      severity: ALERT_SEVERITY.CRITICAL,
+      source: "athena_reviewer",
+      title: "Reviewer response missing mandatory actionable-packet fields — plan blocked",
+      message: `code=${reason.code} fields=${missingMandatory.join(",")}`
+    });
+    return { approved: false, reason, corrections: [] };
   }
 
   const trustCheck = validateLeadershipContract(
