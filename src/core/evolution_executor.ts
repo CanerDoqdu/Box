@@ -65,6 +65,8 @@ type ProgressTaskState = {
   attempts: number;
   worker_result: unknown;
   verification_passed: boolean | null;
+  /** Explicit evidence of which task-named verification commands were executed. */
+  verification_targets: Array<{ cmd: string; passed: boolean; blocked: boolean }> | null;
   athena_verdict: Record<string, unknown> | null;
   completed_at: string | null;
   error: string | null;
@@ -510,6 +512,7 @@ function initProgress(cycleId, tasks) {
       attempts: 0,
       worker_result: null,
       verification_passed: null,
+      verification_targets: null,
       athena_verdict: null,
       completed_at: null,
       error: null
@@ -692,17 +695,60 @@ const BLOCKED_VERIFICATION_CMDS = [
   /node\s+.*daemon/
 ];
 
+/**
+ * Build explicit evidence for which task-named verification commands were executed.
+ * Pure function — testable without side effects.
+ *
+ * @param requestedCommands - the task's verification_commands list
+ * @param runResults        - outcomes from execSync (cmd, passed) for each actually-run command
+ * @param blockedCommands   - subset of requestedCommands that were filtered as daemon commands
+ * @param fallbackCmd       - the fallback command used when all task commands were blocked
+ * @returns array mapping every requested command to its execution outcome
+ */
+export function buildVerificationTargets(
+  requestedCommands: string[],
+  runResults: Array<{ cmd: string; passed: boolean }>,
+  blockedCommands: string[],
+  fallbackCmd: string | null = null
+): Array<{ cmd: string; passed: boolean; blocked: boolean }> {
+  const resultMap = new Map(runResults.map(r => [r.cmd, r.passed]));
+
+  const targets: Array<{ cmd: string; passed: boolean; blocked: boolean }> = requestedCommands.map(cmd => {
+    const isBlocked = blockedCommands.includes(cmd);
+    const passed = isBlocked ? false : (resultMap.get(cmd) ?? false);
+    return { cmd, passed, blocked: isBlocked };
+  });
+
+  // If all task-named commands were blocked and we fell back to a different command,
+  // include the fallback so the evidence record is complete.
+  if (fallbackCmd !== null && blockedCommands.length === requestedCommands.length && requestedCommands.length > 0) {
+    const fallbackPassed = resultMap.get(fallbackCmd) ?? false;
+    targets.push({ cmd: fallbackCmd, passed: fallbackPassed, blocked: false });
+  }
+
+  return targets;
+}
+
 function runVerificationCommands(task) {
   const allCmds = task.verification_commands || [VERIFICATION_DEFAULTS.test];
+  const blockedCmds: string[] = [];
   const cmds = allCmds.filter(cmd => {
     const blocked = BLOCKED_VERIFICATION_CMDS.some(re => re.test(cmd));
     if (blocked) {
       console.log(`[evolution] Skipping daemon command: ${cmd}`);
+      blockedCmds.push(cmd);
     }
     return !blocked;
   });
-  if (cmds.length === 0) cmds.push(VERIFICATION_DEFAULTS.test); // always at least run tests
-  const results = [];
+
+  let usedFallback: string | null = null;
+  if (cmds.length === 0) {
+    // All task-named commands were blocked — run test suite as safety net
+    cmds.push(VERIFICATION_DEFAULTS.test);
+    usedFallback = VERIFICATION_DEFAULTS.test;
+  }
+
+  const results: Array<{ cmd: string; passed: boolean; output: string }> = [];
 
   for (const cmd of cmds) {
     // Only run safe, pre-defined commands — never interpolate from untrusted input
@@ -725,7 +771,9 @@ function runVerificationCommands(task) {
     .map(r => `[${r.passed ? "PASS" : "FAIL"}] ${r.cmd}`)
     .join("\n");
 
-  return { passed: allPassed, results, summary };
+  const targets = buildVerificationTargets(allCmds, results, blockedCmds, usedFallback);
+
+  return { passed: allPassed, results, summary, targets };
 }
 
 // ── Athena Verdict Parser ─────────────────────────────────────────────────────
@@ -1020,6 +1068,9 @@ export async function runEvolutionLoop(config, options: { fromTaskId?: string; d
         verificationPassed: verification.passed,
         prChecks
       };
+      // Persist explicit evidence of which task-named verification targets were executed.
+      taskState.verification_passed = verification.passed;
+      taskState.verification_targets = verification.targets;
 
       console.log(`[evolution] Athena verdict: ${verdict.toUpperCase()}`);
       await appendProgress(config, `[EVO] ${task.task_id} — Athena: ${verdict.toUpperCase()}`);

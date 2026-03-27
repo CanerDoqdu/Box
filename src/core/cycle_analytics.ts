@@ -401,6 +401,15 @@ export function computeCycleAnalytics(config, {
     });
   }
 
+  if (!Array.isArray(workerResults)) {
+    missingData.push(
+      { field: "outcomes.tasksCompleted", reason: MISSING_DATA_REASON.MISSING_SOURCE, impact: MISSING_DATA_IMPACT.OUTCOME },
+      { field: "outcomes.tasksFailed",    reason: MISSING_DATA_REASON.MISSING_SOURCE, impact: MISSING_DATA_IMPACT.OUTCOME },
+    );
+  }
+
+  const outcomeStatus = computeOutcomeStatus(phase, workerResults, planCount);
+
   const outcomes = {
     tasksDispatched,
     tasksCompleted,
@@ -409,8 +418,23 @@ export function computeCycleAnalytics(config, {
       ? !!(stageTimestamps?.athena_approved)
       : null,
     selfImprovementRan: null,  // set externally after self-improvement cycle
-    status: computeOutcomeStatus(phase, workerResults, planCount),
+    status: outcomeStatus,
   };
+
+  // Explicit reason code when outcome status is UNKNOWN (no silent ambiguity).
+  if (outcomeStatus === CYCLE_OUTCOME_STATUS.UNKNOWN) {
+    const unknownReason = !Array.isArray(workerResults)
+      ? "workerResults not provided"
+      : (workerResults.length === 0
+          ? "no worker results recorded"
+          : "unrecognized worker status values");
+    missingData.push({
+      field: "outcomes.status",
+      reason: MISSING_DATA_REASON.MISSING_SOURCE,
+      impact: MISSING_DATA_IMPACT.OUTCOME,
+      unknownReason,
+    });
+  }
 
   // Confidence (deterministic, not statistical)
   const confidence = computeConfidence(canonicalEvents, sloRecord, pipelineProgress);

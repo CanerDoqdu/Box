@@ -596,4 +596,34 @@ describe("Negative paths (AC7)", () => {
     assert.equal(record.phase, CYCLE_PHASE.FAILED);
     assert.equal(record.outcomes.status, CYCLE_OUTCOME_STATUS.FAILED);
   });
+
+  it("null workerResults adds missingData entries for tasksCompleted and tasksFailed", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, { workerResults: null });
+    const fields = record.missingData.map((m: any) => m.field);
+    assert.ok(fields.includes("outcomes.tasksCompleted"), "missingData must include outcomes.tasksCompleted");
+    assert.ok(fields.includes("outcomes.tasksFailed"),    "missingData must include outcomes.tasksFailed");
+  });
+
+  it("UNKNOWN outcome status produces explicit missingData entry with unknownReason", () => {
+    const config = makeConfig("state");
+    // workerResults: null with COMPLETED phase → UNKNOWN status
+    const record = computeCycleAnalytics(config, { workerResults: null, phase: CYCLE_PHASE.COMPLETED });
+    assert.equal(record.outcomes.status, CYCLE_OUTCOME_STATUS.UNKNOWN);
+    const entry = record.missingData.find((m: any) => m.field === "outcomes.status");
+    assert.ok(entry, "missingData must include an entry for outcomes.status when UNKNOWN");
+    assert.equal(entry.reason, MISSING_DATA_REASON.MISSING_SOURCE);
+    assert.equal(entry.impact, MISSING_DATA_IMPACT.OUTCOME);
+    assert.ok(typeof entry.unknownReason === "string" && entry.unknownReason.length > 0,
+      "unknownReason must be a non-empty string explaining why status is UNKNOWN");
+  });
+
+  it("UNKNOWN outcome status from empty workerResults array also sets unknownReason (negative path)", () => {
+    const config = makeConfig("state");
+    const record = computeCycleAnalytics(config, { workerResults: [], phase: CYCLE_PHASE.COMPLETED });
+    assert.equal(record.outcomes.status, CYCLE_OUTCOME_STATUS.UNKNOWN);
+    const entry = record.missingData.find((m: any) => m.field === "outcomes.status");
+    assert.ok(entry, "missingData must include outcomes.status entry for empty workerResults");
+    assert.ok(typeof entry.unknownReason === "string" && entry.unknownReason.length > 0);
+  });
 });
