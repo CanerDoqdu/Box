@@ -7,12 +7,14 @@
  */
 
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { readJson, writeJson } from "./fs_utils.js";
 
 /**
  * @typedef {object} DebtEntry
  * @property {string} id — unique debt ID
  * @property {string} lesson — the original lesson text
+ * @property {string} fingerprint — deterministic SHA-256 fingerprint of the canonical lesson text
  * @property {string} owner — who should fix this
  * @property {number} openedCycle — cycle number when first detected
  * @property {number} dueCycle — cycle number by which it must be closed
@@ -21,6 +23,41 @@ import { readJson, writeJson } from "./fs_utils.js";
  * @property {string|null} closureEvidence — evidence that it was fixed
  * @property {number} cyclesOpen — how many cycles this has been open
  */
+
+/**
+ * Canonical form used for fingerprinting — strips prompt boilerplate phrases
+ * so that semantically identical lessons produce the same fingerprint regardless
+ * of preamble wording. Mirrors the normalisation in prometheus.ts.
+ */
+function canonicalize(text: string): string {
+  const s = String(text || "").toLowerCase();
+  return s
+    .replace(/[`'"(){}]|\[|\]/g, " ")
+    .replace(/create\s+and\s+complete\s+a\s+task\s+to\s+/g, "")
+    .replace(/create\s+a\s+dedicated\s+task\s+to\s+/g, "")
+    .replace(/this\s+is\s+now\s+a\s+gate\s*-?\s*blocking\s+item[^.]*\.?/g, "")
+    .replace(/athena\s+must\s+(block|reject)[^.]*\.?/g, "")
+    .replace(/this\s+fix\s+must\s+ship[^.]*\.?/g, "")
+    .replace(/blocking\s+defect[^:]*:\s*/g, "")
+    .replace(/\b(five|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen)\s+consecutive\s+postmortem\s+audit\s+records\b/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Compute a deterministic 16-hex-char SHA-256 fingerprint of a lesson/task text.
+ * The fingerprint is based on the canonical form so that the same semantic content
+ * always maps to the same fingerprint regardless of boilerplate preamble.
+ * Returns null if the canonical text is too short to be meaningful.
+ *
+ * @param {string} text
+ * @returns {string|null}
+ */
+export function computeFingerprint(text: string): string | null {
+  const canonical = canonicalize(text);
+  if (canonical.length < 5) return null;
+  return createHash("sha256").update(canonical).digest("hex").slice(0, 16);
+}
 
 const LEDGER_FILE = "carry_forward_ledger.json";
 
@@ -63,19 +100,26 @@ export async function saveLedger(config, entries) {
 export function addDebtEntries(ledger, newItems, currentCycle, opts: any = {}) {
   const sla = opts.slaMaxCycles || 3;
   const existing = [...ledger];
-  const openKeys = new Set(
-    existing.filter(e => !e.closedAt).map(e => normalizeKey(e.lesson))
+  // Deduplicate by fingerprint; fall back to computing from lesson text for legacy
+  // entries that pre-date this field.
+  const openFingerprints = new Set(
+    existing
+      .filter(e => !e.closedAt)
+      .map(e => e.fingerprint || computeFingerprint(String(e.lesson || "")))
+      .filter(Boolean)
   );
 
   for (const item of (newItems || [])) {
     const lesson = String(item.followUpTask || "").trim();
     if (!lesson || lesson.length < 10) continue;
-    const key = normalizeKey(lesson);
-    if (openKeys.has(key)) continue;
+    const fingerprint = computeFingerprint(lesson);
+    if (!fingerprint) continue;
+    if (openFingerprints.has(fingerprint)) continue;
 
     existing.push({
       id: `debt-${currentCycle}-${existing.length}`,
       lesson,
+      fingerprint,
       owner: item.workerName || "evolution-worker",
       openedCycle: currentCycle,
       dueCycle: currentCycle + sla,
@@ -84,7 +128,7 @@ export function addDebtEntries(ledger, newItems, currentCycle, opts: any = {}) {
       closureEvidence: null,
       cyclesOpen: 0,
     });
-    openKeys.add(key);
+    openFingerprints.add(fingerprint);
   }
 
   return existing;
@@ -158,11 +202,4 @@ export function shouldBlockOnDebt(ledger, currentCycle, opts: any = {}) {
   return { shouldBlock: false, reason: "", overdueCount: criticalOverdue.length };
 }
 
-function normalizeKey(text) {
-  return String(text || "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 100);
-}
+

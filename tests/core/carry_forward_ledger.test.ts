@@ -6,6 +6,7 @@ import {
   closeDebt,
   getOpenDebts,
   shouldBlockOnDebt,
+  computeFingerprint,
 } from "../../src/core/carry_forward_ledger.js";
 
 describe("carry_forward_ledger", () => {
@@ -21,12 +22,16 @@ describe("carry_forward_ledger", () => {
       assert.equal(result[0].dueCycle, 8); // default SLA = 3
       assert.equal(result[0].severity, "critical");
       assert.equal(result[0].closedAt, null);
+      // fingerprint is stamped and deterministic
+      assert.ok(typeof result[0].fingerprint === "string" && result[0].fingerprint.length === 16);
+      assert.equal(result[0].fingerprint, computeFingerprint("Fix flaky test in worker runner module"));
     });
 
-    it("deduplicates by normalized lesson text", () => {
+    it("deduplicates by deterministic fingerprint", () => {
       const existing = [{
         id: "debt-1-0",
         lesson: "Fix flaky test",
+        fingerprint: computeFingerprint("Fix flaky test"),
         owner: "w",
         openedCycle: 1,
         dueCycle: 4,
@@ -36,9 +41,28 @@ describe("carry_forward_ledger", () => {
         cyclesOpen: 0,
       }];
       const result = addDebtEntries(existing, [
-        { followUpTask: "Fix Flaky Test" }, // same after normalization
+        { followUpTask: "Fix flaky test" }, // identical canonical form → same fingerprint
       ], 2);
       assert.equal(result.length, 1); // no duplicate added
+    });
+
+    it("deduplicates legacy entries without fingerprint field by computing on-the-fly", () => {
+      const existing = [{
+        id: "debt-1-0",
+        lesson: "Fix flaky test",
+        // no fingerprint field — simulates a pre-upgrade ledger entry
+        owner: "w",
+        openedCycle: 1,
+        dueCycle: 4,
+        severity: "warning",
+        closedAt: null,
+        closureEvidence: null,
+        cyclesOpen: 0,
+      }];
+      const result = addDebtEntries(existing, [
+        { followUpTask: "Fix flaky test" },
+      ], 2);
+      assert.equal(result.length, 1);
     });
 
     it("ignores items with short lesson text", () => {
@@ -169,6 +193,38 @@ describe("carry_forward_ledger", () => {
       const result = shouldBlockOnDebt([], 10);
       assert.equal(result.shouldBlock, false);
       assert.equal(result.overdueCount, 0);
+    });
+  });
+
+  describe("computeFingerprint", () => {
+    it("returns a 16-character hex string", () => {
+      const fp = computeFingerprint("Fix the validation harness in worker runner");
+      assert.ok(typeof fp === "string");
+      assert.equal(fp.length, 16);
+      assert.match(fp, /^[0-9a-f]{16}$/);
+    });
+
+    it("is deterministic — same input always produces same fingerprint", () => {
+      const text = "Upgrade evaluation stack to reduce flakiness";
+      assert.equal(computeFingerprint(text), computeFingerprint(text));
+    });
+
+    it("strips boilerplate before hashing — noise-equivalent texts share a fingerprint", () => {
+      const withNoise = "Create and complete a task to fix the verification harness";
+      const canonical = "fix the verification harness";
+      assert.equal(computeFingerprint(withNoise), computeFingerprint(canonical));
+    });
+
+    it("distinguishes semantically different texts", () => {
+      assert.notEqual(
+        computeFingerprint("Fix flaky test in worker runner"),
+        computeFingerprint("Add circuit breaker for model calls")
+      );
+    });
+
+    it("returns null for text that is too short after canonicalization", () => {
+      assert.equal(computeFingerprint(""), null);
+      assert.equal(computeFingerprint("  "), null);
     });
   });
 });

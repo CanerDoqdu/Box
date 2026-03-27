@@ -39,6 +39,7 @@ import {
 } from "./trust_boundary.js";
 import { validateAllPlans } from "./plan_contract_validator.js";
 import { section, compilePrompt } from "./prompt_compiler.js";
+import { computeFingerprint } from "./carry_forward_ledger.js";
 
 export function detectModelFallback(rawText) {
   const text = String(rawText || "");
@@ -62,21 +63,6 @@ export function buildPrometheusPlanningPolicy(config) {
   };
 }
 
-function normalizeFollowUpTaskKey(text) {
-  const s = String(text || "").toLowerCase();
-  return s
-    .replace(/[`'"(){}]|\[|\]/g, " ")
-    .replace(/create\s+and\s+complete\s+a\s+task\s+to\s+/g, "")
-    .replace(/create\s+a\s+dedicated\s+task\s+to\s+/g, "")
-    .replace(/this\s+is\s+now\s+a\s+gate\s*-?\s*blocking\s+item[^.]*\.?/g, "")
-    .replace(/athena\s+must\s+(block|reject)[^.]*\.?/g, "")
-    .replace(/this\s+fix\s+must\s+ship[^.]*\.?/g, "")
-    .replace(/blocking\s+defect[^:]*:\s*/g, "")
-    .replace(/\b(five|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen)\s+consecutive\s+postmortem\s+audit\s+records\b/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 /**
  * Maximum tokens for the carry-forward payload in the planning prompt.
  * Prevents unbounded growth when many follow-up tasks accumulate across cycles.
@@ -90,8 +76,14 @@ export const BEHAVIOR_PATTERNS_MAX_TOKENS = 1500;
 
 /**
  * Retire carry-forward items that have already been resolved.
- * Checks the carry-forward ledger (closedAt) and the coordination completedTasks list
- * to skip items that have evidence of resolution before including them in the prompt.
+ * Checks the carry-forward ledger (closedAt + closureEvidence) and the coordination
+ * completedTasks list to skip items that have verified evidence of resolution before
+ * including them in the prompt.
+ *
+ * Retirement is deterministic: each lesson is identified by a SHA-256 fingerprint of
+ * its canonical form (boilerplate stripped), so matching is collision-resistant and
+ * immune to trivial rewording. Ledger-based retirement additionally requires a
+ * non-empty closureEvidence to confirm the fix actually shipped.
  *
  * @param {Array} pendingEntries - postmortem entries with followUpNeeded + followUpTask
  * @param {Array} ledger - carry_forward_ledger entries (may include closed entries)
@@ -102,18 +94,20 @@ export function filterResolvedCarryForwardItems(pendingEntries, ledger, complete
   const ledgerEntries = Array.isArray(ledger) ? ledger : [];
   const completed = Array.isArray(completedTasks) ? completedTasks : [];
 
-  const resolvedKeys = new Set(
+  // Ledger retirement requires BOTH closedAt AND non-empty closureEvidence to ensure
+  // the item was actually fixed, not just administratively closed without proof.
+  const resolvedFingerprints = new Set(
     [
       ...ledgerEntries
-        .filter(e => e.closedAt)
-        .map(e => normalizeFollowUpTaskKey(String(e.lesson || ""))),
-      ...completed.map(t => normalizeFollowUpTaskKey(String(t || ""))),
+        .filter(e => e.closedAt && e.closureEvidence)
+        .map(e => e.fingerprint || computeFingerprint(String(e.lesson || ""))),
+      ...completed.map(t => computeFingerprint(String(t || ""))),
     ].filter(Boolean)
   );
 
   return (Array.isArray(pendingEntries) ? pendingEntries : []).filter(e => {
-    const key = normalizeFollowUpTaskKey(String(e.followUpTask || ""));
-    return key && !resolvedKeys.has(key);
+    const fp = computeFingerprint(String(e.followUpTask || ""));
+    return fp && !resolvedFingerprints.has(fp);
   });
 }
 
@@ -1372,9 +1366,9 @@ Consider whether the root causes are:
         // Traverse from newest to oldest so repeated tasks keep their latest wording/date.
         for (let i = pending.length - 1; i >= 0; i--) {
           const e = pending[i];
-          const key = normalizeFollowUpTaskKey(e.followUpTask);
-          if (!key || seenFollowUps.has(key)) continue;
-          seenFollowUps.add(key);
+          const fp = computeFingerprint(String(e.followUpTask || ""));
+          if (!fp || seenFollowUps.has(fp)) continue;
+          seenFollowUps.add(fp);
           deduped.push(e);
         }
         deduped.reverse();

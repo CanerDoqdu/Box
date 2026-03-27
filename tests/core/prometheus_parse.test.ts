@@ -344,13 +344,24 @@ describe("filterResolvedCarryForwardItems", () => {
     assert.equal(result[0].followUpTask, "Add circuit breaker for model calls");
   });
 
-  it("uses normalized key matching — strips noise before comparing", () => {
+  it("uses fingerprint matching — strips noise before hashing so noise-equivalent texts are retired", () => {
     const pending = [makePending("Create and complete a task to fix the verification harness")];
     const ledger = [
-      { id: "d1", lesson: "fix the verification harness", closedAt: "2025-03-01T00:00:00Z" },
+      // lesson matches after canonicalization; closureEvidence confirms it shipped
+      { id: "d1", lesson: "fix the verification harness", closedAt: "2025-03-01T00:00:00Z", closureEvidence: "PR #101" },
     ];
     const result = filterResolvedCarryForwardItems(pending, ledger, []);
     assert.equal(result.length, 0);
+  });
+
+  it("does NOT retire items whose ledger entry is closed without closureEvidence", () => {
+    const pending = [makePending("Automate carry-forward escalation")];
+    const ledger = [
+      // closedAt is set but closureEvidence is absent — no proof of fix
+      { id: "d1", lesson: "Automate carry-forward escalation", closedAt: "2025-03-01T00:00:00Z", closureEvidence: null },
+    ];
+    const result = filterResolvedCarryForwardItems(pending, ledger, []);
+    assert.equal(result.length, 1);
   });
 
   it("keeps items whose ledger entry is open (closedAt = null)", () => {
@@ -363,7 +374,7 @@ describe("filterResolvedCarryForwardItems", () => {
   });
 
   it("handles empty pendingEntries gracefully", () => {
-    const result = filterResolvedCarryForwardItems([], [{ id: "d1", lesson: "anything", closedAt: "2025-01-01" }], []);
+    const result = filterResolvedCarryForwardItems([], [{ id: "d1", lesson: "anything", closedAt: "2025-01-01", closureEvidence: "done" }], []);
     assert.equal(result.length, 0);
   });
 
