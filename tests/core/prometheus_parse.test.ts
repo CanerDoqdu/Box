@@ -13,6 +13,7 @@ import {
   buildDriftDebtTasks,
 } from "../../src/core/prometheus.js";
 import { compilePrompt } from "../../src/core/prompt_compiler.js";
+import { isNonSpecificVerification, validatePlanContract } from "../../src/core/plan_contract_validator.js";
 
 describe("normalizePrometheusParsedOutput", () => {
   it("maps tasks/waves decision payload into planner plans", () => {
@@ -870,11 +871,18 @@ describe("buildDriftDebtTasks", () => {
     assert.ok(typeof task.task === "string" && task.task.length > 0, "task text must be a non-empty string");
     assert.ok(typeof task.description === "string" && task.description.length > 0);
     assert.equal(task.role, "evolution-worker");
-    assert.equal(task.verification, "npm test");
+    // verification must reference a specific test file so isNonSpecificVerification passes
+    assert.ok(/\.test\.(ts|js)/.test(task.verification), "verification must reference a specific test file");
+    assert.ok(task.verification.includes("docs/a.md"), "verification must name the doc being fixed");
     assert.ok(Array.isArray(task.verification_commands));
     assert.ok(Array.isArray(task.acceptance_criteria) && task.acceptance_criteria.length >= 2);
     assert.ok(typeof task.wave === "number");
     assert.ok(typeof task.priority === "number");
+    // contract-required fields must be present
+    assert.ok(typeof task.capacityDelta === "number", "capacityDelta must be a number");
+    assert.ok(typeof task.requestROI === "number" && task.requestROI > 0, "requestROI must be a positive number");
+    assert.ok(Array.isArray(task.verification_targets) && task.verification_targets.length > 0,
+      "verification_targets must be a non-empty array");
   });
 
   it("negative path: handles malformed staleReferences entries without throwing", () => {
@@ -889,3 +897,91 @@ describe("buildDriftDebtTasks", () => {
   });
 });
 
+// ── Task 2: Drift debt tasks pass quality gate (contract validation) ───────────
+
+describe("buildDriftDebtTasks — quality gate contract compliance", () => {
+  it("stale-ref debt task verification field is NOT flagged as non-specific by plan_contract_validator", () => {
+    const report = {
+      staleReferences: [{ docPath: "docs/arch.md", referencedPath: "src/core/missing.ts", line: 1 }],
+      deprecatedTokenRefs: [],
+    };
+    const [task] = buildDriftDebtTasks(report);
+    assert.equal(
+      isNonSpecificVerification(task.verification),
+      false,
+      `Verification "${task.verification}" must pass isNonSpecificVerification (references a .test.ts file)`
+    );
+  });
+
+  it("deprecated-token debt task verification field is NOT flagged as non-specific", () => {
+    const report = {
+      staleReferences: [],
+      deprecatedTokenRefs: [{ docPath: "docs/legacy.md", token: "governance_verdict", hint: "use governance_contract", line: 2 }],
+    };
+    const [task] = buildDriftDebtTasks(report);
+    assert.equal(
+      isNonSpecificVerification(task.verification),
+      false,
+      `Verification "${task.verification}" must pass isNonSpecificVerification`
+    );
+  });
+
+  it("stale-ref debt task passes validatePlanContract when capacityDelta and requestROI are present", () => {
+    const report = {
+      staleReferences: [{ docPath: "docs/arch.md", referencedPath: "src/core/missing.ts", line: 1 }],
+      deprecatedTokenRefs: [],
+    };
+    const [task] = buildDriftDebtTasks(report);
+    const result = validatePlanContract(task);
+    const criticalViolations = result.violations.filter((v: any) => v.severity === "critical");
+    assert.equal(
+      criticalViolations.length,
+      0,
+      `Stale-ref debt task must have zero critical violations; got: ${criticalViolations.map((v: any) => v.message).join("; ")}`
+    );
+  });
+
+  it("deprecated-token debt task passes validatePlanContract", () => {
+    const report = {
+      staleReferences: [],
+      deprecatedTokenRefs: [
+        { docPath: "docs/legacy.md", token: "governance_verdict", hint: "use governance_contract", line: 2 },
+      ],
+    };
+    const [task] = buildDriftDebtTasks(report);
+    const result = validatePlanContract(task);
+    const criticalViolations = result.violations.filter((v: any) => v.severity === "critical");
+    assert.equal(
+      criticalViolations.length,
+      0,
+      `Deprecated-token debt task must have zero critical violations; got: ${criticalViolations.map((v: any) => v.message).join("; ")}`
+    );
+  });
+
+  it("verification_targets is a non-empty array pointing to the architecture_drift test file", () => {
+    const report = {
+      staleReferences: [{ docPath: "docs/arch.md", referencedPath: "src/core/x.ts", line: 1 }],
+      deprecatedTokenRefs: [{ docPath: "docs/arch.md", token: "resume_dispatch", hint: "use runResumeDispatch", line: 5 }],
+    };
+    const tasks = buildDriftDebtTasks(report);
+    assert.equal(tasks.length, 2);
+    for (const task of tasks) {
+      assert.ok(Array.isArray(task.verification_targets) && task.verification_targets.length > 0,
+        "verification_targets must be a non-empty array");
+      assert.ok(
+        task.verification_targets.every((t: string) => t.includes("architecture_drift.test.ts")),
+        "each verification target must reference architecture_drift.test.ts"
+      );
+    }
+  });
+
+  it("negative path: bare 'npm test' alone is non-specific and would be rejected by contract (validates the fix rationale)", () => {
+    // This test documents WHY we changed the verification field — to prove that
+    // the old value would have been rejected by the quality gate.
+    assert.equal(
+      isNonSpecificVerification("npm test"),
+      true,
+      "bare 'npm test' must be flagged as non-specific — this is the problem the fix addresses"
+    );
+  });
+});
