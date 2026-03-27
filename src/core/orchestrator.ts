@@ -61,6 +61,7 @@ import { executeRollback, ROLLBACK_LEVEL, ROLLBACK_TRIGGER } from "./rollback_en
 import { initializeAggregateLiveLog } from "./live_log.js";
 import { buildRoleExecutionBatches } from "./worker_batch_planner.js";
 import { agentFileExists, nameToSlug } from "./agent_loader.js";
+import { getRoleRegistry } from "./role_registry.js";
 import { checkArchitectureDrift } from "./architecture_drift.js";
 import { detectLaneConflicts } from "./capability_pool.js";
 
@@ -502,7 +503,7 @@ export async function runDaemon(config) {
   const staleThresholdMs = workerTimeoutMs * 2;
   const now = Date.now();
   let zombieReset = false;
-  const knownRoles = ["Evolution Worker"];
+  const knownRoles = Object.values(getRoleRegistry(liveConfig).workers).map((w: any) => w.name);
   for (const roleName of knownRoles) {
     const perWorkerPath = path.join(stateDir, `worker_${roleName.toLowerCase().replace(/\s+/g, "_")}.json`);
     const perWorker = await readJson(perWorkerPath, null);

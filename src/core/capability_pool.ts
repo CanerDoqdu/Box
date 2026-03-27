@@ -11,7 +11,7 @@
  * optimal worker for each plan.
  */
 
-import { getWorkersByLane } from "./verification_profiles.js";
+import { LANE_WORKER_NAMES } from "./role_registry.js";
 
 /**
  * Default worker capabilities mapping.
@@ -83,25 +83,15 @@ export function selectWorkerForPlan(plan, config) {
   const customMap = config?.workerPool?.capabilityMap;
   const mapping = customMap?.[capTag] || DEFAULT_CAPABILITY_MAP[capTag] || { lane: "implementation", fallback: "evolution-worker" };
 
-  // Try to find a specialized worker in the appropriate lane
-  const laneWorkers = getWorkersByLane(mapping.lane);
+  // Resolve to the canonical lane worker name; fall back to configured fallback if lane is unknown.
+  const laneWorkerName = LANE_WORKER_NAMES[mapping.lane] || mapping.fallback;
+  const isFallback = !LANE_WORKER_NAMES[mapping.lane];
 
-  if (laneWorkers.length > 0) {
-    // Prefer the first worker in the lane as the primary
-    return {
-      role: laneWorkers[0],
-      lane: mapping.lane,
-      reason: `Capability "${capTag}" → lane "${mapping.lane}" → worker "${laneWorkers[0]}"`,
-      isFallback: false
-    };
-  }
-
-  // Fallback to the configured fallback worker
   return {
-    role: mapping.fallback,
+    role: laneWorkerName,
     lane: mapping.lane,
-    reason: `Capability "${capTag}" → lane "${mapping.lane}" has no workers → fallback "${mapping.fallback}"`,
-    isFallback: true
+    reason: `Capability "${capTag}" → lane "${mapping.lane}" → worker "${laneWorkerName}"`,
+    isFallback,
   };
 }
 
