@@ -170,6 +170,57 @@ describe("learning_policy_compiler", () => {
       const result = checkCarryForwardGate(pms, plans, { mandatoryCarryForward: ["Must do X", "Must do Y"] });
       assert.equal(result.missingMandatory.length, 0);
     });
+
+    // ── Hard admission blocker tests (Task 2) ──────────────────────────────
+
+    it("sets shouldBlock=true when lesson recurs past threshold and plans don't address it", () => {
+      const pms = [
+        { followUpNeeded: true, followUpTask: "Recurring unresolved blocker", lessonLearned: "x" },
+        { followUpNeeded: true, followUpTask: "Recurring unresolved blocker", lessonLearned: "y" },
+        { followUpNeeded: true, followUpTask: "Recurring unresolved blocker", lessonLearned: "z" },
+      ];
+      const result = checkCarryForwardGate(pms, [], { maxUnresolvedCycles: 2 });
+      assert.equal(result.shouldBlock, true, "shouldBlock must be true when threshold is exceeded");
+    });
+
+    it("sets shouldBlock=false when count is exactly at threshold (not over)", () => {
+      // threshold default is 3; count must be >= threshold to block
+      const pms = [
+        { followUpNeeded: true, followUpTask: "Edge case lesson", lessonLearned: "a" },
+        { followUpNeeded: true, followUpTask: "Edge case lesson", lessonLearned: "b" },
+      ];
+      // maxUnresolvedCycles: 3; count=2 < 3 → should NOT block
+      const result = checkCarryForwardGate(pms, [], { maxUnresolvedCycles: 3 });
+      assert.equal(result.shouldBlock, false, "shouldBlock must be false when count is below threshold");
+    });
+
+    it("unblocks when current plans address the recurring lesson", () => {
+      const pms = [
+        { followUpNeeded: true, followUpTask: "Fix critical thing in scope", lessonLearned: "a" },
+        { followUpNeeded: true, followUpTask: "Fix critical thing in scope", lessonLearned: "b" },
+        { followUpNeeded: true, followUpTask: "Fix critical thing in scope", lessonLearned: "c" },
+      ];
+      // A plan that explicitly addresses the recurring lesson
+      const plans = [{ task: "Fix critical thing in scope" }];
+      const result = checkCarryForwardGate(pms, plans, { maxUnresolvedCycles: 2 });
+      assert.equal(result.shouldBlock, false, "shouldBlock must be false when plans address the recurring lesson");
+    });
+
+    it("reason string is non-empty when shouldBlock=true", () => {
+      const pms = [
+        { followUpNeeded: true, followUpTask: "Persistent unresolved issue", lessonLearned: "1" },
+        { followUpNeeded: true, followUpTask: "Persistent unresolved issue", lessonLearned: "2" },
+        { followUpNeeded: true, followUpTask: "Persistent unresolved issue", lessonLearned: "3" },
+      ];
+      const result = checkCarryForwardGate(pms, [], { maxUnresolvedCycles: 2 });
+      assert.ok(result.shouldBlock);
+      assert.ok(result.reason.length > 0, "reason must describe the block when shouldBlock=true");
+    });
+
+    it("negative: empty postmortems never block", () => {
+      const result = checkCarryForwardGate([], [], { maxUnresolvedCycles: 1 });
+      assert.equal(result.shouldBlock, false);
+    });
   });
 
   // ── Task 9: routing and prompt constraint feedback from recurring postmortems ─

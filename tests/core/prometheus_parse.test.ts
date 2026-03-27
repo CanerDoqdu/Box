@@ -1000,3 +1000,102 @@ describe("buildDriftDebtTasks — quality gate contract compliance", () => {
     );
   });
 });
+
+// ── Task 1: capacityDelta / requestROI hard filter at generation time ─────────
+
+import { validateAllPlans, PLAN_VIOLATION_SEVERITY } from "../../src/core/plan_contract_validator.js";
+
+describe("capacityDelta/requestROI generation-time hard filter", () => {
+  function makeValidPlan(overrides = {}) {
+    return {
+      task: "Implement something with enough chars",
+      role: "evolution-worker",
+      wave: 1,
+      verification: "tests/core/foo.test.ts — test: passes",
+      dependencies: [],
+      acceptance_criteria: ["must pass"],
+      capacityDelta: 0.1,
+      requestROI: 2.0,
+      ...overrides,
+    };
+  }
+
+  it("identifies plans missing capacityDelta for removal", () => {
+    const plans = [
+      makeValidPlan(),
+      makeValidPlan({ capacityDelta: undefined }),
+    ];
+    const result = validateAllPlans(plans);
+    const toRemove = result.results
+      .filter(r => !r.valid && r.violations.some(v =>
+        (v.field === "capacityDelta" || v.field === "requestROI") &&
+        v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL
+      ))
+      .map(r => r.planIndex)
+      .sort((a, b) => b - a);
+    assert.deepEqual(toRemove, [1], "plan without capacityDelta must be flagged for removal");
+  });
+
+  it("identifies plans missing requestROI for removal", () => {
+    const plans = [
+      makeValidPlan(),
+      makeValidPlan({ requestROI: undefined }),
+    ];
+    const result = validateAllPlans(plans);
+    const toRemove = result.results
+      .filter(r => !r.valid && r.violations.some(v =>
+        (v.field === "capacityDelta" || v.field === "requestROI") &&
+        v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL
+      ))
+      .map(r => r.planIndex)
+      .sort((a, b) => b - a);
+    assert.deepEqual(toRemove, [1], "plan without requestROI must be flagged for removal");
+  });
+
+  it("filters out capacity/ROI-violating plans without touching valid plans", () => {
+    const plans = [
+      makeValidPlan({ task: "First valid plan here" }),
+      makeValidPlan({ capacityDelta: undefined, requestROI: undefined }),
+      makeValidPlan({ task: "Third valid plan here" }),
+    ];
+    const result = validateAllPlans(plans);
+    const toRemove = result.results
+      .filter(r => !r.valid && r.violations.some(v =>
+        (v.field === "capacityDelta" || v.field === "requestROI") &&
+        v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL
+      ))
+      .map(r => r.planIndex)
+      .sort((a, b) => b - a);
+    const filtered = [...plans];
+    for (const idx of toRemove) filtered.splice(idx, 1);
+    assert.equal(filtered.length, 2, "only the invalid plan should be removed");
+    assert.equal(filtered[0].task, "First valid plan here");
+    assert.equal(filtered[1].task, "Third valid plan here");
+  });
+
+  it("negative: plans with valid capacityDelta and requestROI are NOT flagged for removal", () => {
+    const plans = [
+      makeValidPlan({ capacityDelta: -0.5, requestROI: 1.1 }),
+      makeValidPlan({ capacityDelta: 0, requestROI: 0.001 }),
+    ];
+    const result = validateAllPlans(plans);
+    const toRemove = result.results
+      .filter(r => !r.valid && r.violations.some(v =>
+        (v.field === "capacityDelta" || v.field === "requestROI") &&
+        v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL
+      ))
+      .map(r => r.planIndex);
+    assert.equal(toRemove.length, 0, "no valid plans should be flagged for capacity/ROI removal");
+  });
+
+  it("negative: out-of-range capacityDelta (> 1.0) is also flagged for removal", () => {
+    const plans = [makeValidPlan({ capacityDelta: 2.0 })];
+    const result = validateAllPlans(plans);
+    const toRemove = result.results
+      .filter(r => !r.valid && r.violations.some(v =>
+        v.field === "capacityDelta" && v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL
+      ))
+      .map(r => r.planIndex);
+    assert.equal(toRemove.length, 1, "out-of-range capacityDelta must be flagged for removal");
+  });
+});

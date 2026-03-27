@@ -37,10 +37,11 @@ import {
   LEADERSHIP_CONTRACT_TYPE,
   TRUST_BOUNDARY_ERROR,
 } from "./trust_boundary.js";
-import { validateAllPlans } from "./plan_contract_validator.js";
+import { validateAllPlans, PLAN_VIOLATION_SEVERITY } from "./plan_contract_validator.js";
 import { section, compilePrompt } from "./prompt_compiler.js";
 import { computeFingerprint } from "./carry_forward_ledger.js";
 import { rewriteVerificationCommand } from "./verification_command_registry.js";
+import { checkCarryForwardGate, hardGateRecurrenceToPolicies } from "./learning_policy_compiler.js";
 
 export function detectModelFallback(rawText) {
   const text = String(rawText || "");
@@ -1538,6 +1539,9 @@ export async function runPrometheusAnalysis(config, options: any = {}) {
   // ── Extract behavior patterns from postmortems ────────────────────────────
   let behaviorPatternsSection = "";
   let carryForwardSection = "";
+  // Postmortem entries lifted to function scope so the carry-forward gate can
+  // evaluate them after plan generation and validation.
+  let postmortemEntries: any[] = [];
   try {
     // Load carry-forward ledger and coordination data in parallel for retirement check
     const [postmortems, cfLedgerData, coordinationData] = await Promise.all([
@@ -1549,6 +1553,7 @@ export async function runPrometheusAnalysis(config, options: any = {}) {
     const coordinationCompletedTasks = Array.isArray(coordinationData?.completedTasks)
       ? coordinationData.completedTasks : [];
     const entries = Array.isArray(postmortems?.entries) ? postmortems.entries : [];
+    postmortemEntries = entries; // expose to carry-forward gate after plan validation
     
     if (entries.length > 0) {
       // Extract patterns: recurring issues, worker problems, quality trends
@@ -1856,6 +1861,53 @@ Consider whether the root causes are:
       parsed.plans[r.planIndex]._contractViolations = r.violations;
     }
     parsed._planContractPassRate = contractResult.passRate;
+
+    // ── Hard-filter plans missing valid capacityDelta / requestROI (Task 1) ─
+    // These fields are required for plan ranking and budget comparison.
+    // Plans that omit or supply invalid values are removed at generation time,
+    // before the critic or Athena review, so invalid plans never enter dispatch.
+    const capacityRoiViolatingIndices = contractResult.results
+      .filter(r => !r.valid && r.violations.some(v =>
+        (v.field === "capacityDelta" || v.field === "requestROI") &&
+        v.severity === PLAN_VIOLATION_SEVERITY.CRITICAL
+      ))
+      .map(r => r.planIndex)
+      .sort((a, b) => b - a); // reverse order for safe in-place splice
+    if (capacityRoiViolatingIndices.length > 0) {
+      for (const idx of capacityRoiViolatingIndices) {
+        parsed.plans.splice(idx, 1);
+      }
+      await appendProgress(config,
+        `[PROMETHEUS][CONTRACT] Hard-filtered ${capacityRoiViolatingIndices.length} plan(s) missing valid capacityDelta/requestROI — generation-time requirement enforced`
+      );
+      parsed._capacityRoiFilteredCount = capacityRoiViolatingIndices.length;
+    }
+  }
+
+  // ── Carry-forward admission gate (Task 2) ────────────────────────────────
+  // Blocks plan dispatch when the same unresolved lesson has recurred past the
+  // threshold without being addressed in the current plan set. This converts
+  // repeated advisory carry-forward items into hard admission blockers.
+  if (postmortemEntries.length > 0 && Array.isArray(parsed.plans) && parsed.plans.length > 0) {
+    const maxUnresolvedCycles = Number(config?.planner?.maxUnresolvedCycles) || 3;
+    const gateResult = checkCarryForwardGate(postmortemEntries, parsed.plans, { maxUnresolvedCycles });
+    // Also compile recurring unresolved lessons into enforceable hard-gate policies.
+    const existingPolicyIds = (parsed._hardGatePolicies || []).map((p: any) => String(p.id));
+    const recurrenceResult = hardGateRecurrenceToPolicies(postmortemEntries, existingPolicyIds, {
+      maxRecurrences: maxUnresolvedCycles,
+    });
+    if (recurrenceResult.newPolicies.length > 0) {
+      parsed._hardGatePolicies = [...(parsed._hardGatePolicies || []), ...recurrenceResult.newPolicies];
+    }
+    parsed._carryForwardGateResult = gateResult;
+    if (gateResult.shouldBlock) {
+      parsed._carryForwardGateBlocked = true;
+      await appendProgress(config,
+        `[PROMETHEUS][CARRY-FORWARD] HARD BLOCK — ${gateResult.reason}` +
+        (gateResult.unresolvedLessons.length > 0 ? ` | unresolved: ${gateResult.unresolvedLessons.slice(0, 3).join("; ")}` : "") +
+        (gateResult.missingMandatory.length > 0 ? ` | missing mandatory: ${gateResult.missingMandatory.slice(0, 3).join("; ")}` : "")
+      );
+    }
   }
 
   // ── Dual-pass planning: Pass-B critic gate ─────────────────────────────────
