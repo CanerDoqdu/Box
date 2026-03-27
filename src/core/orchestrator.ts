@@ -35,6 +35,7 @@ import { updatePipelineProgress, readPipelineProgress } from "./pipeline_progres
 import { loadEscalationQueue, sortEscalationQueue } from "./escalation_queue.js";
 import { computeCycleSLOs, persistSloMetrics } from "./slo_checker.js";
 import { computeCycleAnalytics, persistCycleAnalytics, CYCLE_PHASE } from "./cycle_analytics.js";
+import { computeBaselineRecoveryState, persistBaselineMetrics, PARSER_CONFIDENCE_RECOVERY_THRESHOLD } from "./parser_baseline_recovery.js";
 import {
   addSchemaVersion,
   migrateData,
@@ -1257,6 +1258,40 @@ async function runSingleCycle(config) {
     return;
   }
 
+  // ── Baseline recovery mode ────────────────────────────────────────────────
+  // When parserConfidence is below PARSER_CONFIDENCE_RECOVERY_THRESHOLD (0.9)
+  // but above the hard-stop, enter advisory "baseline recovery" mode:
+  //   - Persist structural/schema component metrics for trend analysis.
+  //   - Emit progress + advisory alert so operators can see which components
+  //     are dragging confidence below the recovery target.
+  // Dispatch is NOT blocked here — the hard-stop gate above handles that.
+  let baselineRecoveryRecord = null;
+  if (parsedConfidence < PARSER_CONFIDENCE_RECOVERY_THRESHOLD) {
+    try {
+      const cycleIdForBaseline = (await readPipelineProgress(config))?.startedAt ?? null;
+      baselineRecoveryRecord = computeBaselineRecoveryState(prometheusAnalysis, cycleIdForBaseline);
+      await persistBaselineMetrics(config, baselineRecoveryRecord);
+      const gapSummary = Object.entries(baselineRecoveryRecord.componentGap)
+        .filter(([, gap]) => (gap as number) > 0)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(" ");
+      await appendProgress(config,
+        `[CYCLE] Baseline recovery mode active — parserConfidence=${parsedConfidence} target=${PARSER_CONFIDENCE_RECOVERY_THRESHOLD}` +
+        (gapSummary ? ` componentGaps=[${gapSummary}]` : "")
+      );
+      await appendAlert(config, {
+        severity: ALERT_SEVERITY.MEDIUM,
+        source: "orchestrator",
+        title: "Baseline recovery mode — parser confidence below target",
+        message: `parserConfidence=${parsedConfidence} target=${PARSER_CONFIDENCE_RECOVERY_THRESHOLD}. ` +
+          `Component gaps: ${gapSummary || "none"}. ` +
+          `Penalties: ${baselineRecoveryRecord.penalties.map(p => p.reason).join(", ") || "none"}.`
+      });
+    } catch (err) {
+      warn(`[orchestrator] Baseline recovery metrics persist failed (non-fatal): ${String(err?.message || err)}`);
+    }
+  }
+
   await safeUpdatePipelineProgress(config, "prometheus_done", `Prometheus complete — ${prometheusAnalysis.plans.length} plan(s)`, {
     planCount: prometheusAnalysis.plans.length
   });
@@ -1625,6 +1660,7 @@ async function runSingleCycle(config) {
       workerResults: null,   // worker result details not aggregated at this call site
       planCount: Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans.length : null,
       phase: CYCLE_PHASE.COMPLETED,
+      parserBaselineRecovery: baselineRecoveryRecord ?? null,
     });
     await persistCycleAnalytics(config, analyticsRecord);
     await appendProgress(config, `[ANALYTICS] Cycle analytics written — confidence=${analyticsRecord.confidence.level} sloStatus=${analyticsRecord.kpis.sloStatus} phase=${analyticsRecord.phase}`);

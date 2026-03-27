@@ -325,11 +325,12 @@ function computeOutcomeStatus(phase, workerResults, planCount) {
  *
  * @param {object} config
  * @param {object} opts
- * @param {object|null} opts.sloRecord        Output of computeCycleSLOs(). May be null.
- * @param {object|null} opts.pipelineProgress pipeline_progress.json content. May be null.
- * @param {Array|null}  opts.workerResults    [{roleName, status}] per dispatched worker. May be null.
- * @param {number|null} opts.planCount        Total plans dispatched this cycle. May be null.
- * @param {string}      opts.phase            CYCLE_PHASE value.
+ * @param {object|null} opts.sloRecord              Output of computeCycleSLOs(). May be null.
+ * @param {object|null} opts.pipelineProgress        pipeline_progress.json content. May be null.
+ * @param {Array|null}  opts.workerResults           [{roleName, status}] per dispatched worker. May be null.
+ * @param {number|null} opts.planCount               Total plans dispatched this cycle. May be null.
+ * @param {string}      opts.phase                   CYCLE_PHASE value.
+ * @param {object|null} opts.parserBaselineRecovery  Output of computeBaselineRecoveryState(). May be null.
  * @returns {object} Analytics record conforming to CYCLE_ANALYTICS_SCHEMA.cycleRecord.
  */
 export function computeCycleAnalytics(config, {
@@ -338,6 +339,7 @@ export function computeCycleAnalytics(config, {
   workerResults = null,
   planCount = null,
   phase = CYCLE_PHASE.COMPLETED,
+  parserBaselineRecovery = null,
 }: any = {}) {
   const missingData = [];
   const stageTimestamps = pipelineProgress?.stageTimestamps || null;
@@ -425,6 +427,7 @@ export function computeCycleAnalytics(config, {
     causalLinks,
     canonicalEvents,
     missingData,
+    parserBaselineRecovery: parserBaselineRecovery ?? null,
   };
 }
 
