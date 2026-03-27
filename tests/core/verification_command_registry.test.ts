@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { getVerificationCommands, getTestCommand, VERIFICATION_DEFAULTS, checkForbiddenCommands, FORBIDDEN_VERIFICATION_PATTERNS } from "../../src/core/verification_command_registry.js";
+import { getVerificationCommands, getTestCommand, VERIFICATION_DEFAULTS, checkForbiddenCommands, FORBIDDEN_VERIFICATION_PATTERNS, rewriteVerificationCommand, VERIFICATION_CMD_REWRITE_RULES } from "../../src/core/verification_command_registry.js";
 
 describe("verification_command_registry", () => {
   describe("getVerificationCommands", () => {
@@ -64,6 +64,81 @@ describe("verification_command_registry", () => {
       for (const p of FORBIDDEN_VERIFICATION_PATTERNS) {
         assert.ok(p.pattern);
         assert.ok(p.reason);
+      }
+    });
+
+    it("detects bash script invocation as forbidden", () => {
+      const result = checkForbiddenCommands("bash scripts/run_tests.sh");
+      assert.equal(result.forbidden, true);
+      assert.ok(result.violations.length > 0);
+    });
+
+    it("detects sh script invocation as forbidden", () => {
+      const result = checkForbiddenCommands("sh run.sh");
+      assert.equal(result.forbidden, true);
+    });
+  });
+
+  describe("rewriteVerificationCommand", () => {
+    it("rewrites shell-glob node --test to npm test", () => {
+      assert.equal(rewriteVerificationCommand("node --test tests/**/*.test.js"), "npm test");
+      assert.equal(rewriteVerificationCommand("node --test tests/**/*.test.ts"), "npm test");
+    });
+
+    it("rewrites bash script invocations to npm test", () => {
+      assert.equal(rewriteVerificationCommand("bash scripts/run_tests.sh"), "npm test");
+    });
+
+    it("rewrites sh script invocations to npm test", () => {
+      assert.equal(rewriteVerificationCommand("sh run.sh"), "npm test");
+    });
+
+    it("rewrites BOX daemon commands to npm test", () => {
+      assert.equal(rewriteVerificationCommand("node src/cli.js once"), "npm test");
+      assert.equal(rewriteVerificationCommand("npm run box:once"), "npm test");
+      assert.equal(rewriteVerificationCommand("node src/cli.js start"), "npm test");
+      assert.equal(rewriteVerificationCommand("node src/cli.js doctor"), "npm test");
+    });
+
+    it("rewrites dashboard daemon to node --test", () => {
+      assert.equal(rewriteVerificationCommand("node src/dashboard/live_dashboard.js"), "node --test");
+    });
+
+    it("passes through canonical npm test unchanged", () => {
+      assert.equal(rewriteVerificationCommand("npm test"), "npm test");
+      assert.equal(rewriteVerificationCommand("npm run lint"), "npm run lint");
+      assert.equal(rewriteVerificationCommand("npm run build"), "npm run build");
+    });
+
+    it("passes through node --test without glob unchanged", () => {
+      assert.equal(rewriteVerificationCommand("node --test"), "node --test");
+      assert.equal(rewriteVerificationCommand("node --test tests/core/foo.test.ts"), "node --test tests/core/foo.test.ts");
+    });
+
+    it("returns npm test for empty/null-like input (negative path)", () => {
+      // Empty string has no matching rule — passes through as empty then trimmed
+      assert.equal(rewriteVerificationCommand(""), "");
+    });
+
+    it("VERIFICATION_CMD_REWRITE_RULES is non-empty array of match/replacement objects", () => {
+      assert.ok(VERIFICATION_CMD_REWRITE_RULES.length > 0);
+      for (const rule of VERIFICATION_CMD_REWRITE_RULES) {
+        assert.ok(rule.match instanceof RegExp, "rule.match must be a RegExp");
+        assert.equal(typeof rule.replacement, "string", "rule.replacement must be a string");
+        assert.ok(rule.replacement.length > 0, "rule.replacement must be non-empty");
+      }
+    });
+
+    it("every FORBIDDEN_VERIFICATION_PATTERNS entry has a corresponding rewrite rule", () => {
+      // All forbidden patterns should be rewritable — not just detected but fixed
+      const testCases = [
+        "node --test tests/**/*.test.ts",
+        "bash scripts/test.sh",
+        "sh run.sh",
+      ];
+      for (const cmd of testCases) {
+        const rewritten = rewriteVerificationCommand(cmd);
+        assert.notEqual(rewritten, cmd, `"${cmd}" should be rewritten to a canonical form`);
       }
     });
   });

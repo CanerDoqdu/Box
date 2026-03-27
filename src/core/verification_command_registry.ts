@@ -69,7 +69,55 @@ export const FORBIDDEN_VERIFICATION_PATTERNS = Object.freeze([
     pattern: /node\s+--test\s+[^\s]*\*/i,
     reason: "Wildcard glob in node --test fails on Windows — use 'npm test' instead"
   },
+  {
+    pattern: /^bash\s+/i,
+    reason: "bash is not available on Windows — use 'npm test' instead"
+  },
+  {
+    pattern: /^sh\s+/i,
+    reason: "sh is not available on Windows — use 'npm test' instead"
+  },
 ]);
+
+/**
+ * Rewrite rules for non-portable or unsafe verification commands.
+ * Applied before worker dispatch — converts problematic patterns to
+ * their canonical, portable equivalents.
+ *
+ * Covers:
+ *   - Shell-glob node --test invocations (fail on Windows)
+ *   - Bash/sh script invocations (not available on Windows)
+ *   - BOX daemon/start commands (would wake the full agent stack)
+ *
+ * @type {ReadonlyArray<{ match: RegExp; replacement: string }>}
+ */
+export const VERIFICATION_CMD_REWRITE_RULES: ReadonlyArray<{ match: RegExp; replacement: string }> = Object.freeze([
+  // Shell-glob patterns: not expanded on Windows — rewrite to portable test runner
+  { match: /node\s+--test\s+[^\s]*\*/i, replacement: DEFAULTS.test },
+  // Bash/sh scripts are not available on Windows
+  { match: /^bash\s+/i, replacement: DEFAULTS.test },
+  { match: /^sh\s+/i, replacement: DEFAULTS.test },
+  // BOX daemon/start commands that would launch the full agent stack
+  { match: /^node\s+src\/cli\.js\s+once$/i, replacement: DEFAULTS.test },
+  { match: /^npm\s+run\s+box:once$/i, replacement: DEFAULTS.test },
+  { match: /^node\s+src\/cli\.js\s+start$/i, replacement: DEFAULTS.test },
+  { match: /^node\s+src\/cli\.js\s+doctor$/i, replacement: DEFAULTS.test },
+  // Dashboard is a daemon — rewrite to headless test runner
+  { match: /^node\s+src\/dashboard\/live_dashboard\.js$/i, replacement: "node --test" },
+]);
+
+/**
+ * Rewrite a single verification command to its canonical, portable equivalent.
+ * Returns the command unchanged when no rewrite rule matches.
+ *
+ * @param {string} cmd — raw verification command
+ * @returns {string} canonical command safe to run on all platforms
+ */
+export function rewriteVerificationCommand(cmd: string): string {
+  const text = String(cmd || "").trim();
+  const rule = VERIFICATION_CMD_REWRITE_RULES.find(r => r.match.test(text));
+  return rule ? rule.replacement : text;
+}
 
 /**
  * Check if a verification command string contains forbidden patterns.

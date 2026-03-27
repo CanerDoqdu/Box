@@ -28,7 +28,7 @@ import { buildAgentArgs, parseAgentOutput } from "./agent_loader.js";
 import { spawnAsync } from "./fs_utils.js";
 import { getRoleRegistry } from "./role_registry.js";
 import { checkPostMergeArtifact, ARTIFACT_GAP, ARTIFACT_GATE_ERROR_PREFIX, isArtifactGateRequired } from "./verification_gate.js";
-import { VERIFICATION_DEFAULTS } from "./verification_command_registry.js";
+import { VERIFICATION_DEFAULTS, rewriteVerificationCommand } from "./verification_command_registry.js";
 
 type EvolutionTask = {
   task_id?: string;
@@ -189,33 +189,6 @@ const ATHENA_RETRYABLE_REVIEW_PATTERNS = [
   /verification\s+commands/i
 ];
 
-const VERIFICATION_CMD_REWRITES = [
-  {
-    match: /^node\s+src\/cli\.js\s+once$/i,
-    replacement: VERIFICATION_DEFAULTS.test
-  },
-  {
-    match: /^npm\s+run\s+box:once$/i,
-    replacement: VERIFICATION_DEFAULTS.test
-  },
-  {
-    match: /^node\s+src\/cli\.js\s+start$/i,
-    replacement: VERIFICATION_DEFAULTS.test
-  },
-  {
-    match: /^node\s+src\/cli\.js\s+doctor$/i,
-    replacement: VERIFICATION_DEFAULTS.test
-  },
-  {
-    match: /^node\s+src\/dashboard\/live_dashboard\.js$/i,
-    replacement: "node --test"
-  },
-  {
-    match: /^node\s+--test\s+tests\/\*\*\/\*\.test\.js$/i,
-    replacement: VERIFICATION_DEFAULTS.test
-  }
-];
-
 const ACCEPTANCE_CRITERIA_REWRITES = new Map([
   [
     "Frontend tasks missing required responsive matrix are auto-reworked or blocked based on attempt count.",
@@ -248,10 +221,7 @@ function normalizeAcceptanceCriteria(criteria = []) {
 }
 
 function normalizeVerificationCommands(commands = []) {
-  const rewritten = commands.map(command => {
-    const rule = VERIFICATION_CMD_REWRITES.find(candidate => candidate.match.test(command));
-    return rule ? rule.replacement : command;
-  });
+  const rewritten = commands.map(command => rewriteVerificationCommand(command));
 
   const deduped = [];
   for (const command of rewritten) {

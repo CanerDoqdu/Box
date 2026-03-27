@@ -40,6 +40,7 @@ import {
 import { validateAllPlans } from "./plan_contract_validator.js";
 import { section, compilePrompt } from "./prompt_compiler.js";
 import { computeFingerprint } from "./carry_forward_ledger.js";
+import { rewriteVerificationCommand } from "./verification_command_registry.js";
 
 export function detectModelFallback(rawText) {
   const text = String(rawText || "");
@@ -455,7 +456,7 @@ function normalizePlanFromTask(task, index, fallbackWave = 1) {
   const taskText = String(src.task || src.title || src.task_id || src.id || `Task-${index + 1}`).trim();
   const taskKind = String(src.taskKind || src.kind || inferTaskKindFromText(taskText)).trim().toLowerCase();
   const verificationCommands = Array.isArray(src.verification_commands)
-    ? src.verification_commands.map(v => String(v || "").trim()).filter(Boolean)
+    ? src.verification_commands.map(v => String(v || "").trim()).filter(Boolean).map(rewriteVerificationCommand)
     : [];
   const initialVerification = String(src.verification || verificationCommands[0] || "npm test").trim() || "npm test";
   const wave = normalizeWaveValue(src.wave, fallbackWave);
@@ -645,11 +646,12 @@ function buildPlansFromBottlenecksShape(input) {
         return titleWords.some(w => taskWords.includes(w));
       });
 
-      // Find a matching proof metric
-      const verificationMetric = proofMetrics.find(m => {
+      // Find a matching proof metric and normalize it to a portable command
+      const rawMetric = proofMetrics.find(m => {
         const metricWords = String(m || "").toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 4);
         return taskWords.some(w => metricWords.includes(w));
       }) || "npm test";
+      const verificationMetric = rewriteVerificationCommand(rawMetric);
 
       const severity = matchedBn?.severity || "medium";
       const plan: Record<string, any> = {
@@ -676,16 +678,18 @@ function buildPlansFromBottlenecksShape(input) {
     for (let i = 0; i < bottlenecks.length; i++) {
       const bn = bottlenecks[i];
       const taskText = String(bn.title || `Fix-${bn.id}`).trim();
+      const rawCmd = proofMetrics[i] || "npm test";
+      const normalizedCmd = rewriteVerificationCommand(rawCmd);
       plans.push({
         role: "evolution-worker",
         task: taskText,
         priority: SEVERITY_PRIORITY[bn.severity] ?? i + 1,
         wave: i + 1,
-        verification: proofMetrics[i] || "npm test",
+        verification: normalizedCmd,
         title: taskText,
         scope: String(bn.evidence || "").slice(0, 200),
         task_id: String(bn.id || `bn-${i}`),
-        verification_commands: [proofMetrics[i] || "npm test"],
+        verification_commands: [normalizedCmd],
         acceptance_criteria: [],
         dependencies: [],
         _fromBottleneck: bn.id || null,
