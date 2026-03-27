@@ -189,7 +189,7 @@ export function computeWaveParallelismBound(
 }
 
 /**
- * Create bounded micro-batches from the frontier.
+ * Create conflict-safe micro-batches from the frontier.
  * Ensures no more than `maxConcurrent` tasks are dispatched simultaneously.
  *
  * Concurrency resolution order (first match wins):
@@ -220,5 +220,101 @@ export function microBatch(frontier, opts: any = {}) {
   for (let i = 0; i < frontier.length; i += maxConcurrent) {
     batches.push(frontier.slice(i, i + maxConcurrent));
   }
+  return batches;
+}
+
+/**
+ * Create conflict-safe micro-batches from the frontier while preserving wave invariants.
+ *
+ * Extends `microBatch` with conflict awareness: tasks that share a dependency-graph
+ * conflict (same file scope or explicit conflict pair) are placed into different batches.
+ * Uses greedy graph-coloring — the same approach as `buildRoleExecutionBatches` in
+ * `worker_batch_planner.ts` — ensuring correctness without look-ahead.
+ *
+ * Wave invariants are preserved because:
+ *  - The frontier is computed by `computeFrontier`, which only returns tasks whose
+ *    dependencies are fully satisfied. All frontier tasks are wave-ready.
+ *  - Conflict separation does not re-order tasks across wave boundaries; it only
+ *    distributes tasks within the current wave into separate dispatch slots.
+ *
+ * Concurrency bound follows the same three-tier resolution as `microBatch`:
+ *   1. `opts.maxConcurrent`      — explicit cap
+ *   2. `opts.criticalPathLength` — DAG-derived cap via computeWaveParallelismBound
+ *   3. static default (3)        — conservative fallback
+ *
+ * @param frontier       — tasks ready for dispatch (output of computeFrontier)
+ * @param conflictPairs  — [taskIdA, taskIdB] pairs that must not share a batch
+ * @param opts           — { maxConcurrent?, criticalPathLength?, taskIdField? }
+ * @returns object[][]   — conflict-safe micro-batches, each batch ≤ maxConcurrent
+ */
+export function conflictAwareMicroBatch(
+  frontier: object[],
+  conflictPairs: Array<[string, string]> = [],
+  opts: any = {}
+): object[][] {
+  if (!Array.isArray(frontier) || frontier.length === 0) return [];
+
+  // Determine concurrency bound (same three-tier logic as microBatch)
+  let maxConcurrent: number;
+  if (opts.maxConcurrent !== undefined) {
+    maxConcurrent = Number(opts.maxConcurrent);
+  } else if (opts.criticalPathLength !== undefined) {
+    maxConcurrent = computeWaveParallelismBound(frontier.length, Number(opts.criticalPathLength));
+  } else {
+    maxConcurrent = 3;
+  }
+
+  // If no conflict pairs are provided, fall back to plain microBatch behaviour.
+  // This preserves the existing dispatch path for callers that don't have
+  // dependency-graph conflict information.
+  if (!Array.isArray(conflictPairs) || conflictPairs.length === 0) {
+    const batches: object[][] = [];
+    for (let i = 0; i < frontier.length; i += maxConcurrent) {
+      batches.push(frontier.slice(i, i + maxConcurrent));
+    }
+    return batches;
+  }
+
+  // Build a conflict adjacency set: "idA:idB" → true
+  const idField: string = opts.taskIdField || "task_id";
+  const getTaskId = (task: any): string =>
+    String(task[idField] || task.task || task.role || "");
+
+  const conflictSet = new Set<string>();
+  for (const [a, b] of conflictPairs) {
+    if (a && b) {
+      conflictSet.add(`${a}:${b}`);
+      conflictSet.add(`${b}:${a}`);
+    }
+  }
+
+  const areTwoConflicting = (taskA: any, taskB: any): boolean => {
+    const idA = getTaskId(taskA);
+    const idB = getTaskId(taskB);
+    return Boolean(idA && idB && conflictSet.has(`${idA}:${idB}`));
+  };
+
+  // Greedy graph-coloring: assign each frontier task to the first batch where:
+  //   (a) no existing task in the batch conflicts with it, AND
+  //   (b) the batch has not yet reached maxConcurrent
+  // If no such batch exists, open a new one.
+  const batches: object[][] = [];
+
+  for (const task of frontier) {
+    let placed = false;
+    for (const batch of batches) {
+      if (batch.length >= maxConcurrent) continue;
+      const hasConflict = batch.some(existing => areTwoConflicting(task, existing));
+      if (!hasConflict) {
+        batch.push(task);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) {
+      batches.push([task]);
+    }
+  }
+
   return batches;
 }

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { computeNextWaves, computeFrontier, microBatch, computeCriticalPathLength, computeWaveParallelismBound } from "../../src/core/dag_scheduler.js";
+import { computeNextWaves, computeFrontier, microBatch, computeCriticalPathLength, computeWaveParallelismBound, conflictAwareMicroBatch } from "../../src/core/dag_scheduler.js";
 
 describe("dag_scheduler", () => {
   describe("computeNextWaves", () => {
@@ -181,5 +181,126 @@ describe("dag_scheduler — critical path utilities", () => {
   it("computeWaveParallelismBound returns min for invalid inputs", () => {
     assert.equal(computeWaveParallelismBound(0, 3), 1);
     assert.equal(computeWaveParallelismBound(5, 0), 1);
+  });
+});
+
+// ── conflictAwareMicroBatch ───────────────────────────────────────────────────
+
+describe("dag_scheduler — conflictAwareMicroBatch", () => {
+  it("returns empty array for empty frontier", () => {
+    const result = conflictAwareMicroBatch([], []);
+    assert.deepEqual(result, []);
+  });
+
+  it("behaves like microBatch when no conflict pairs are provided", () => {
+    const tasks = Array.from({ length: 6 }, (_, i) => ({ task: `T${i}` }));
+    const plain = microBatch(tasks, { maxConcurrent: 2 });
+    const aware = conflictAwareMicroBatch(tasks, [], { maxConcurrent: 2 });
+    assert.equal(aware.length, plain.length);
+    for (let i = 0; i < plain.length; i++) {
+      assert.equal(aware[i].length, plain[i].length);
+    }
+  });
+
+  it("places two conflicting tasks into different batches", () => {
+    const taskA = { task: "task-a" };
+    const taskB = { task: "task-b" };
+    const taskC = { task: "task-c" };
+    const batches = conflictAwareMicroBatch(
+      [taskA, taskB, taskC],
+      [["task-a", "task-b"]],
+      { maxConcurrent: 3 }
+    );
+    // taskA and taskB conflict — they must not share a batch
+    const coexist = batches.some(b => b.includes(taskA) && b.includes(taskB));
+    assert.equal(coexist, false, "conflicting tasks must not appear in the same batch");
+  });
+
+  it("non-conflicting task is packed into the same batch as a conflicting task", () => {
+    const taskA = { task: "task-a" };
+    const taskB = { task: "task-b" };
+    const taskC = { task: "task-c" };
+    const batches = conflictAwareMicroBatch(
+      [taskA, taskB, taskC],
+      [["task-a", "task-b"]],
+      { maxConcurrent: 3 }
+    );
+    // taskC conflicts with neither — it should be packed alongside taskA or taskB
+    const cWithA = batches.some(b => b.includes(taskA) && b.includes(taskC));
+    const cWithB = batches.some(b => b.includes(taskB) && b.includes(taskC));
+    assert.ok(cWithA || cWithB, "non-conflicting task must be co-batched with one of the conflicting tasks");
+  });
+
+  it("respects maxConcurrent even when there are no conflicts", () => {
+    const tasks = Array.from({ length: 5 }, (_, i) => ({ task: `T${i}` }));
+    const batches = conflictAwareMicroBatch(tasks, [], { maxConcurrent: 2 });
+    for (const batch of batches) {
+      assert.ok(batch.length <= 2, `batch size must not exceed maxConcurrent=2; got ${batch.length}`);
+    }
+    assert.equal(batches.length, 3); // ceil(5/2) = 3
+  });
+
+  it("all tasks appear in exactly one batch (no loss, no duplication)", () => {
+    const tasks = Array.from({ length: 7 }, (_, i) => ({ task: `T${i}` }));
+    const conflicts: Array<[string, string]> = [["T0", "T1"], ["T2", "T3"], ["T0", "T4"]];
+    const batches = conflictAwareMicroBatch(tasks, conflicts, { maxConcurrent: 4 });
+    const all = batches.flat();
+    assert.equal(all.length, tasks.length, "total task count across all batches must equal frontier length");
+    for (const task of tasks) {
+      const count = all.filter(t => t === task).length;
+      assert.equal(count, 1, `each task must appear in exactly one batch; ${(task as any).task} appeared ${count} times`);
+    }
+  });
+
+  it("uses criticalPathLength to derive maxConcurrent when explicit value is absent", () => {
+    // 6 tasks, critical path 3 → bound = ceil(6/3) = 2
+    const tasks = Array.from({ length: 6 }, (_, i) => ({ task: `T${i}` }));
+    const batches = conflictAwareMicroBatch(tasks, [], { criticalPathLength: 3 });
+    assert.equal(batches[0].length, 2, "first batch must contain 2 tasks when criticalPathLength=3 and 6 tasks");
+  });
+
+  it("explicit maxConcurrent takes precedence over criticalPathLength", () => {
+    const tasks = Array.from({ length: 6 }, (_, i) => ({ task: `T${i}` }));
+    // criticalPathLength gives bound=2, but maxConcurrent=4 wins
+    const batches = conflictAwareMicroBatch(tasks, [], { maxConcurrent: 4, criticalPathLength: 3 });
+    assert.equal(batches[0].length, 4);
+  });
+
+  it("negative: fully conflicting chain forces one task per batch", () => {
+    // Every pair conflicts — each task must be in its own batch
+    const tasks = [{ task: "X" }, { task: "Y" }, { task: "Z" }];
+    const conflicts: Array<[string, string]> = [["X", "Y"], ["Y", "Z"], ["X", "Z"]];
+    const batches = conflictAwareMicroBatch(tasks, conflicts, { maxConcurrent: 10 });
+    assert.equal(batches.length, 3, "fully-conflicting tasks must each be in a separate batch");
+    for (const batch of batches) {
+      assert.equal(batch.length, 1, "each batch must contain exactly one task in the fully-conflicting case");
+    }
+  });
+
+  it("wave invariant: frontier tasks are all wave-ready; conflict separation does not reorder them", () => {
+    // Simulate a frontier of wave-2 tasks (dependencies satisfied)
+    const w2a = { task: "w2-a", wave: 2 };
+    const w2b = { task: "w2-b", wave: 2 };
+    const w2c = { task: "w2-c", wave: 2 };
+    const batches = conflictAwareMicroBatch(
+      [w2a, w2b, w2c],
+      [["w2-a", "w2-b"]],
+      { maxConcurrent: 3 }
+    );
+    // All tasks must appear; no task from a different wave should be injected
+    const all = batches.flat() as typeof w2a[];
+    assert.equal(all.length, 3);
+    for (const task of all) {
+      assert.equal(task.wave, 2, "all batched tasks must remain in wave 2");
+    }
+    // w2a and w2b must still be in separate batches
+    const conflictCoexist = batches.some(b => b.includes(w2a) && b.includes(w2b));
+    assert.equal(conflictCoexist, false, "conflicting wave-2 tasks must not share a batch");
+  });
+
+  it("uses default maxConcurrent of 3 when no opts provided", () => {
+    const tasks = Array.from({ length: 7 }, (_, i) => ({ task: `T${i}` }));
+    const batches = conflictAwareMicroBatch(tasks);
+    assert.equal(batches[0].length, 3, "default maxConcurrent must be 3 when no opts given");
   });
 });
