@@ -1524,6 +1524,7 @@ async function runSingleCycle(config) {
 
   const dispatchCheckpoint = await beginDispatchCheckpoint(config, workerBatches);
   let workersDone = 0;
+  const allWorkerResults: Array<{ roleName: string; status: string }> = [];
 
   for (const batch of workerBatches) {
     const stopReq = await readStopRequest(config);
@@ -1573,6 +1574,7 @@ async function runSingleCycle(config) {
     }
 
     workersDone += 1;
+    allWorkerResults.push({ roleName: batch.role, status: String(workerResult?.status || "unknown") });
     await appendProgress(config, `[WORKER_BATCH] BATCH ${workersDone}/${workerBatches.length} DONE role=${batch.role} status=${workerResult?.status || "unknown"}`);
     await updateDispatchCheckpointProgress(config, dispatchCheckpoint, workersDone);
     await waitForWorkersToFinish(config);
@@ -1657,7 +1659,7 @@ async function runSingleCycle(config) {
     const analyticsRecord = computeCycleAnalytics(config, {
       sloRecord,
       pipelineProgress: progressForAnalytics,
-      workerResults: null,   // worker result details not aggregated at this call site
+      workerResults: allWorkerResults.length > 0 ? allWorkerResults : null,
       planCount: Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans.length : null,
       phase: CYCLE_PHASE.COMPLETED,
       parserBaselineRecovery: baselineRecoveryRecord ?? null,

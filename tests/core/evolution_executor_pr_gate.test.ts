@@ -8,6 +8,7 @@ import {
   shouldHaltOnPreReviewReject,
   shouldRetryAthenaPreReview,
   checkScopeConformance,
+  buildVerificationTargets,
 } from "../../src/core/evolution_executor.js";
 
 describe("assessStatusCheckRollup", () => {
@@ -246,5 +247,85 @@ describe("checkScopeConformance", () => {
     for (const f of result.unrelatedFiles) {
       assert.ok(result.recoveryInstruction.includes(f), `recoveryInstruction must mention ${f}`);
     }
+  });
+});
+
+// ── buildVerificationTargets — explicit verification evidence ─────────────────
+
+describe("buildVerificationTargets", () => {
+  it("maps each requested command to a target with cmd, passed, blocked fields", () => {
+    const targets = buildVerificationTargets(
+      ["npm test", "npm run lint"],
+      [{ cmd: "npm test", passed: true }, { cmd: "npm run lint", passed: true }],
+      []
+    );
+    assert.equal(targets.length, 2);
+    for (const t of targets) {
+      assert.ok("cmd" in t);
+      assert.ok("passed" in t);
+      assert.ok("blocked" in t);
+    }
+  });
+
+  it("marks non-blocked commands as executed with their actual pass/fail result", () => {
+    const targets = buildVerificationTargets(
+      ["npm test", "npm run lint"],
+      [{ cmd: "npm test", passed: true }, { cmd: "npm run lint", passed: false }],
+      []
+    );
+    const testTarget = targets.find(t => t.cmd === "npm test")!;
+    const lintTarget = targets.find(t => t.cmd === "npm run lint")!;
+    assert.equal(testTarget.blocked, false);
+    assert.equal(testTarget.passed, true);
+    assert.equal(lintTarget.blocked, false);
+    assert.equal(lintTarget.passed, false);
+  });
+
+  it("marks blocked commands with blocked=true and passed=false", () => {
+    const targets = buildVerificationTargets(
+      ["npm start", "npm test"],
+      [{ cmd: "npm test", passed: true }],
+      ["npm start"]
+    );
+    const startTarget = targets.find(t => t.cmd === "npm start")!;
+    const testTarget  = targets.find(t => t.cmd === "npm test")!;
+    assert.equal(startTarget.blocked, true);
+    assert.equal(startTarget.passed, false);
+    assert.equal(testTarget.blocked, false);
+    assert.equal(testTarget.passed, true);
+  });
+
+  it("appends fallback command when all task-named commands were blocked (negative path)", () => {
+    const targets = buildVerificationTargets(
+      ["npm start"],
+      [{ cmd: "npm test", passed: true }],
+      ["npm start"],
+      "npm test"
+    );
+    // Original blocked command
+    const startTarget = targets.find(t => t.cmd === "npm start")!;
+    assert.equal(startTarget.blocked, true);
+    // Fallback command appended
+    const fallbackTarget = targets.find(t => t.cmd === "npm test")!;
+    assert.ok(fallbackTarget, "fallback command must appear in targets when all task commands blocked");
+    assert.equal(fallbackTarget.blocked, false);
+    assert.equal(fallbackTarget.passed, true);
+  });
+
+  it("does not append fallback when not all commands were blocked", () => {
+    const targets = buildVerificationTargets(
+      ["npm test", "npm start"],
+      [{ cmd: "npm test", passed: true }],
+      ["npm start"],
+      "npm test"
+    );
+    // npm test appears only once (as a requested command, not as a duplicate fallback)
+    const testOccurrences = targets.filter(t => t.cmd === "npm test");
+    assert.equal(testOccurrences.length, 1, "fallback must not duplicate an already-present target");
+  });
+
+  it("returns empty array for empty requested commands list", () => {
+    const targets = buildVerificationTargets([], [], []);
+    assert.deepEqual(targets, []);
   });
 });
