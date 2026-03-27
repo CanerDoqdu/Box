@@ -1,5 +1,8 @@
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
 import {
   addDebtEntries,
   tickCycle,
@@ -7,6 +10,8 @@ import {
   getOpenDebts,
   shouldBlockOnDebt,
   computeFingerprint,
+  loadLedgerMeta,
+  saveLedgerFull,
 } from "../../src/core/carry_forward_ledger.js";
 
 describe("carry_forward_ledger", () => {
@@ -226,5 +231,66 @@ describe("carry_forward_ledger", () => {
       assert.equal(computeFingerprint(""), null);
       assert.equal(computeFingerprint("  "), null);
     });
+  });
+});
+
+// ── loadLedgerMeta / saveLedgerFull — persistence layer ──────────────────────
+
+describe("loadLedgerMeta / saveLedgerFull", () => {
+  let tmpDir: string;
+
+  before(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-cfl-meta-"));
+  });
+
+  after(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  function cfg() {
+    return { paths: { stateDir: tmpDir } };
+  }
+
+  it("defaults cycleCounter to 1 when ledger file does not exist", async () => {
+    const { entries, cycleCounter } = await loadLedgerMeta(cfg());
+    assert.deepEqual(entries, []);
+    assert.equal(cycleCounter, 1);
+  });
+
+  it("saveLedgerFull persists entries and cycleCounter; loadLedgerMeta reads them back", async () => {
+    const entry = {
+      id: "debt-1-0",
+      lesson: "Fix the validation harness",
+      fingerprint: computeFingerprint("Fix the validation harness"),
+      owner: "evolution-worker",
+      openedCycle: 1,
+      dueCycle: 4,
+      severity: "critical",
+      closedAt: null,
+      closureEvidence: null,
+      cyclesOpen: 0,
+    };
+    await saveLedgerFull(cfg(), [entry], 7);
+
+    const { entries, cycleCounter } = await loadLedgerMeta(cfg());
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].id, "debt-1-0");
+    assert.equal(cycleCounter, 7);
+  });
+
+  it("loadLedgerMeta falls back to cycleCounter=1 when field is missing from file", async () => {
+    const filePath = path.join(tmpDir, "carry_forward_ledger.json");
+    await fs.writeFile(filePath, JSON.stringify({ entries: [] }), "utf8");
+
+    const { cycleCounter } = await loadLedgerMeta(cfg());
+    assert.equal(cycleCounter, 1);
+  });
+
+  it("loadLedgerMeta falls back to cycleCounter=1 when field is zero or negative", async () => {
+    const filePath = path.join(tmpDir, "carry_forward_ledger.json");
+    await fs.writeFile(filePath, JSON.stringify({ entries: [], cycleCounter: 0 }), "utf8");
+
+    const { cycleCounter } = await loadLedgerMeta(cfg());
+    assert.equal(cycleCounter, 1);
   });
 });

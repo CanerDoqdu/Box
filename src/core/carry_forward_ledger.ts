@@ -74,6 +74,25 @@ export async function loadLedger(config) {
 }
 
 /**
+ * Load the carry-forward ledger and its cycle counter from state.
+ * The cycleCounter is a persistent integer that is incremented once per
+ * orchestration cycle so that debt SLA deadlines stay anchored to a
+ * monotonic sequence that is independent of wall-clock timestamps.
+ *
+ * @param {object} config
+ * @returns {Promise<{ entries: DebtEntry[], cycleCounter: number }>}
+ */
+export async function loadLedgerMeta(config): Promise<{ entries: any[], cycleCounter: number }> {
+  const stateDir = config?.paths?.stateDir || "state";
+  const data = await readJson(path.join(stateDir, LEDGER_FILE), { entries: [], cycleCounter: 1 });
+  const entries = Array.isArray(data.entries) ? data.entries : [];
+  const cycleCounter = typeof data.cycleCounter === "number" && data.cycleCounter > 0
+    ? data.cycleCounter
+    : 1;
+  return { entries, cycleCounter };
+}
+
+/**
  * Save the ledger to state.
  *
  * @param {object} config
@@ -83,6 +102,23 @@ export async function saveLedger(config, entries) {
   const stateDir = config?.paths?.stateDir || "state";
   await writeJson(path.join(stateDir, LEDGER_FILE), {
     entries,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+/**
+ * Save the ledger with an explicit cycle counter.
+ * Use this when advancing the cycle (end-of-cycle accumulation path).
+ *
+ * @param {object} config
+ * @param {DebtEntry[]} entries
+ * @param {number} cycleCounter
+ */
+export async function saveLedgerFull(config, entries, cycleCounter: number) {
+  const stateDir = config?.paths?.stateDir || "state";
+  await writeJson(path.join(stateDir, LEDGER_FILE), {
+    entries,
+    cycleCounter,
     updatedAt: new Date().toISOString(),
   });
 }

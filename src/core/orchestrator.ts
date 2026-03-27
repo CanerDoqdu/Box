@@ -64,6 +64,12 @@ import { agentFileExists, nameToSlug } from "./agent_loader.js";
 import { getRoleRegistry } from "./role_registry.js";
 import { checkArchitectureDrift } from "./architecture_drift.js";
 import { detectLaneConflicts } from "./capability_pool.js";
+import {
+  loadLedgerMeta,
+  addDebtEntries,
+  saveLedgerFull,
+  shouldBlockOnDebt,
+} from "./carry_forward_ledger.js";
 
 /**
  * Orchestrator health status enum.
@@ -312,6 +318,28 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
       rollbackResult,
       cycleId
     };
+  }
+
+  // ── Carry-forward debt gate ───────────────────────────────────────────────
+  // Block dispatch when the count of critical overdue debt entries meets or
+  // exceeds the configured limit (default: 3).  Fail-open on any ledger read
+  // error so a corrupt/missing ledger never prevents legitimate work.
+  try {
+    const { entries: debtLedger, cycleCounter } = await loadLedgerMeta(config);
+    const debtGate = shouldBlockOnDebt(debtLedger, cycleCounter, {
+      maxCriticalOverdue: config?.carryForward?.maxCriticalOverdue,
+    });
+    if (debtGate.shouldBlock) {
+      return {
+        blocked: true,
+        reason: `critical_debt_overdue:${debtGate.reason}`,
+        action: undefined,
+        graphResult,
+        cycleId,
+      };
+    }
+  } catch (err) {
+    warn(`[orchestrator] carry-forward debt gate failed (non-fatal): ${String(err?.message || err)}`);
   }
 
   return {
@@ -1794,6 +1822,41 @@ async function runSingleCycle(config) {
     }
   } catch (err) {
     warn(`[orchestrator] Learning policy compilation failed (non-fatal): ${String(err?.message || err)}`);
+  }
+
+  // ── Carry-forward debt accumulation: register postmortem follow-ups as debt ──
+  // Scans the latest postmortems for follow-up tasks and upserts them into the
+  // carry-forward ledger.  Also advances the cycle counter so that SLA deadlines
+  // stay anchored to a monotonic sequence across cycles.
+  try {
+    const postmortemsRaw3 = await readJson(path.join(stateDir, "athena_postmortems.json"), null);
+    const pmEntries3 = Array.isArray(postmortemsRaw3?.entries) ? postmortemsRaw3.entries : [];
+    const followUpItems = pmEntries3
+      .filter(e => e.followUpNeeded && e.followUpTask)
+      .map(e => ({
+        followUpTask: String(e.followUpTask),
+        workerName: e.workerName || undefined,
+        severity: e.severity || "warning",
+      }));
+
+    const { entries: debtLedger, cycleCounter } = await loadLedgerMeta(config);
+    const slaOpts = config?.carryForward?.slaMaxCycles
+      ? { slaMaxCycles: config.carryForward.slaMaxCycles }
+      : undefined;
+    const updatedLedger = followUpItems.length > 0
+      ? addDebtEntries(debtLedger, followUpItems, cycleCounter, slaOpts)
+      : debtLedger;
+    const newCycleCounter = cycleCounter + 1;
+    await saveLedgerFull(config, updatedLedger, newCycleCounter);
+
+    if (followUpItems.length > 0) {
+      const added = updatedLedger.length - debtLedger.length;
+      await appendProgress(config,
+        `[CARRY_FORWARD] ${added} new debt item(s) registered — cycle=${cycleCounter} total_open=${updatedLedger.filter(e => !e.closedAt).length}`
+      );
+    }
+  } catch (err) {
+    warn(`[orchestrator] Carry-forward debt accumulation failed (non-fatal): ${String(err?.message || err)}`);
   }
 
   // ── Capacity scoreboard: persist KPIs for trend analysis ──────────────────

@@ -840,3 +840,154 @@ describe("leadership chain stage ordering and gate evaluation", () => {
       "graphResult must be present even when cycle blocks dispatch");
   });
 });
+
+// ── Carry-forward debt gate — evaluatePreDispatchGovernanceGate integration ───
+
+describe("carry-forward debt gate — pre-dispatch governance gate integration", () => {
+  let tmpDir;
+  let config;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-debt-gate-"));
+    config = {
+      paths: { stateDir: tmpDir },
+      env: { copilotCliCommand: "__missing__", targetRepo: "CanerDoqdu/Box" },
+      systemGuardian: { enabled: false },
+      canary:          { enabled: false },
+    };
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("allows dispatch when no carry-forward ledger exists (missing file is safe fallback)", async () => {
+    const result = await evaluatePreDispatchGovernanceGate(config, [], "debt-gate-no-ledger");
+
+    assert.equal(result.blocked, false,
+      "missing ledger must not block dispatch — safe fallback to empty ledger");
+    assert.equal(result.reason, null);
+  });
+
+  it("allows dispatch when ledger has critical entries that are not yet overdue", async () => {
+    // Entry opened at cycle 1, due at cycle 4 — checked at cycle 2 (not overdue)
+    const ledger = {
+      entries: [
+        { id: "d1", lesson: "Fix CI pipeline", openedCycle: 1, dueCycle: 4, severity: "critical", closedAt: null, cyclesOpen: 0 },
+      ],
+      cycleCounter: 2,
+      updatedAt: new Date().toISOString(),
+    };
+    await fs.writeFile(
+      path.join(tmpDir, "carry_forward_ledger.json"),
+      JSON.stringify(ledger, null, 2),
+      "utf8"
+    );
+
+    const result = await evaluatePreDispatchGovernanceGate(config, [], "debt-gate-not-overdue");
+
+    assert.equal(result.blocked, false,
+      "critical debt that is not yet overdue must not block dispatch");
+  });
+
+  it("blocks dispatch when critical overdue debt meets the default threshold of 3", async () => {
+    // Three critical entries opened at cycle 1, due at cycle 4, checked at cycle 5 (overdue)
+    const ledger = {
+      entries: [
+        { id: "d1", lesson: "Fix auth bypass vulnerability", openedCycle: 1, dueCycle: 4, severity: "critical", closedAt: null, cyclesOpen: 0 },
+        { id: "d2", lesson: "Fix data integrity on concurrent writes", openedCycle: 1, dueCycle: 4, severity: "critical", closedAt: null, cyclesOpen: 0 },
+        { id: "d3", lesson: "Fix memory leak in worker runner pool", openedCycle: 1, dueCycle: 4, severity: "critical", closedAt: null, cyclesOpen: 0 },
+      ],
+      cycleCounter: 5,
+      updatedAt: new Date().toISOString(),
+    };
+    await fs.writeFile(
+      path.join(tmpDir, "carry_forward_ledger.json"),
+      JSON.stringify(ledger, null, 2),
+      "utf8"
+    );
+
+    const result = await evaluatePreDispatchGovernanceGate(config, [], "debt-gate-blocks");
+
+    assert.equal(result.blocked, true,
+      "3 critical overdue debt items must trigger dispatch block");
+    assert.ok(
+      result.reason?.startsWith("critical_debt_overdue:"),
+      `reason must reflect debt gate; got: ${result.reason}`
+    );
+    assert.equal(result.action, undefined,
+      "debt block must not trigger rollback action");
+  });
+
+  it("does not block when overdue entries are all 'warning' severity (not critical)", async () => {
+    const ledger = {
+      entries: [
+        { id: "d1", lesson: "Improve test coverage", openedCycle: 1, dueCycle: 2, severity: "warning", closedAt: null, cyclesOpen: 0 },
+        { id: "d2", lesson: "Update stale documentation", openedCycle: 1, dueCycle: 2, severity: "warning", closedAt: null, cyclesOpen: 0 },
+        { id: "d3", lesson: "Refactor helper utilities", openedCycle: 1, dueCycle: 2, severity: "warning", closedAt: null, cyclesOpen: 0 },
+      ],
+      cycleCounter: 10,
+      updatedAt: new Date().toISOString(),
+    };
+    await fs.writeFile(
+      path.join(tmpDir, "carry_forward_ledger.json"),
+      JSON.stringify(ledger, null, 2),
+      "utf8"
+    );
+
+    const result = await evaluatePreDispatchGovernanceGate(config, [], "debt-gate-warning-only");
+
+    assert.equal(result.blocked, false,
+      "warning-severity overdue entries must not block dispatch (only critical counts)");
+  });
+
+  it("respects a custom maxCriticalOverdue threshold from config", async () => {
+    // Two critical overdue items — default threshold is 3, custom is 2
+    const ledger = {
+      entries: [
+        { id: "d1", lesson: "Critical debt item A — must be resolved", openedCycle: 1, dueCycle: 3, severity: "critical", closedAt: null, cyclesOpen: 0 },
+        { id: "d2", lesson: "Critical debt item B — must be resolved", openedCycle: 1, dueCycle: 3, severity: "critical", closedAt: null, cyclesOpen: 0 },
+      ],
+      cycleCounter: 10,
+      updatedAt: new Date().toISOString(),
+    };
+    await fs.writeFile(
+      path.join(tmpDir, "carry_forward_ledger.json"),
+      JSON.stringify(ledger, null, 2),
+      "utf8"
+    );
+
+    const customConfig = { ...config, carryForward: { maxCriticalOverdue: 2 } };
+    const result = await evaluatePreDispatchGovernanceGate(customConfig, [], "debt-gate-custom-threshold");
+
+    assert.equal(result.blocked, true,
+      "2 critical overdue items must block when maxCriticalOverdue is set to 2");
+    assert.ok(
+      result.reason?.startsWith("critical_debt_overdue:"),
+      `reason must reflect debt gate; got: ${result.reason}`
+    );
+  });
+
+  it("negative path: closed critical entries are excluded from overdue count", async () => {
+    // Three critical entries, but all are closed — should not block
+    const ledger = {
+      entries: [
+        { id: "d1", lesson: "Fix auth bypass", openedCycle: 1, dueCycle: 4, severity: "critical", closedAt: "2025-01-01T00:00:00Z", closureEvidence: "PR #1", cyclesOpen: 0 },
+        { id: "d2", lesson: "Fix data integrity", openedCycle: 1, dueCycle: 4, severity: "critical", closedAt: "2025-01-01T00:00:00Z", closureEvidence: "PR #2", cyclesOpen: 0 },
+        { id: "d3", lesson: "Fix memory leak", openedCycle: 1, dueCycle: 4, severity: "critical", closedAt: "2025-01-01T00:00:00Z", closureEvidence: "PR #3", cyclesOpen: 0 },
+      ],
+      cycleCounter: 5,
+      updatedAt: new Date().toISOString(),
+    };
+    await fs.writeFile(
+      path.join(tmpDir, "carry_forward_ledger.json"),
+      JSON.stringify(ledger, null, 2),
+      "utf8"
+    );
+
+    const result = await evaluatePreDispatchGovernanceGate(config, [], "debt-gate-all-closed");
+
+    assert.equal(result.blocked, false,
+      "closed critical entries must not count toward the overdue threshold");
+  });
+});
