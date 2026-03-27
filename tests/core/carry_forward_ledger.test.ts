@@ -12,6 +12,7 @@ import {
   computeFingerprint,
   loadLedgerMeta,
   saveLedgerFull,
+  autoCloseVerifiedDebt,
 } from "../../src/core/carry_forward_ledger.js";
 
 describe("carry_forward_ledger", () => {
@@ -292,5 +293,122 @@ describe("loadLedgerMeta / saveLedgerFull", () => {
 
     const { cycleCounter } = await loadLedgerMeta(cfg());
     assert.equal(cycleCounter, 1);
+  });
+});
+
+// ── autoCloseVerifiedDebt ─────────────────────────────────────────────────────
+
+describe("autoCloseVerifiedDebt", () => {
+  function makeEntry(lesson: string, id = "debt-1-0"): any {
+    return {
+      id,
+      lesson,
+      fingerprint: computeFingerprint(lesson),
+      owner: "evolution-worker",
+      openedCycle: 1,
+      dueCycle: 4,
+      severity: "critical",
+      closedAt: null,
+      closureEvidence: null,
+      cyclesOpen: 0,
+    };
+  }
+
+  it("closes a matching open entry when evidence is provided", () => {
+    const lesson = "Fix flaky worker runner test suite reliability issue";
+    const ledger = [makeEntry(lesson)];
+    const count = autoCloseVerifiedDebt(ledger, [
+      { taskText: lesson, verificationEvidence: "All tests pass — PR #99 merged" },
+    ]);
+    assert.equal(count, 1, "One entry must be closed");
+    assert.ok(ledger[0].closedAt, "closedAt must be set");
+    assert.equal(ledger[0].closureEvidence, "All tests pass — PR #99 merged");
+  });
+
+  it("does NOT close an entry when evidence is missing or too short", () => {
+    const lesson = "Fix broken governance canary breach detection path";
+    const ledger = [makeEntry(lesson)];
+
+    // No evidence
+    let count = autoCloseVerifiedDebt(ledger, [{ taskText: lesson, verificationEvidence: "" }]);
+    assert.equal(count, 0, "Must not close with empty evidence");
+
+    // Evidence too short (< 5 chars)
+    count = autoCloseVerifiedDebt(ledger, [{ taskText: lesson, verificationEvidence: "ok" }]);
+    assert.equal(count, 0, "Must not close with trivially short evidence");
+
+    assert.equal(ledger[0].closedAt, null, "Entry must remain open");
+  });
+
+  it("does NOT close an entry when task text does not fingerprint-match the lesson", () => {
+    const ledger = [makeEntry("Fix the orchestrator dispatch retry logic")];
+    const count = autoCloseVerifiedDebt(ledger, [
+      { taskText: "Completely unrelated task about documentation", verificationEvidence: "Done — PR #77 merged" },
+    ]);
+    assert.equal(count, 0, "Non-matching task must not close any entry");
+    assert.equal(ledger[0].closedAt, null);
+  });
+
+  it("does NOT re-close an already-closed entry", () => {
+    const lesson = "Fix the carry-forward SLA accounting cycle counter bug";
+    const ledger = [makeEntry(lesson)];
+    // Close first time
+    autoCloseVerifiedDebt(ledger, [{ taskText: lesson, verificationEvidence: "PR #1 merged" }]);
+    assert.ok(ledger[0].closedAt);
+    // Try again with different evidence
+    const count2 = autoCloseVerifiedDebt(ledger, [
+      { taskText: lesson, verificationEvidence: "PR #2 merged (second attempt)" },
+    ]);
+    assert.equal(count2, 0, "Already-closed entry must not be re-closed");
+  });
+
+  it("closes only matching entries in a mixed ledger", () => {
+    const resolvedLesson = "Fix the worker batch planner wave ordering contract";
+    const unresolvedLesson = "Resolve the governance freeze gate risk-level evaluation gap";
+    const ledger = [
+      makeEntry(resolvedLesson, "debt-1-0"),
+      makeEntry(unresolvedLesson, "debt-1-1"),
+    ];
+
+    const count = autoCloseVerifiedDebt(ledger, [
+      { taskText: resolvedLesson, verificationEvidence: "Tests pass, PR merged" },
+    ]);
+
+    assert.equal(count, 1, "Exactly one entry must be closed");
+    assert.ok(ledger[0].closedAt, "First entry must be closed");
+    assert.equal(ledger[1].closedAt, null, "Second entry must remain open");
+  });
+
+  it("returns 0 for empty resolvedItems", () => {
+    const ledger = [makeEntry("Fix something critical in the pipeline")];
+    assert.equal(autoCloseVerifiedDebt(ledger, []), 0);
+    assert.equal(ledger[0].closedAt, null);
+  });
+
+  it("returns 0 for empty ledger", () => {
+    const count = autoCloseVerifiedDebt([], [
+      { taskText: "Fix something", verificationEvidence: "Done — tests pass" },
+    ]);
+    assert.equal(count, 0);
+  });
+
+  it("negative path: unresolved critical debt item remains blocking after partial close", () => {
+    const resolvedLesson = "Fix the worker runner retry loop transient error handling";
+    const blockingLesson = "Fix governance canary breach detection false negative path";
+    const ledger = [
+      makeEntry(resolvedLesson, "debt-r"),
+      { ...makeEntry(blockingLesson, "debt-b"), severity: "critical" },
+      { ...makeEntry("Another critical issue", "debt-c"), severity: "critical", fingerprint: computeFingerprint("Another critical issue") },
+    ];
+
+    autoCloseVerifiedDebt(ledger, [
+      { taskText: resolvedLesson, verificationEvidence: "PR #100 merged — tests pass" },
+    ]);
+
+    // Resolved entry is now closed; the critical ones are still open
+    const shouldBlock = ledger
+      .filter(e => !e.closedAt && e.severity === "critical")
+      .length >= 2;
+    assert.equal(shouldBlock, true, "Unresolved critical debt must still block after partial close");
   });
 });

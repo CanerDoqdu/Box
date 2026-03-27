@@ -216,6 +216,57 @@ export function getOpenDebts(ledger) {
 }
 
 /**
+ * Auto-close open debt entries that have been verified as resolved.
+ *
+ * A debt entry is considered resolved when a completed worker task has a
+ * canonical fingerprint that matches the entry's fingerprint AND the worker
+ * supplied non-trivial verification evidence (>= 5 characters).
+ *
+ * Entries without a matching resolved item remain open and continue to block
+ * future cycles via shouldBlockOnDebt. This is intentional: we never close
+ * debt speculatively — evidence is required.
+ *
+ * @param {DebtEntry[]} ledger — carry-forward ledger (mutated in place)
+ * @param {Array<{ taskText: string, verificationEvidence: string }>} resolvedItems
+ * @returns {number} — count of newly closed entries
+ */
+export function autoCloseVerifiedDebt(
+  ledger: any[],
+  resolvedItems: Array<{ taskText: string; verificationEvidence: string }>
+): number {
+  if (!Array.isArray(resolvedItems) || resolvedItems.length === 0) return 0;
+
+  // Build fingerprint → evidence map for all resolved items with real evidence.
+  const resolvedFingerprints = new Map<string, string>();
+  for (const item of resolvedItems) {
+    const evidence = String(item.verificationEvidence || "").trim();
+    if (evidence.length < 5) continue;
+    const fingerprint = computeFingerprint(String(item.taskText || ""));
+    if (!fingerprint) continue;
+    if (!resolvedFingerprints.has(fingerprint)) {
+      resolvedFingerprints.set(fingerprint, evidence);
+    }
+  }
+
+  if (resolvedFingerprints.size === 0) return 0;
+
+  let closedCount = 0;
+  for (const entry of ledger) {
+    if (entry.closedAt) continue;
+    const entryFp = entry.fingerprint || computeFingerprint(String(entry.lesson || ""));
+    if (!entryFp) continue;
+    const evidence = resolvedFingerprints.get(entryFp);
+    if (evidence !== undefined) {
+      entry.closedAt = new Date().toISOString();
+      entry.closureEvidence = evidence.slice(0, 500);
+      closedCount++;
+    }
+  }
+
+  return closedCount;
+}
+
+/**
  * Check if critical overdue debt should block plan acceptance.
  *
  * @param {DebtEntry[]} ledger

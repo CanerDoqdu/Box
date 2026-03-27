@@ -8,6 +8,10 @@
  *      the correct workers by the capability pool.
  *   3. Carry-forward debt blocking sequence — when critical debt exceeds the SLA
  *      threshold, shouldBlockOnDebt returns true and downstream planning is gated.
+ *   4. Optimizer budget admission — plans rejected by the intervention optimizer
+ *      are filtered from the dispatch set; unaffected plans proceed normally.
+ *   5. Carry-forward auto-close — only debt items backed by verification evidence
+ *      are closed; unresolved items remain blocking.
  *
  * These tests exercise modules working together, not in isolation.
  */
@@ -26,7 +30,15 @@ import {
   shouldBlockOnDebt,
   closeDebt,
   tickCycle,
+  autoCloseVerifiedDebt,
+  computeFingerprint,
 } from "../../src/core/carry_forward_ledger.js";
+import {
+  buildInterventionsFromPlan,
+  buildBudgetFromConfig,
+  runInterventionOptimizer,
+  OPTIMIZER_STATUS,
+} from "../../src/core/intervention_optimizer.js";
 
 // ── 1. Dependency Wave Order ───────────────────────────────────────────────────
 
@@ -410,5 +422,161 @@ describe("Integration: full orchestration gate sequence", () => {
       assert.ok(a.selection.role, "Each assignment must have a worker role");
       assert.ok(a.selection.lane, "Each assignment must have a capability lane");
     }
+  });
+});
+
+// ── 5. Optimizer Budget Admission ─────────────────────────────────────────────
+
+describe("Integration: optimizer budget admission filtering", () => {
+  it("all plans are admitted when total budget is sufficient", () => {
+    const plans = [
+      { id: "p1", role: "evolution-worker", task: "Fix auth token validation bug", priority: 9, wave: "wave-1" },
+      { id: "p2", role: "evolution-worker", task: "Add governance canary test coverage", priority: 7, wave: "wave-1" },
+      { id: "p3", role: "evolution-worker", task: "Update carry-forward SLA defaults", priority: 5, wave: "wave-2" },
+    ];
+    const config = { runtime: { runtimeBudget: { maxWorkerSpawnsPerCycle: 10 } } };
+    const requestBudget = { hardCapTotal: 10 };
+
+    const interventions = buildInterventionsFromPlan(plans, config);
+    const budget = buildBudgetFromConfig(requestBudget, config);
+    const result = runInterventionOptimizer(interventions, budget);
+
+    assert.equal(result.status, OPTIMIZER_STATUS.OK, "All plans must be admitted with sufficient budget");
+    assert.equal(result.selected.length, 3, "All 3 plans must be in selected");
+
+    // Simulate admission filter (mirrors orchestrator logic)
+    const admittedIds = new Set(result.selected.map((i: any) => i.id));
+    const admittedPlans = plans.filter((plan: any, idx: number) => {
+      const id = String(plan?.id ?? `plan-${idx + 1}`);
+      return admittedIds.has(id);
+    });
+    assert.equal(admittedPlans.length, 3, "All plans pass admission with sufficient budget");
+  });
+
+  it("low-EV plans are rejected and removed from dispatch when budget is tight", () => {
+    const plans = [
+      { id: "p1", role: "evolution-worker", task: "Fix critical auth regression", priority: 10, wave: "wave-1" },
+      { id: "p2", role: "evolution-worker", task: "Improve documentation typos", priority: 1, wave: "wave-1" },
+      { id: "p3", role: "evolution-worker", task: "Add minor style polish", priority: 1, wave: "wave-1" },
+    ];
+    const config = {};
+    // Budget allows only 1 worker spawn
+    const requestBudget = { hardCapTotal: 1 };
+
+    const interventions = buildInterventionsFromPlan(plans, config);
+    const budget = buildBudgetFromConfig(requestBudget, config);
+    const result = runInterventionOptimizer(interventions, budget);
+
+    assert.equal(result.status, OPTIMIZER_STATUS.BUDGET_EXCEEDED, "Budget exceeded when too many plans for limit");
+    assert.equal(result.selected.length, 1, "Only 1 plan admitted under budget=1");
+
+    // The highest-priority plan (p1) must be the one admitted
+    assert.equal(result.selected[0].id, "p1", "Highest-priority plan must be admitted first");
+    assert.equal(result.rejected.length, 2, "Low-EV plans must be in rejected");
+
+    // Admission filter removes rejected plans
+    const admittedIds = new Set(result.selected.map((i: any) => i.id));
+    const admittedPlans = plans.filter((plan: any, idx: number) =>
+      admittedIds.has(String(plan?.id ?? `plan-${idx + 1}`))
+    );
+    assert.equal(admittedPlans.length, 1, "Dispatch set must contain only admitted plans");
+    assert.equal((admittedPlans[0] as any).id, "p1", "Only high-priority plan dispatched");
+  });
+
+  it("negative path: optimizer fail-open — invalid budget config does not block dispatch", () => {
+    const plans = [
+      { id: "p1", role: "evolution-worker", task: "Critical fix for dispatch", priority: 8, wave: "wave-1" },
+    ];
+    // Null budget (simulates missing config) — optimizer returns INVALID_INPUT
+    const interventions = buildInterventionsFromPlan(plans, {});
+    const result = runInterventionOptimizer(interventions, null as any);
+
+    assert.equal(result.status, OPTIMIZER_STATUS.INVALID_INPUT, "Null budget must produce INVALID_INPUT");
+    // Orchestrator logic: INVALID_INPUT → skip admission filter → plans proceed unchanged
+    const shouldSkipFilter = result.status === OPTIMIZER_STATUS.INVALID_INPUT || result.status === OPTIMIZER_STATUS.EMPTY_INPUT;
+    assert.equal(shouldSkipFilter, true, "Dispatch must not be blocked on optimizer INVALID_INPUT");
+  });
+});
+
+// ── 6. Carry-Forward Auto-Close Integration ───────────────────────────────────
+
+describe("Integration: carry-forward auto-close with verification evidence", () => {
+  it("verified debt item is auto-closed; unverified item remains blocking", () => {
+    // Set up: two critical debt items from postmortems
+    const verifiedLesson = "Fix dag_scheduler wave ordering integration test regression";
+    const unresolvedLesson = "Fix capability pool observation lane routing false negative";
+
+    const ledger = addDebtEntries(
+      [],
+      [
+        { followUpTask: verifiedLesson, severity: "critical" },
+        { followUpTask: unresolvedLesson, severity: "critical" },
+      ],
+      1,
+      { slaMaxCycles: 2 }
+    );
+
+    assert.equal(ledger.length, 2);
+
+    // A worker completed the first task with evidence; the second has no resolution
+    const resolvedItems = [
+      { taskText: verifiedLesson, verificationEvidence: "All wave ordering tests pass — PR #55 merged" },
+    ];
+
+    const closedCount = autoCloseVerifiedDebt(ledger, resolvedItems);
+    assert.equal(closedCount, 1, "Exactly one item must be auto-closed");
+
+    // Verified item is now closed
+    const verifiedEntry = ledger.find(e => e.lesson === verifiedLesson);
+    assert.ok(verifiedEntry?.closedAt, "Verified debt entry must be closed");
+    assert.ok(
+      verifiedEntry?.closureEvidence?.includes("PR #55"),
+      "Closure evidence must be linked to the worker's verification"
+    );
+
+    // Unresolved item remains open and still blocking
+    const unresolvedEntry = ledger.find(e => e.lesson === unresolvedLesson);
+    assert.equal(unresolvedEntry?.closedAt, null, "Unresolved entry must remain open");
+
+    // shouldBlockOnDebt still fires for the remaining critical overdue item
+    const blockResult = shouldBlockOnDebt(ledger, 5, { maxCriticalOverdue: 1 });
+    assert.equal(blockResult.shouldBlock, true, "One remaining critical overdue item must still block dispatch");
+  });
+
+  it("no items are auto-closed when worker evidence is absent", () => {
+    const lesson = "Fix the carry-forward fingerprint deduplication regression";
+    const ledger = addDebtEntries([], [{ followUpTask: lesson, severity: "critical" }], 1);
+
+    // Worker completed but provided no verification evidence
+    const closedCount = autoCloseVerifiedDebt(ledger, [
+      { taskText: lesson, verificationEvidence: "" },
+    ]);
+
+    assert.equal(closedCount, 0, "No close when evidence is missing");
+    assert.equal(ledger[0].closedAt, null, "Entry must remain open");
+  });
+
+  it("negative path: auto-close with unmatched task text leaves all debt blocking", () => {
+    const blockingLesson1 = "Fix orchestrator resume path checkpoint integrity check";
+    const blockingLesson2 = "Fix catastrophe detector false-positive on SLO breach cycle";
+    const ledger = addDebtEntries(
+      [],
+      [
+        { followUpTask: blockingLesson1, severity: "critical" },
+        { followUpTask: blockingLesson2, severity: "critical" },
+      ],
+      1,
+      { slaMaxCycles: 1 }
+    );
+
+    // Worker completed an unrelated task
+    autoCloseVerifiedDebt(ledger, [
+      { taskText: "Completely unrelated task with no debt match", verificationEvidence: "PR #999 merged" },
+    ]);
+
+    // Both items still open and overdue at cycle 4
+    const { shouldBlock, overdueCount } = shouldBlockOnDebt(ledger, 4, { maxCriticalOverdue: 2 });
+    assert.equal(shouldBlock, true, "Both items must remain blocking");
+    assert.equal(overdueCount, 2, "Both items must be counted as overdue");
   });
 });
