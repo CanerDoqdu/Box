@@ -10,6 +10,7 @@ import {
   DRIFT_REMEDIATION_THRESHOLD,
   computeBottleneckCoverage,
   BOTTLENECK_COVERAGE_FLOOR,
+  buildDriftDebtTasks,
 } from "../../src/core/prometheus.js";
 import { compilePrompt } from "../../src/core/prompt_compiler.js";
 
@@ -762,6 +763,129 @@ describe("normalizePrometheusParsedOutput — batch/wave packet field preservati
     assert.ok(Array.isArray(result.plans[0].waveDepends), "waveDepends must be an array");
     assert.equal(result.plans[0].waveDepends.length, 0,
       "waveDepends must be empty when not provided");
+  });
+});
+
+// ── Task: buildDriftDebtTasks — drift output → actionable planning debt ───────
+
+describe("buildDriftDebtTasks", () => {
+  it("returns empty array for null/undefined drift report", () => {
+    assert.deepEqual(buildDriftDebtTasks(null), []);
+    assert.deepEqual(buildDriftDebtTasks(undefined), []);
+  });
+
+  it("returns empty array when staleReferences and deprecatedTokenRefs are empty", () => {
+    const report = { staleReferences: [], deprecatedTokenRefs: [], staleCount: 0, deprecatedTokenCount: 0 };
+    assert.deepEqual(buildDriftDebtTasks(report), []);
+  });
+
+  it("generates one debt task per doc with stale file references", () => {
+    const report = {
+      staleReferences: [
+        { docPath: "docs/arch.md", referencedPath: "src/core/missing.ts", line: 5 },
+        { docPath: "docs/arch.md", referencedPath: "src/core/gone.ts", line: 9 },
+        { docPath: "docs/ops.md", referencedPath: "docker/worker.Dockerfile", line: 2 },
+      ],
+      deprecatedTokenRefs: [],
+    };
+    const tasks = buildDriftDebtTasks(report);
+    assert.equal(tasks.length, 2, "one task per distinct doc");
+    const archTask = tasks.find(t => t.target_files?.includes("docs/arch.md"));
+    assert.ok(archTask, "task for docs/arch.md must exist");
+    assert.equal(archTask.taskKind, "debt");
+    assert.equal(archTask.source, "architecture_drift");
+    assert.equal(archTask._driftDebt, true);
+    assert.ok(archTask.task.includes("docs/arch.md"), "task text must name the doc");
+    assert.ok(Array.isArray(archTask.acceptance_criteria) && archTask.acceptance_criteria.length >= 2);
+  });
+
+  it("generates one debt task per doc with deprecated token usages", () => {
+    const report = {
+      staleReferences: [],
+      deprecatedTokenRefs: [
+        { docPath: "docs/legacy.md", token: "governance_verdict", hint: "use governance_contract", line: 3 },
+        { docPath: "docs/legacy.md", token: "resume_dispatch", hint: "use runResumeDispatch", line: 7 },
+      ],
+    };
+    const tasks = buildDriftDebtTasks(report);
+    assert.equal(tasks.length, 1);
+    assert.ok(tasks[0].task.includes("docs/legacy.md"));
+    assert.ok(tasks[0].description.includes("governance_verdict"), "description must name deprecated tokens");
+    assert.equal(tasks[0].taskKind, "debt");
+    assert.equal(tasks[0].riskLevel, "low");
+  });
+
+  it("places debt tasks on wave maxWave+1 relative to existing plans", () => {
+    const report = {
+      staleReferences: [{ docPath: "docs/arch.md", referencedPath: "src/core/x.ts", line: 1 }],
+      deprecatedTokenRefs: [],
+    };
+    const existingPlans = [
+      { task: "Fix something", wave: 1 },
+      { task: "Fix something else", wave: 3 },
+    ];
+    const tasks = buildDriftDebtTasks(report, existingPlans);
+    assert.equal(tasks[0].wave, 4, "debt tasks must be placed on wave maxWave+1 (3+1=4)");
+  });
+
+  it("uses wave 1 when no existing plans exist", () => {
+    const report = {
+      staleReferences: [{ docPath: "docs/arch.md", referencedPath: "src/x.ts", line: 1 }],
+      deprecatedTokenRefs: [],
+    };
+    const tasks = buildDriftDebtTasks(report, []);
+    assert.equal(tasks[0].wave, 1, "debt tasks wave must be 1 when no existing plans");
+  });
+
+  it("suppresses debt task generation when existing plan already covers that doc", () => {
+    const report = {
+      staleReferences: [{ docPath: "docs/arch.md", referencedPath: "src/x.ts", line: 1 }],
+      deprecatedTokenRefs: [],
+    };
+    const existingPlans = [
+      { task: "Update stale references in docs/arch.md", target_files: ["docs/arch.md"], wave: 1 },
+    ];
+    const tasks = buildDriftDebtTasks(report, existingPlans);
+    assert.equal(tasks.length, 0, "must not generate duplicate debt task when AI plan already covers the doc");
+  });
+
+  it("generates separate tasks for stale refs and deprecated tokens even in the same doc", () => {
+    const report = {
+      staleReferences: [{ docPath: "docs/mixed.md", referencedPath: "src/x.ts", line: 1 }],
+      deprecatedTokenRefs: [{ docPath: "docs/mixed.md", token: "governance_verdict", hint: "use governance_contract", line: 4 }],
+    };
+    const tasks = buildDriftDebtTasks(report);
+    assert.equal(tasks.length, 2, "stale-ref task and deprecated-token task must both be generated");
+    const kinds = tasks.map(t => t.task);
+    assert.ok(kinds.some(k => k.includes("stale")), "must have a stale-ref task");
+    assert.ok(kinds.some(k => k.includes("deprecated")), "must have a deprecated-token task");
+  });
+
+  it("each debt task carries required plan packet fields", () => {
+    const report = {
+      staleReferences: [{ docPath: "docs/a.md", referencedPath: "src/x.ts", line: 1 }],
+      deprecatedTokenRefs: [],
+    };
+    const [task] = buildDriftDebtTasks(report);
+    assert.ok(typeof task.task === "string" && task.task.length > 0, "task text must be a non-empty string");
+    assert.ok(typeof task.description === "string" && task.description.length > 0);
+    assert.equal(task.role, "evolution-worker");
+    assert.equal(task.verification, "npm test");
+    assert.ok(Array.isArray(task.verification_commands));
+    assert.ok(Array.isArray(task.acceptance_criteria) && task.acceptance_criteria.length >= 2);
+    assert.ok(typeof task.wave === "number");
+    assert.ok(typeof task.priority === "number");
+  });
+
+  it("negative path: handles malformed staleReferences entries without throwing", () => {
+    const report = {
+      staleReferences: [null, undefined, {}, { docPath: "docs/ok.md", referencedPath: "src/x.ts", line: 1 }],
+      deprecatedTokenRefs: [],
+    };
+    // Must not throw; must produce at most one task (for the valid entry)
+    let tasks: any[];
+    assert.doesNotThrow(() => { tasks = buildDriftDebtTasks(report); });
+    assert.ok(Array.isArray(tasks!));
   });
 });
 

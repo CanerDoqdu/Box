@@ -1303,6 +1303,129 @@ export function computeDriftConfidencePenalty(driftReport?: Record<string, unkno
   };
 }
 
+// ── Architecture Drift → Actionable Debt Tasks ────────────────────────────
+
+/**
+ * Convert architecture drift report items into structured debt plan tasks.
+ * Groups items by source document so one task covers all issues in a given file.
+ * Each task carries taskKind="debt" and source="architecture_drift" so it can
+ * be tracked, filtered, and prioritised separately from AI-generated plans.
+ *
+ * Tasks are placed on a wave one beyond the highest existing plan wave so they
+ * do not block critical delivery work but are still ingested into the plan graph.
+ *
+ * Existing plans that already reference a document path suppress debt task
+ * generation for that document to prevent double-scheduling.
+ *
+ * @param driftReport - result of checkArchitectureDrift(), or null/undefined
+ * @param existingPlans - plans already present in the parsed output
+ * @returns array of debt plan task objects ready for injection into parsed.plans
+ */
+export function buildDriftDebtTasks(
+  driftReport: Record<string, unknown> | null | undefined,
+  existingPlans: any[] = []
+): any[] {
+  if (!driftReport) return [];
+
+  const staleRefs = Array.isArray(driftReport.staleReferences)
+    ? (driftReport.staleReferences as any[]).filter(r => r && typeof r === "object")
+    : [];
+  const tokenRefs = Array.isArray(driftReport.deprecatedTokenRefs)
+    ? (driftReport.deprecatedTokenRefs as any[]).filter(r => r && typeof r === "object")
+    : [];
+
+  if (staleRefs.length === 0 && tokenRefs.length === 0) return [];
+
+  // Place debt tasks on the wave immediately after the highest existing wave.
+  const maxWave = existingPlans.reduce((max, p) => {
+    const w = Number(p.wave) || 1;
+    return w > max ? w : max;
+  }, 0);
+  const debtWave = maxWave + 1;
+
+  // Identify docs already addressed in existing plans to avoid double-scheduling.
+  const coveredDocs = new Set<string>();
+  for (const plan of existingPlans) {
+    const text = `${String(plan.task || "")} ${String(plan.description || "")} ${(plan.target_files || []).join(" ")}`.toLowerCase();
+    for (const ref of [...staleRefs, ...tokenRefs]) {
+      if (ref.docPath && text.includes(String(ref.docPath).toLowerCase())) {
+        coveredDocs.add(String(ref.docPath));
+      }
+    }
+  }
+
+  const debtTasks: any[] = [];
+  // Use high priority numbers so debt tasks sort after critical delivery work.
+  let priority = 900;
+
+  // One debt task per doc with stale file references.
+  const staleByDoc = new Map<string, any[]>();
+  for (const ref of staleRefs) {
+    const doc = String(ref.docPath || "");
+    if (!staleByDoc.has(doc)) staleByDoc.set(doc, []);
+    staleByDoc.get(doc)!.push(ref);
+  }
+  for (const [doc, refs] of staleByDoc.entries()) {
+    if (coveredDocs.has(doc)) continue;
+    const paths = [...new Set(refs.map((r: any) => String(r.referencedPath)))].join(", ");
+    debtTasks.push({
+      task: `Fix stale file references in ${doc}`,
+      title: `Fix stale file references in ${doc}`,
+      description: `${doc} references ${refs.length} file(s) that no longer exist: ${paths}. Update or remove these entries so documentation matches the current codebase.`,
+      taskKind: "debt",
+      source: "architecture_drift",
+      _driftDebt: true,
+      wave: debtWave,
+      priority: priority++,
+      target_files: [doc],
+      acceptance_criteria: [
+        `All ${refs.length} stale file reference(s) in ${doc} are updated or removed`,
+        `No broken file references remain in ${doc}`,
+      ],
+      verification: "npm test",
+      verification_commands: ["npm test"],
+      riskLevel: "low",
+      role: "evolution-worker",
+    });
+  }
+
+  // One debt task per doc with deprecated token usages.
+  const tokensByDoc = new Map<string, any[]>();
+  for (const ref of tokenRefs) {
+    const doc = String(ref.docPath || "");
+    if (!tokensByDoc.has(doc)) tokensByDoc.set(doc, []);
+    tokensByDoc.get(doc)!.push(ref);
+  }
+  for (const [doc, refs] of tokensByDoc.entries()) {
+    if (coveredDocs.has(doc)) continue;
+    const uniqueTokens = [...new Set(refs.map((r: any) => String(r.token)))];
+    const hints = [...new Map(refs.map((r: any) => [String(r.token), String(r.hint)])).entries()]
+      .map(([t, h]) => `${t} → ${h}`)
+      .join("; ");
+    debtTasks.push({
+      task: `Replace deprecated API tokens in ${doc}`,
+      title: `Replace deprecated API tokens in ${doc}`,
+      description: `${doc} contains ${refs.length} use(s) of deprecated token(s): ${uniqueTokens.join(", ")}. Replace with current equivalents. Migration hints: ${hints}`,
+      taskKind: "debt",
+      source: "architecture_drift",
+      _driftDebt: true,
+      wave: debtWave,
+      priority: priority++,
+      target_files: [doc],
+      acceptance_criteria: [
+        `All ${refs.length} deprecated token usage(s) in ${doc} are replaced with current equivalents`,
+        `No deprecated tokens remain in ${doc}`,
+      ],
+      verification: "npm test",
+      verification_commands: ["npm test"],
+      riskLevel: "low",
+      role: "evolution-worker",
+    });
+  }
+
+  return debtTasks;
+}
+
 
 export async function runPrometheusAnalysis(config, options: any = {}) {
   const stateDir = config.paths?.stateDir || "state";
@@ -1765,6 +1888,21 @@ Consider whether the root causes are:
       `[PROMETHEUS][DRIFT] Confidence penalty applied: ${driftPenaltyResult.penalty.toFixed(2)} (${driftPenaltyResult.reason})` +
       (driftPenaltyResult.requiresRemediation ? " — remediation plans required" : "")
     );
+  }
+
+  // ── Drift debt task injection ─────────────────────────────────────────────
+  // Deterministically convert unresolved drift items into tracked debt tasks so
+  // they appear in the plan graph regardless of whether the AI included them.
+  if (driftReport && (driftReport.staleCount > 0 || driftReport.deprecatedTokenCount > 0)) {
+    const driftDebtTasks = buildDriftDebtTasks(driftReport, parsed.plans || []);
+    if (driftDebtTasks.length > 0) {
+      if (!Array.isArray(parsed.plans)) parsed.plans = [];
+      parsed.plans = [...parsed.plans, ...driftDebtTasks];
+      parsed._driftDebtTaskCount = driftDebtTasks.length;
+      await appendProgress(config,
+        `[PROMETHEUS][DRIFT] Injected ${driftDebtTasks.length} debt task(s) from architecture drift into plan (wave ${driftDebtTasks[0].wave})`
+      );
+    }
   }
 
   // ── Build analysis result ─────────────────────────────────────────────────
