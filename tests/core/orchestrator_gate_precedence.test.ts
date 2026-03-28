@@ -24,6 +24,7 @@ import {
   GATE_PRECEDENCE,
   BLOCK_REASON,
   evaluatePreDispatchGovernanceGate,
+  type GovernanceBlockDecision,
 } from "../../src/core/orchestrator.js";
 import type { ArchitectureDriftReport } from "../../src/core/architecture_drift.js";
 
@@ -217,5 +218,52 @@ describe("evaluatePreDispatchGovernanceGate — gateIndex on blocked results", (
 
   it("BLOCK_REASON.MANDATORY_DRIFT_DEBT_UNRESOLVED matches the legacy drift gate reason prefix", () => {
     assert.equal(BLOCK_REASON.MANDATORY_DRIFT_DEBT_UNRESOLVED, "mandatory_drift_debt_unresolved");
+  });
+});
+
+// ── GovernanceBlockDecision envelope contract ─────────────────────────────────
+
+describe("GovernanceBlockDecision envelope contract", () => {
+  it("blocked result contains all required envelope fields with correct types", async () => {
+    const config = passAllConfig({ governanceFreeze: { manualOverrideActive: true } });
+    const result: GovernanceBlockDecision = await evaluatePreDispatchGovernanceGate(config, [], "envelope-blocked-test");
+    assert.equal(typeof result.blocked, "boolean", "blocked must be boolean");
+    assert.equal(result.blocked, true);
+    assert.equal(typeof result.reason, "string", "reason must be a string on blocked result");
+    assert.equal(result.cycleId, "envelope-blocked-test", "cycleId must be carried through");
+    assert.ok("budgetEligibility" in result, "budgetEligibility must always be present");
+    assert.equal(typeof result.budgetEligibility, "object", "budgetEligibility must be an object");
+    assert.ok("graphResult" in result, "graphResult must always be present");
+    assert.ok("action" in result, "action must always be present");
+    assert.equal(typeof result.gateIndex, "number", "gateIndex must be a number on blocked result");
+  });
+
+  it("non-blocked result has gateIndex=undefined, reason=null, and action=undefined", async () => {
+    const result: GovernanceBlockDecision = await evaluatePreDispatchGovernanceGate(passAllConfig(), [], "envelope-pass-test");
+    assert.equal(result.blocked, false);
+    assert.equal(result.reason, null, "reason must be null on non-blocked result");
+    assert.equal(result.gateIndex, undefined, "gateIndex must be absent on non-blocked result");
+    assert.equal(result.action, undefined, "action must be undefined on non-blocked result");
+    assert.ok("budgetEligibility" in result, "budgetEligibility must always be present");
+    assert.ok("graphResult" in result, "graphResult must always be present");
+  });
+
+  it("drift block carries mandatoryDriftPaths in the envelope", async () => {
+    const result: GovernanceBlockDecision = await evaluatePreDispatchGovernanceGate(
+      passAllConfig(), [], "envelope-drift-test", makeDriftReportHighPriority()
+    );
+    assert.equal(result.blocked, true);
+    assert.ok(Array.isArray(result.mandatoryDriftPaths), "mandatoryDriftPaths must be an array on drift block");
+    assert.ok(result.mandatoryDriftPaths!.length > 0, "mandatoryDriftPaths must be non-empty on drift block");
+    assert.equal(result.gateIndex, GATE_PRECEDENCE.MANDATORY_DRIFT_DEBT);
+  });
+
+  it("negative path: envelope is consistent across all gate pass scenarios (no extra fields leak)", async () => {
+    // With no gates active and no plans, result must only contain the standard envelope fields.
+    const result: GovernanceBlockDecision = await evaluatePreDispatchGovernanceGate(passAllConfig(), [], "envelope-clean-test");
+    assert.equal(result.blocked, false);
+    assert.equal(result.mandatoryDriftPaths, undefined, "mandatoryDriftPaths must be absent on pass");
+    assert.equal(result.rollbackResult, undefined, "rollbackResult must be absent on pass");
+    assert.equal(result.gateIndex, undefined, "gateIndex must be absent on pass");
   });
 });
