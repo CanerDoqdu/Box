@@ -152,8 +152,10 @@ describe("orchestrator governance pre-dispatch gate", () => {
 
   it("allows dispatch when guardrail, freeze, lineage, and canary gates are all clear", async () => {
     const plans = [
-      { id: "T1", task: "task one", role: "backend", dependsOn: [], filesInScope: ["src/core/a.ts"] },
-      { id: "T2", task: "task two", role: "test", dependsOn: ["T1"], filesInScope: ["tests/core/a.test.ts"] }
+      { id: "T1", task: "task one", role: "backend", dependsOn: [], filesInScope: ["src/core/a.ts"],
+        verification_commands: ["npm test"], acceptance_criteria: ["tests pass"] },
+      { id: "T2", task: "task two", role: "test", dependsOn: ["T1"], filesInScope: ["tests/core/a.test.ts"],
+        verification_commands: ["npm test"], acceptance_criteria: ["tests pass"] }
     ];
 
     const result = await evaluatePreDispatchGovernanceGate(config, plans, "clear-gate-cycle-1");
@@ -483,7 +485,8 @@ describe("orchestrator checkpoint resume — pre-dispatch governance gate", () =
     const athenaReview = {
       approved: true,
       patchedPlans: [
-        { id: "T1", task: "task one", role: "evolution-worker", dependsOn: [], filesInScope: [] }
+        { id: "T1", task: "task one", role: "evolution-worker", dependsOn: [], filesInScope: [],
+          verification_commands: ["npm test"], acceptance_criteria: ["tests pass"] }
       ]
     };
     await fs.writeFile(
@@ -782,8 +785,10 @@ describe("leadership chain stage ordering and gate evaluation", () => {
 
   it("gate passes for all-clear config — dispatch is not blocked at any leadership chain stage", async () => {
     const plans = [
-      { id: "Jesus-T1",    role: "backend", dependsOn: [],        filesInScope: ["src/core/jesus_supervisor.ts"] },
-      { id: "Prometheus-T1", role: "test", dependsOn: ["Jesus-T1"], filesInScope: ["tests/core/orchestrator.test.ts"] }
+      { id: "Jesus-T1",    role: "backend", dependsOn: [],        filesInScope: ["src/core/jesus_supervisor.ts"],
+        verification_commands: ["npm test"], acceptance_criteria: ["tests pass"] },
+      { id: "Prometheus-T1", role: "test", dependsOn: ["Jesus-T1"], filesInScope: ["tests/core/orchestrator.test.ts"],
+        verification_commands: ["npm test"], acceptance_criteria: ["tests pass"] }
     ];
 
     const result = await evaluatePreDispatchGovernanceGate(config, plans, "leadership-all-clear-1");
@@ -1095,6 +1100,87 @@ describe("budget reconciliation gate — pre-dispatch governance gate integratio
     assert.equal(result.budgetEligibility.eligible, true);
     assert.equal(result.budgetEligibility.configured, false);
     assert.equal(result.budgetEligibility.remainingUsd, null);
+  });
+});
+
+// ── Task 3 hardening: plan evidence coupling gate ─────────────────────────────
+
+describe("plan evidence coupling gate — pre-dispatch governance gate (Task 3 hardening)", () => {
+  let tmpDir;
+  let config;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-coupling-gate-"));
+    config = {
+      paths: { stateDir: tmpDir },
+      env: { copilotCliCommand: "__missing__", targetRepo: "CanerDoqdu/Box" },
+      systemGuardian: { enabled: false },
+      canary:          { enabled: false },
+    };
+    await fs.writeFile(
+      path.join(tmpDir, "policy.json"),
+      JSON.stringify({ blockedCommands: [] }, null, 2),
+      "utf8"
+    );
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it("blocks dispatch when a plan is missing verification_commands", async () => {
+    const plans = [
+      { id: "T1", task: "do something", acceptance_criteria: ["all tests pass"] }
+      // missing verification_commands
+    ];
+    const result = await evaluatePreDispatchGovernanceGate(config, plans, "coupling-gate-no-cmds");
+    assert.equal(result.blocked, true, "must block when plan has no verification_commands");
+    assert.ok(
+      result.reason?.includes("plan_evidence_coupling_invalid"),
+      `reason must reflect coupling failure; got: ${result.reason}`
+    );
+  });
+
+  it("blocks dispatch when a plan is missing acceptance_criteria", async () => {
+    const plans = [
+      { id: "T1", task: "do something", verification_commands: ["npm test"] }
+      // missing acceptance_criteria
+    ];
+    const result = await evaluatePreDispatchGovernanceGate(config, plans, "coupling-gate-no-ac");
+    assert.equal(result.blocked, true, "must block when plan has no acceptance_criteria");
+    assert.ok(
+      result.reason?.includes("plan_evidence_coupling_invalid"),
+      `reason must reflect coupling failure; got: ${result.reason}`
+    );
+  });
+
+  it("allows dispatch when all plans have valid evidence coupling", async () => {
+    const plans = [
+      {
+        id: "T1",
+        task: "do something",
+        verification_commands: ["npm test"],
+        acceptance_criteria: ["all tests pass"],
+        dependsOn: [],
+        filesInScope: []
+      }
+    ];
+    const result = await evaluatePreDispatchGovernanceGate(config, plans, "coupling-gate-valid");
+    assert.equal(result.blocked, false, "must allow dispatch when all coupling fields are present");
+  });
+
+  it("allows dispatch when plans is empty (no coupling validation needed)", async () => {
+    const result = await evaluatePreDispatchGovernanceGate(config, [], "coupling-gate-empty");
+    assert.equal(result.blocked, false, "empty plan list must not trigger coupling gate");
+  });
+
+  it("negative path: plan with empty verification_commands array is blocked", async () => {
+    const plans = [
+      { id: "T1", task: "do something", verification_commands: [], acceptance_criteria: ["tests pass"] }
+    ];
+    const result = await evaluatePreDispatchGovernanceGate(config, plans, "coupling-gate-empty-cmds");
+    assert.equal(result.blocked, true);
+    assert.ok(result.reason?.includes("plan_evidence_coupling_invalid"));
   });
 });
 

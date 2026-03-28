@@ -14,7 +14,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { validateEvidenceEnvelope } from "../../src/core/evidence_envelope.js";
+import { validateEvidenceEnvelope, validatePlanEvidenceCoupling } from "../../src/core/evidence_envelope.js";
 
 const VALID_EVIDENCE = { build: "pass", tests: "pass", lint: "n/a" };
 
@@ -154,5 +154,100 @@ describe("validateEvidenceEnvelope", () => {
         }
       }
     }
+  });
+});
+
+// ── Task 3 hardening: validatePlanEvidenceCoupling — pre-dispatch plan gate ───
+
+describe("validatePlanEvidenceCoupling — plan evidence coupling validation", () => {
+  function validPlan(overrides: Record<string, unknown> = {}) {
+    return {
+      task_id: "T-001",
+      task: "Implement trust boundary check",
+      verification_commands: ["npm test"],
+      acceptance_criteria: ["All tests pass"],
+      ...overrides,
+    };
+  }
+
+  it("accepts a fully valid plan with commands and criteria", () => {
+    const result = validatePlanEvidenceCoupling(validPlan());
+    assert.equal(result.valid, true);
+    assert.deepEqual(result.errors, []);
+  });
+
+  it("accepts a plan with acceptance_criteria as a string", () => {
+    const result = validatePlanEvidenceCoupling(validPlan({ acceptance_criteria: "All tests must pass" }));
+    assert.equal(result.valid, true);
+  });
+
+  it("accepts a plan with acceptance_criteria as a multi-element array", () => {
+    const result = validatePlanEvidenceCoupling(validPlan({
+      acceptance_criteria: ["No regressions", "Test coverage ≥ 80%"]
+    }));
+    assert.equal(result.valid, true);
+  });
+
+  it("rejects null input", () => {
+    const result = validatePlanEvidenceCoupling(null);
+    assert.equal(result.valid, false);
+    assert.ok(result.errors.length > 0);
+  });
+
+  it("rejects non-object input", () => {
+    const result = validatePlanEvidenceCoupling("not a plan");
+    assert.equal(result.valid, false);
+  });
+
+  it("rejects plan with missing verification_commands", () => {
+    const { verification_commands: _, ...plan } = validPlan();
+    const result = validatePlanEvidenceCoupling(plan);
+    assert.equal(result.valid, false);
+    assert.ok(result.errors.some(e => e.includes("verification_commands")));
+  });
+
+  it("rejects plan with empty verification_commands array", () => {
+    const result = validatePlanEvidenceCoupling(validPlan({ verification_commands: [] }));
+    assert.equal(result.valid, false);
+    assert.ok(result.errors.some(e => e.includes("verification_commands")));
+  });
+
+  it("rejects plan with only empty-string verification_commands", () => {
+    const result = validatePlanEvidenceCoupling(validPlan({ verification_commands: ["", "  "] }));
+    assert.equal(result.valid, false);
+    assert.ok(result.errors.some(e => e.includes("verification_commands")));
+  });
+
+  it("rejects plan with missing acceptance_criteria", () => {
+    const { acceptance_criteria: _, ...plan } = validPlan();
+    const result = validatePlanEvidenceCoupling(plan);
+    assert.equal(result.valid, false);
+    assert.ok(result.errors.some(e => e.includes("acceptance_criteria")));
+  });
+
+  it("rejects plan with empty acceptance_criteria string", () => {
+    const result = validatePlanEvidenceCoupling(validPlan({ acceptance_criteria: "   " }));
+    assert.equal(result.valid, false);
+    assert.ok(result.errors.some(e => e.includes("acceptance_criteria")));
+  });
+
+  it("rejects plan with empty acceptance_criteria array", () => {
+    const result = validatePlanEvidenceCoupling(validPlan({ acceptance_criteria: [] }));
+    assert.equal(result.valid, false);
+    assert.ok(result.errors.some(e => e.includes("acceptance_criteria")));
+  });
+
+  it("collects all errors when both required fields are missing", () => {
+    const result = validatePlanEvidenceCoupling({ task: "do something" });
+    assert.equal(result.valid, false);
+    assert.ok(result.errors.some(e => e.includes("verification_commands")));
+    assert.ok(result.errors.some(e => e.includes("acceptance_criteria")));
+    assert.equal(result.errors.length, 2);
+  });
+
+  it("negative path: plan without any evidence fields is invalid", () => {
+    const result = validatePlanEvidenceCoupling({ task: "do something", wave: 1 });
+    assert.equal(result.valid, false);
+    assert.equal(result.errors.length, 2, "both coupling fields must be reported missing");
   });
 });

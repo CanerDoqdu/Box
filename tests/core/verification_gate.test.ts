@@ -580,3 +580,55 @@ describe("verification_gate — collectArtifactGaps shared contract", () => {
     assert.equal(gaps[0], ARTIFACT_GAP.MISSING_TEST_OUTPUT);
   });
 });
+
+// ── Task 1 hardening: artifact gate is non-bypassable ────────────────────────
+
+describe("verification_gate — artifact gate non-bypassable (Task 1 hardening)", () => {
+  it("artifact gate fires even when no explicit bypass option is passed", () => {
+    // A backend worker reports done without a git SHA — must fail regardless of options.
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: [
+        "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass; SECURITY=n/a; API=n/a; RESPONSIVE=n/a",
+        "BOX_PR_URL=https://github.com/org/repo/pull/1"
+        // No git SHA or npm test output
+      ].join("\n")
+    }, {});  // empty options — no requirePostMergeArtifact property
+    assert.equal(result.passed, false);
+    assert.ok(result.gaps.some(g => /sha/i.test(g)),
+      `artifact gate must fire with empty options; gaps: [${result.gaps.join("; ")}]`
+    );
+  });
+
+  it("ValidateWorkerContractOptions interface no longer includes requirePostMergeArtifact", () => {
+    // Passing an extra property is allowed in TS at runtime, but the gate must not use it.
+    // A done result without SHA must fail even when a caller attempts to pass the old option.
+    const optionsWithOldBypass: Record<string, unknown> = { requirePostMergeArtifact: false };
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass"
+    }, optionsWithOldBypass as any);
+    // Gate must still fire — the old option is ignored.
+    assert.equal(result.passed, false);
+    assert.ok(result.gaps.some(g => /sha|artifact|test output/i.test(g)),
+      `old requirePostMergeArtifact:false must not bypass the gate; gaps: [${result.gaps.join("; ")}]`
+    );
+  });
+
+  it("negative path: done with SHA + test output passes even when old option value passed", () => {
+    // Ensure we haven't broken the happy path while removing the bypass.
+    const result = validateWorkerContract("backend", {
+      status: "done",
+      fullOutput: [
+        "Merged abc1234 into main",
+        "# tests 5 # pass 5 # fail 0",
+        "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass; SECURITY=n/a; API=n/a; RESPONSIVE=n/a",
+        "BOX_PR_URL=https://github.com/org/repo/pull/1"
+      ].join("\n")
+    }, { requirePostMergeArtifact: false } as any);
+    const artifactGap = result.gaps.find(g => /sha|artifact|test output/i.test(g));
+    assert.equal(artifactGap, undefined,
+      `no artifact gap expected when SHA + test output are present; gaps: [${result.gaps.join("; ")}]`
+    );
+  });
+});

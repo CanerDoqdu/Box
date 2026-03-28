@@ -80,6 +80,7 @@ import {
   persistOptimizerLog,
   OPTIMIZER_STATUS,
 } from "./intervention_optimizer.js";
+import { validatePlanEvidenceCoupling } from "./evidence_envelope.js";
 
 /**
  * Orchestrator health status enum.
@@ -376,6 +377,33 @@ export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycl
       cycleId,
       budgetEligibility,
     };
+  }
+
+  // ── Plan evidence coupling gate ───────────────────────────────────────────
+  // Each plan entering dispatch must carry at least one verification command
+  // and at least one acceptance criterion — this ensures automated completion
+  // signals exist before work begins.  Plans that are missing these fields are
+  // either AI output gaps or legacy plans from before the coupling requirement;
+  // either way, dispatching them would produce unverifiable outcomes.
+  if (Array.isArray(plans) && plans.length > 0) {
+    const invalidPlans: string[] = [];
+    for (const plan of plans) {
+      const coupling = validatePlanEvidenceCoupling(plan);
+      if (!coupling.valid) {
+        const planId = String((plan as any)?.task_id || (plan as any)?.id || (plan as any)?.task || "unknown");
+        invalidPlans.push(`${planId}: ${coupling.errors.join("; ")}`);
+      }
+    }
+    if (invalidPlans.length > 0) {
+      return {
+        blocked: true,
+        reason: `plan_evidence_coupling_invalid:${invalidPlans[0]}`,
+        action: undefined,
+        graphResult,
+        cycleId,
+        budgetEligibility,
+      };
+    }
   }
 
   return {

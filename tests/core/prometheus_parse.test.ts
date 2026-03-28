@@ -1112,6 +1112,7 @@ describe("checkPacketCompleteness — generation-boundary gate", () => {
       wave: 1,
       capacityDelta: 0.15,
       requestROI: 2.5,
+      verification_commands: ["npm test"],
       ...overrides,
     };
   }
@@ -1169,12 +1170,13 @@ describe("checkPacketCompleteness — generation-boundary gate", () => {
   });
 
   it("accumulates multiple reasons when multiple fields are unrecoverable", () => {
-    const result = checkPacketCompleteness({ wave: 1 }); // no task, no capacityDelta, no requestROI
+    const result = checkPacketCompleteness({ wave: 1 }); // no task, no capacityDelta, no requestROI, no verification_commands
     assert.equal(result.recoverable, false);
     assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.NO_TASK_IDENTITY));
     assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_CAPACITY_DELTA));
     assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_REQUEST_ROI));
-    assert.equal(result.reasons.length, 3);
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING));
+    assert.equal(result.reasons.length, 4);
   });
 
   it("accepts title as task identity fallback", () => {
@@ -1214,6 +1216,41 @@ describe("checkPacketCompleteness — generation-boundary gate", () => {
     assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.NO_TASK_IDENTITY));
     assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.INVALID_CAPACITY_DELTA));
   });
+
+  // ── Task 4 hardening: MISSING_VERIFICATION_COUPLING ──────────────────────
+
+  it("returns recoverable=false with missing_verification_coupling when verification_commands is absent", () => {
+    const plan = validRawPlan();
+    delete (plan as any).verification_commands;
+    const result = checkPacketCompleteness(plan);
+    assert.equal(result.recoverable, false);
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING));
+  });
+
+  it("returns recoverable=false with missing_verification_coupling when verification_commands is empty array", () => {
+    const result = checkPacketCompleteness(validRawPlan({ verification_commands: [] }));
+    assert.equal(result.recoverable, false);
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING));
+  });
+
+  it("returns recoverable=false with missing_verification_coupling when all commands are empty strings", () => {
+    const result = checkPacketCompleteness(validRawPlan({ verification_commands: ["", "  "] }));
+    assert.equal(result.recoverable, false);
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING));
+  });
+
+  it("returns recoverable=true when verification_commands has one non-empty command", () => {
+    const result = checkPacketCompleteness(validRawPlan({ verification_commands: ["npm test"] }));
+    assert.equal(result.recoverable, true);
+    assert.deepEqual(result.reasons, []);
+  });
+
+  it("negative path: packet with all unrecoverable fields including missing coupling accumulates all reasons", () => {
+    const result = checkPacketCompleteness({ wave: 1 }); // missing everything
+    assert.ok(result.reasons.includes(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING),
+      "missing coupling must be included in all-fields-missing scenario"
+    );
+  });
 });
 
 describe("UNRECOVERABLE_PACKET_REASONS", () => {
@@ -1223,6 +1260,7 @@ describe("UNRECOVERABLE_PACKET_REASONS", () => {
     assert.equal(typeof UNRECOVERABLE_PACKET_REASONS.INVALID_CAPACITY_DELTA, "string");
     assert.equal(typeof UNRECOVERABLE_PACKET_REASONS.MISSING_REQUEST_ROI, "string");
     assert.equal(typeof UNRECOVERABLE_PACKET_REASONS.INVALID_REQUEST_ROI, "string");
+    assert.equal(typeof UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING, "string");
   });
 
   it("is frozen — mutation throws in strict mode", () => {

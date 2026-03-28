@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { getVerificationCommands, getTestCommand, VERIFICATION_DEFAULTS, checkForbiddenCommands, FORBIDDEN_VERIFICATION_PATTERNS, rewriteVerificationCommand, VERIFICATION_CMD_REWRITE_RULES } from "../../src/core/verification_command_registry.js";
+import { getVerificationCommands, getTestCommand, VERIFICATION_DEFAULTS, checkForbiddenCommands, FORBIDDEN_VERIFICATION_PATTERNS, rewriteVerificationCommand, VERIFICATION_CMD_REWRITE_RULES, normalizeCommandBatch } from "../../src/core/verification_command_registry.js";
 
 describe("verification_command_registry", () => {
   describe("getVerificationCommands", () => {
@@ -141,5 +141,57 @@ describe("verification_command_registry", () => {
         assert.notEqual(rewritten, cmd, `"${cmd}" should be rewritten to a canonical form`);
       }
     });
+  });
+});
+
+// ── Task 2 hardening: normalizeCommandBatch — batch portable normalization ────
+
+describe("normalizeCommandBatch — end-to-end batch normalization", () => {
+  it("rewrites each command in the batch using rewrite rules", () => {
+    const raw = ["node --test tests/**/*.test.ts", "npm test", "npm run lint"];
+    const result = normalizeCommandBatch(raw);
+    // The glob-based command must be rewritten to npm test
+    // Deduplication means "npm test" appears only once
+    assert.ok(result.includes("npm test"));
+    assert.ok(result.includes("npm run lint"));
+    assert.ok(!result.some(cmd => cmd.includes("*")), "no glob patterns should remain after normalization");
+  });
+
+  it("deduplicates commands that rewrite to the same canonical form", () => {
+    const raw = ["node --test tests/**/*.ts", "bash run.sh", "npm test"];
+    const result = normalizeCommandBatch(raw);
+    // All three rewrite to "npm test" — only one should remain
+    const npmTestCount = result.filter(c => c === "npm test").length;
+    assert.equal(npmTestCount, 1, "deduplication must collapse identical rewrites");
+  });
+
+  it("filters out empty strings after normalization", () => {
+    const raw = ["", "  ", "npm test"];
+    const result = normalizeCommandBatch(raw);
+    assert.equal(result.length, 1);
+    assert.equal(result[0], "npm test");
+  });
+
+  it("returns empty array for non-array input", () => {
+    assert.deepEqual(normalizeCommandBatch(null as any), []);
+    assert.deepEqual(normalizeCommandBatch(undefined as any), []);
+    assert.deepEqual(normalizeCommandBatch("npm test" as any), []);
+  });
+
+  it("returns empty array for empty input array", () => {
+    assert.deepEqual(normalizeCommandBatch([]), []);
+  });
+
+  it("preserves canonical commands unchanged", () => {
+    const canonical = ["npm test", "npm run lint", "npm run build"];
+    const result = normalizeCommandBatch(canonical);
+    assert.deepEqual(result, canonical);
+  });
+
+  it("negative path: glob-based command does NOT survive normalization", () => {
+    const result = normalizeCommandBatch(["node --test tests/**"]);
+    assert.ok(!result.some(cmd => cmd.includes("*")),
+      `glob must not survive normalization; got: [${result.join(", ")}]`
+    );
   });
 });

@@ -219,8 +219,6 @@ export function isArtifactGateRequired(workerKind: string, taskKind?: string | n
 export interface ValidateWorkerContractOptions {
   /** Config.gates object to upgrade optional evidence fields to required. */
   gatesConfig?: Record<string, unknown>;
-  /** When false, skips the post-merge artifact gate (git SHA + npm test output). Default: true. */
-  requirePostMergeArtifact?: boolean;
   /**
    * The task kind from the instruction (e.g. "backend", "scan", "doc").
    * Non-merge task kinds (scan, doc, observation, diagnosis) are exempt from
@@ -279,10 +277,9 @@ export function validateWorkerContract(workerKind: string, parsedResponse: Recor
   // include a git SHA + raw test output when reporting done, UNLESS the task
   // kind is a non-merge kind (scan, doc, observation, diagnosis) — those tasks
   // do not produce a merged commit and are exempt from artifact requirements.
-  const artifactGateRequired = options.requirePostMergeArtifact !== false
-    && hasRequiredFields
+  // This gate is NON-BYPASSABLE — no caller option can disable it.
+  const requireArtifact = hasRequiredFields
     && isArtifactGateRequired(workerKind, options.taskKind);
-  const requireArtifact = artifactGateRequired;
   if (requireArtifact) {
     const artifact = checkPostMergeArtifact(output);
     evidence.postMergeArtifact = artifact;

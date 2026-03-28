@@ -120,3 +120,50 @@ export function validateEvidenceEnvelope(envelope: unknown): { valid: boolean; e
 
   return { valid: errors.length === 0, errors };
 }
+
+// ── Plan dispatch evidence coupling validation ────────────────────────────────
+
+/**
+ * Validate that a plan packet has adequate evidence coupling before it enters
+ * the dispatch pipeline.
+ *
+ * A plan must carry at least one non-empty verification command and at least
+ * one acceptance criterion so that automated completion signals can be verified
+ * after the worker runs.  Plans that fail this check must be blocked at the
+ * governance gate, not silently dispatched with unverifiable outcomes.
+ *
+ * @param plan — plan object as produced by Prometheus normalization (untrusted)
+ * @returns { valid: boolean; errors: string[] }
+ */
+export function validatePlanEvidenceCoupling(plan: unknown): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+
+  if (!plan || typeof plan !== "object") {
+    return { valid: false, errors: ["plan must be a non-null object"] };
+  }
+
+  const p = plan as Record<string, unknown>;
+
+  // verification_commands: must be a non-empty array with ≥1 non-empty string.
+  const cmds = p.verification_commands;
+  if (!Array.isArray(cmds) || cmds.length === 0) {
+    errors.push("plan.verification_commands must be a non-empty array");
+  } else {
+    const nonEmpty = cmds.filter(c => typeof c === "string" && String(c).trim().length > 0);
+    if (nonEmpty.length === 0) {
+      errors.push("plan.verification_commands must contain at least one non-empty command string");
+    }
+  }
+
+  // acceptance_criteria: must be a non-empty string or non-empty array of strings.
+  const ac = p.acceptance_criteria;
+  const acValid =
+    (typeof ac === "string" && ac.trim().length > 0) ||
+    (Array.isArray(ac) && ac.length > 0 &&
+      ac.some(a => typeof a === "string" && String(a).trim().length > 0));
+  if (!acValid) {
+    errors.push("plan.acceptance_criteria must be a non-empty string or array");
+  }
+
+  return { valid: errors.length === 0, errors };
+}

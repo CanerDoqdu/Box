@@ -120,6 +120,31 @@ export function rewriteVerificationCommand(cmd: string): string {
 }
 
 /**
+ * Normalize an array of verification commands by applying all rewrite rules to each.
+ * This is the canonical batch entry point — all callers that need to sanitize a
+ * plan's verification_commands before dispatch should use this.
+ *
+ * Deduplicates and filters empty strings so the result is a minimal, portable
+ * command list ready for worker dispatch.
+ *
+ * @param {string[]} commands — raw verification command strings
+ * @returns {string[]} canonical, portable, deduped command list
+ */
+export function normalizeCommandBatch(commands: string[]): string[] {
+  if (!Array.isArray(commands)) return [];
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const cmd of commands) {
+    const rewritten = rewriteVerificationCommand(String(cmd || "").trim());
+    if (rewritten && !seen.has(rewritten)) {
+      seen.add(rewritten);
+      result.push(rewritten);
+    }
+  }
+  return result;
+}
+
+/**
  * Check if a verification command string contains forbidden patterns.
  *
  * @param {string} command — verification command string

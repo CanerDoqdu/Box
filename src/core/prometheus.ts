@@ -92,6 +92,8 @@ export const UNRECOVERABLE_PACKET_REASONS = Object.freeze({
   MISSING_REQUEST_ROI:    "missing_request_roi",
   /** requestROI is present but not a positive finite number */
   INVALID_REQUEST_ROI:    "invalid_request_roi",
+  /** verification_commands is absent or empty — no automated completion signal */
+  MISSING_VERIFICATION_COUPLING: "missing_verification_coupling",
 });
 
 /**
@@ -144,6 +146,18 @@ export function checkPacketCompleteness(rawPlan: any): { recoverable: boolean; r
     if (!Number.isFinite(roi) || roi <= 0) {
       reasons.push(UNRECOVERABLE_PACKET_REASONS.INVALID_REQUEST_ROI);
     }
+  }
+
+  // 4. verification_commands: must be a non-empty array with at least one non-empty string.
+  //    Plans without verification commands have no automated completion signal and must be
+  //    rejected at the generation boundary before entering the normalization pipeline.
+  const cmds = rawPlan.verification_commands;
+  const hasValidCmds =
+    Array.isArray(cmds) &&
+    cmds.length > 0 &&
+    cmds.some(c => typeof c === "string" && String(c).trim().length > 0);
+  if (!hasValidCmds) {
+    reasons.push(UNRECOVERABLE_PACKET_REASONS.MISSING_VERIFICATION_COUPLING);
   }
 
   return { recoverable: reasons.length === 0, reasons };

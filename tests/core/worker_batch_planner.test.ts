@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildRoleExecutionBatches } from "../../src/core/worker_batch_planner.js";
+import { buildRoleExecutionBatches, MAX_PLANS_PER_DEPENDENCY_BATCH } from "../../src/core/worker_batch_planner.js";
 
 function buildPlan(index) {
   return {
@@ -227,6 +227,97 @@ describe("worker_batch_planner — cross-role wave ordering", () => {
     assert.equal(batches.length, 1);
     assert.equal(batches[0].wave, 1);
     assert.equal(batches[0].plans.length, 3);
+  });
+});
+
+// ── Task 4 hardening: dependency-sensitive batch splitting ────────────────────
+
+describe("worker_batch_planner — dependency-sensitive batch size limit (Task 4)", () => {
+  const baseConfig = { copilot: { defaultModel: "Claude Sonnet 4.6", modelContextReserveTokens: 0 } };
+
+  it("exports MAX_PLANS_PER_DEPENDENCY_BATCH as a positive number", () => {
+    assert.ok(typeof MAX_PLANS_PER_DEPENDENCY_BATCH === "number");
+    assert.ok(MAX_PLANS_PER_DEPENDENCY_BATCH > 0);
+  });
+
+  it("does not split batches of plans with no dependency declarations", () => {
+    // 5 plans without dependsOn/dependencies — should not be split beyond normal packing
+    const plans = Array.from({ length: 5 }, (_, i) => ({
+      role: "Evolution Worker",
+      task: `T${i}`,
+      wave: 1,
+    }));
+    const batches = buildRoleExecutionBatches(plans, baseConfig);
+    // All fit in one batch (small token count) — no spurious splits
+    assert.equal(batches.length, 1);
+    assert.equal(batches[0].plans.length, 5);
+  });
+
+  it("splits a batch that exceeds MAX_PLANS_PER_DEPENDENCY_BATCH when plans carry dependsOn", () => {
+    // 6 plans all with dependsOn — each batch must have ≤ MAX_PLANS_PER_DEPENDENCY_BATCH plans
+    const plans = Array.from({ length: 6 }, (_, i) => ({
+      role: "Evolution Worker",
+      task: `dep-task-${i}`,
+      wave: 1,
+      dependsOn: [`dep-task-${i - 1}`].filter(x => x !== "dep-task--1"),
+    }));
+    const batches = buildRoleExecutionBatches(plans, baseConfig);
+    for (const batch of batches) {
+      assert.ok(
+        (batch.plans as any[]).length <= MAX_PLANS_PER_DEPENDENCY_BATCH,
+        `batch has ${(batch.plans as any[]).length} plans > MAX_PLANS_PER_DEPENDENCY_BATCH=${MAX_PLANS_PER_DEPENDENCY_BATCH}`
+      );
+    }
+    // All plans must still be present
+    const allPlans = batches.flatMap(b => b.plans);
+    assert.equal(allPlans.length, 6);
+  });
+
+  it("splits a batch that exceeds MAX_PLANS_PER_DEPENDENCY_BATCH when plans carry dependencies", () => {
+    const plans = Array.from({ length: 4 }, (_, i) => ({
+      role: "Evolution Worker",
+      task: `task-${i}`,
+      wave: 1,
+      dependencies: [`task-${i - 1}`].filter(x => x !== "task--1"),
+    }));
+    const batches = buildRoleExecutionBatches(plans, baseConfig);
+    for (const batch of batches) {
+      assert.ok(
+        (batch.plans as any[]).length <= MAX_PLANS_PER_DEPENDENCY_BATCH,
+        `dependency batch too large: ${(batch.plans as any[]).length} > ${MAX_PLANS_PER_DEPENDENCY_BATCH}`
+      );
+    }
+    const allPlans = batches.flatMap(b => b.plans);
+    assert.equal(allPlans.length, 4);
+  });
+
+  it("respects config override for maxPlansPerDependencyBatch", () => {
+    const configWithOverride = {
+      ...baseConfig,
+      runtime: { maxPlansPerDependencyBatch: 2 }
+    };
+    const plans = Array.from({ length: 5 }, (_, i) => ({
+      role: "Evolution Worker",
+      task: `task-${i}`,
+      wave: 1,
+      dependsOn: i > 0 ? [`task-${i - 1}`] : [],
+    }));
+    const batches = buildRoleExecutionBatches(plans, configWithOverride);
+    for (const batch of batches) {
+      assert.ok(
+        (batch.plans as any[]).length <= 2,
+        `batch must not exceed config override of 2; got ${(batch.plans as any[]).length}`
+      );
+    }
+    const allPlans = batches.flatMap(b => b.plans);
+    assert.equal(allPlans.length, 5);
+  });
+
+  it("negative path: a single plan with dependsOn is not split (nothing to split)", () => {
+    const plans = [{ role: "Evolution Worker", task: "solo", wave: 1, dependsOn: ["other"] }];
+    const batches = buildRoleExecutionBatches(plans, baseConfig);
+    assert.equal(batches.length, 1);
+    assert.equal(batches[0].plans.length, 1);
   });
 });
 

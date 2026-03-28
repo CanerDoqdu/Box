@@ -5,6 +5,16 @@ import { resolveDependencyGraph, GRAPH_STATUS } from "./dependency_graph_resolve
 const CHARS_PER_TOKEN = 4;
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 100000;
 const DEFAULT_CONTEXT_RESERVE_TOKENS = 12000;
+
+/**
+ * Maximum number of plans per batch when any plan in the batch carries explicit
+ * dependency declarations (dependsOn / dependencies fields).  Dependency-linked
+ * plans must be kept small so a worker can reason about the full dependency chain
+ * without hitting context limits or missing inter-plan ordering constraints.
+ *
+ * Configurable via config.runtime.maxPlansPerDependencyBatch (default: 3).
+ */
+export const MAX_PLANS_PER_DEPENDENCY_BATCH = 3;
 const KNOWN_MODEL_CONTEXT_WINDOWS = [
   { pattern: /gpt\s*[- ]?5\.[123]\s*[- ]?codex/i, tokens: 400000 },
   { pattern: /claude\s+sonnet\s+4\.6/i, tokens: 160000 },
@@ -397,7 +407,36 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
         const wavePlans = plansByWave.get(waveNum)!;
         const selection = chooseModelForRolePlans(config, roleName, wavePlans, taskKind);
 
-        selection.batches.forEach((batch, index) => {
+        // ── Dependency-sensitive batch splitting ──────────────────────────
+        // When any plan in a model-selected batch carries explicit dependency
+        // declarations, split oversized batches to MAX_PLANS_PER_DEPENDENCY_BATCH
+        // plans each.  This prevents a worker from receiving a large context
+        // bundle where dependency ordering can be silently ignored.
+        const maxDepBatch = Number(
+          (config as any)?.runtime?.maxPlansPerDependencyBatch ?? MAX_PLANS_PER_DEPENDENCY_BATCH
+        );
+        const splitBatches: Array<{ plans: unknown[]; estimatedTokens: number }> = [];
+        for (const batch of selection.batches) {
+          const batchPlans = batch.plans as any[];
+          const hasDeps = batchPlans.some(p =>
+            (Array.isArray(p.dependsOn)    && p.dependsOn.length    > 0) ||
+            (Array.isArray(p.dependencies) && p.dependencies.length > 0)
+          );
+          if (hasDeps && batchPlans.length > maxDepBatch) {
+            // Chunk into groups of maxDepBatch; distribute estimated tokens proportionally
+            for (let offset = 0; offset < batchPlans.length; offset += maxDepBatch) {
+              const chunk = batchPlans.slice(offset, offset + maxDepBatch);
+              splitBatches.push({
+                plans: chunk,
+                estimatedTokens: Math.round(batch.estimatedTokens * chunk.length / batchPlans.length),
+              });
+            }
+          } else {
+            splitBatches.push(batch);
+          }
+        }
+
+        splitBatches.forEach((batch, index) => {
           flattened.push({
             role: roleName,
             plans: batch.plans,
@@ -409,8 +448,8 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
             sharedBranch,
             wave: waveNum,
             roleBatchIndex: index + 1,
-            roleBatchTotal: selection.batches.length,
-            githubFinalizer: index === selection.batches.length - 1,
+            roleBatchTotal: splitBatches.length,
+            githubFinalizer: index === splitBatches.length - 1,
           });
         });
       }
