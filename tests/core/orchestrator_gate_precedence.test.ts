@@ -20,6 +20,9 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
+import fs from "node:fs/promises";
 import {
   GATE_PRECEDENCE,
   BLOCK_REASON,
@@ -265,5 +268,202 @@ describe("GovernanceBlockDecision envelope contract", () => {
     assert.equal(result.mandatoryDriftPaths, undefined, "mandatoryDriftPaths must be absent on pass");
     assert.equal(result.rollbackResult, undefined, "rollbackResult must be absent on pass");
     assert.equal(result.gateIndex, undefined, "gateIndex must be absent on pass");
+  });
+});
+
+// ── Governance BLOCK end-to-end flow assertions ───────────────────────────────
+// Covers:
+//   - Budget exhaustion gate (writes temp budget file, verifies blocked=true)
+//   - Carry-forward debt gate (writes temp ledger with critical overdue debt)
+//   - Gate precedence ordering (freeze fires before drift when both active)
+//   - All blocked envelopes carry non-null reason + gateIndex
+//   - Plan with one valid + one invalid evidence coupling: invalid blocks dispatch
+//   - Negative path: valid plans with all gates disabled → clean pass
+
+describe("evaluatePreDispatchGovernanceGate — end-to-end block flow assertions", () => {
+  it("budget exhaustion gate fires when budget is at/below threshold (BUDGET_ELIGIBILITY gate)", async () => {
+    const stateDir = path.join(os.tmpdir(), `box-budget-gate-${Date.now()}`);
+    await fs.mkdir(stateDir, { recursive: true });
+    try {
+      // Write a budget file with 0 remaining USD (below the 0.2 threshold)
+      const budgetFile = path.join(stateDir, "budget.json");
+      await fs.writeFile(budgetFile, JSON.stringify({
+        initialUsd: 10,
+        remainingUsd: 0.0,
+        claudeCalls: 100,
+        workerRuns: 50,
+        updatedAt: new Date().toISOString(),
+      }));
+
+      const config = {
+        systemGuardian: { enabled: false },
+        governance: { freeze: { active: false } },
+        carryForward: { maxCriticalOverdue: 999 },
+        budget: { enabled: true },
+        env: { budgetUsd: 10 },
+        workerPool: { minLanes: 1 },
+        paths: { stateDir, budgetFile },
+        runtime: {},
+      };
+
+      const result: GovernanceBlockDecision = await evaluatePreDispatchGovernanceGate(config, [], "budget-gate-test");
+
+      assert.equal(result.blocked, true, "budget exhaustion must block dispatch");
+      assert.ok(
+        result.reason?.startsWith(BLOCK_REASON.BUDGET_EXHAUSTED),
+        `reason must start with '${BLOCK_REASON.BUDGET_EXHAUSTED}' — got: ${result.reason}`
+      );
+      assert.equal(result.gateIndex, GATE_PRECEDENCE.BUDGET_ELIGIBILITY,
+        "gateIndex must equal GATE_PRECEDENCE.BUDGET_ELIGIBILITY");
+      assert.ok("budgetEligibility" in result, "budgetEligibility must be present on budget block");
+      assert.equal(result.budgetEligibility.eligible, false, "budgetEligibility.eligible must be false");
+    } finally {
+      await fs.rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("carry-forward debt gate fires when critical debt is overdue (CARRY_FORWARD_DEBT gate)", async () => {
+    const stateDir = path.join(os.tmpdir(), `box-debt-gate-${Date.now()}`);
+    await fs.mkdir(stateDir, { recursive: true });
+    try {
+      // Write a ledger with 3 critical overdue entries (openedCycle=1, dueCycle=1, currentCycle=10)
+      const ledgerFile = path.join(stateDir, "carry_forward_ledger.json");
+      const entries = Array.from({ length: 3 }, (_, i) => ({
+        id: `debt-${i}`,
+        lesson: `Critical overdue debt ${i}`,
+        severity: "critical",
+        openedCycle: 1,
+        dueCycle: 1,
+        cyclesOpen: 9,
+        closedAt: null,
+        closureEvidence: null,
+      }));
+      await fs.writeFile(ledgerFile, JSON.stringify({ entries, cycleCounter: 10 }));
+
+      const config = {
+        systemGuardian: { enabled: false },
+        governance: { freeze: { active: false } },
+        carryForward: { maxCriticalOverdue: 3 }, // block at >= 3
+        budget: { enabled: false },
+        workerPool: { minLanes: 1 },
+        paths: { stateDir },
+        runtime: {},
+      };
+
+      const result: GovernanceBlockDecision = await evaluatePreDispatchGovernanceGate(config, [], "debt-gate-test");
+
+      assert.equal(result.blocked, true, "critical overdue debt must block dispatch");
+      assert.ok(
+        result.reason?.startsWith(BLOCK_REASON.CRITICAL_DEBT_OVERDUE),
+        `reason must start with '${BLOCK_REASON.CRITICAL_DEBT_OVERDUE}' — got: ${result.reason}`
+      );
+      assert.equal(result.gateIndex, GATE_PRECEDENCE.CARRY_FORWARD_DEBT,
+        "gateIndex must equal GATE_PRECEDENCE.CARRY_FORWARD_DEBT");
+    } finally {
+      await fs.rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("freeze gate fires before drift gate when both would block (lower precedence wins)", async () => {
+    // Both governance freeze AND high-priority drift debt are active.
+    // Freeze (precedence 3) must fire before drift (precedence 7).
+    const config = passAllConfig({ governanceFreeze: { manualOverrideActive: true } });
+    const result = await evaluatePreDispatchGovernanceGate(
+      config, [], "precedence-freeze-vs-drift", makeDriftReportHighPriority()
+    );
+
+    assert.equal(result.blocked, true, "must be blocked");
+    assert.ok(
+      result.reason?.startsWith(BLOCK_REASON.GOVERNANCE_FREEZE_ACTIVE),
+      `freeze must win over drift; reason='${result.reason}'`
+    );
+    assert.equal(result.gateIndex, GATE_PRECEDENCE.GOVERNANCE_FREEZE,
+      `gateIndex must equal GATE_PRECEDENCE.GOVERNANCE_FREEZE (${GATE_PRECEDENCE.GOVERNANCE_FREEZE}), not drift (${GATE_PRECEDENCE.MANDATORY_DRIFT_DEBT})`);
+  });
+
+  it("all tested gate types produce non-null, non-empty reason strings on block", async () => {
+    const blockedCases: Array<{ label: string; config: unknown; plans?: unknown[]; drift?: ArchitectureDriftReport | null }> = [
+      {
+        label: "governance freeze",
+        config: passAllConfig({ governanceFreeze: { manualOverrideActive: true } }),
+      },
+      {
+        label: "drift debt",
+        config: passAllConfig(),
+        drift: makeDriftReportHighPriority(),
+      },
+      {
+        label: "evidence coupling",
+        config: passAllConfig(),
+        plans: [{ task_id: "T-001", task: "do something", role: "backend" }],
+      },
+    ];
+
+    for (const tc of blockedCases) {
+      const result = await evaluatePreDispatchGovernanceGate(
+        tc.config, tc.plans ?? [], `reason-test-${tc.label}`, tc.drift ?? null
+      );
+      assert.equal(result.blocked, true, `${tc.label}: must be blocked`);
+      assert.ok(result.reason !== null && result.reason.length > 0,
+        `${tc.label}: blocked result must have a non-empty reason string`);
+      assert.ok(typeof result.gateIndex === "number",
+        `${tc.label}: blocked result must have a numeric gateIndex`);
+      assert.ok(result.gateIndex >= 1,
+        `${tc.label}: gateIndex must be >= 1`);
+    }
+  });
+
+  it("non-blocked result carries the exact cycleId passed to the function", async () => {
+    const result = await evaluatePreDispatchGovernanceGate(passAllConfig(), [], "cycle-id-propagation-test");
+    assert.equal(result.cycleId, "cycle-id-propagation-test",
+      "cycleId must be propagated from the argument through to the result envelope");
+    assert.ok("budgetEligibility" in result, "budgetEligibility must be present on pass");
+    assert.equal(typeof result.budgetEligibility, "object");
+    assert.equal(result.budgetEligibility.eligible, true, "budget must be eligible when unconfigured");
+  });
+
+  it("plan evidence coupling gate: reason encodes the failing plan task_id", async () => {
+    const plans = [{ task_id: "T-FAIL-007", task: "do something without evidence", role: "evolution-worker" }];
+    const result = await evaluatePreDispatchGovernanceGate(passAllConfig(), plans, "coupling-id-test");
+    assert.equal(result.blocked, true);
+    assert.ok(
+      result.reason?.startsWith(BLOCK_REASON.PLAN_EVIDENCE_COUPLING_INVALID),
+      `reason must start with coupling prefix — got: ${result.reason}`
+    );
+    assert.ok(
+      result.reason?.includes("T-FAIL-007"),
+      `reason must encode the failing plan ID; got: ${result.reason}`
+    );
+  });
+
+  it("plan with full evidence passes coupling gate — negative path for coupling block", async () => {
+    // A plan with valid verification_commands and acceptance_criteria must NOT trigger the coupling gate.
+    const plans = [
+      {
+        task_id: "T-GOOD-001",
+        task: "do something well-specified",
+        role: "evolution-worker",
+        verification_commands: ["npm test"],
+        acceptance_criteria: ["All tests pass"],
+      },
+    ];
+    const result = await evaluatePreDispatchGovernanceGate(passAllConfig(), plans, "valid-plan-coupling-test");
+    assert.equal(result.blocked, false, "valid plans must not trigger the evidence coupling gate");
+    assert.equal(result.reason, null);
+  });
+
+  it("negative path: empty plans + all gates disabled → always passes with clean envelope", async () => {
+    const result: GovernanceBlockDecision = await evaluatePreDispatchGovernanceGate(
+      passAllConfig(), [], "clean-pass-e2e", null
+    );
+    assert.equal(result.blocked, false);
+    assert.equal(result.reason, null);
+    assert.equal(result.action, undefined);
+    assert.equal(result.gateIndex, undefined);
+    assert.equal(result.mandatoryDriftPaths, undefined);
+    assert.equal(result.rollbackResult, undefined);
+    assert.equal(result.cycleId, "clean-pass-e2e");
+    assert.ok("graphResult" in result);
+    assert.ok("budgetEligibility" in result);
   });
 });

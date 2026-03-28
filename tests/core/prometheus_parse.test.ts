@@ -1250,6 +1250,203 @@ describe("buildDriftDebtTasks — quality gate contract compliance", () => {
   });
 });
 
+// ── Task: parser core/context confidence composition recalibration ───────────
+// Covers edge cases in the channel-split formula:
+//   parserCoreConfidence  = coreBase − (non-context penalties), floored at 0.1
+//   parserContextPenalty  = sum of context-channel penalties (uncapped)
+//   parserConfidence      = max(0.1, parserCoreConfidence − parserContextPenalty)
+//
+// Key invariants:
+//   1. parserConfidence is always >= 0.1
+//   2. When core − context >= 0.1, parserConfidence == core − context (channel invariant holds)
+//   3. When core − context < 0.1, floor kicks in — channel invariant intentionally breaks
+//   4. parserCoreConfidence absorbs only healthField/requestBudget penalties
+//   5. parserContextPenalty absorbs only bottleneckCoverage/architectureDrift penalties
+
+describe("normalizePrometheusParsedOutput — confidence composition recalibration", () => {
+  it("combined core + context penalties: core absorbs healthField/budget, context absorbs bottleneck", () => {
+    // JSON plans (base=1.0) + inferred health (core -0.1) + no budget (core -0.1)
+    // + 3 of 4 bottlenecks uncovered → context penalty
+    const parsed = {
+      plans: [
+        { task: "Fix sequential dispatch", role: "evolution-worker", _fromBottleneck: "BN-1" },
+      ],
+      // No projectHealth → healthField inferred → core -0.1
+      // No requestBudget → budget fallback → core -0.1
+      topBottlenecks: [
+        { id: "BN-1", title: "Sequential dispatch", severity: "high" },
+        { id: "BN-2", title: "Trust boundary missing", severity: "critical" },
+        { id: "BN-3", title: "Parser fence drop", severity: "medium" },
+        { id: "BN-4", title: "Budget stale", severity: "low" },
+      ],
+      requestBudget: { estimatedPremiumRequestsTotal: 1, errorMarginPercent: 15, hardCapTotal: 2 },
+    };
+    const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
+
+    // core = 1.0 − 0.1 (healthField) = 0.9; no budget penalty (requestBudget provided)
+    assert.equal(result.parserCoreConfidence, 0.9,
+      "core channel = 1.0 base − 0.1 healthField inferred; budget provided so no budget penalty");
+    // context = bottleneck coverage penalty (>0 because 3 of 4 uncovered)
+    assert.ok(result.parserContextPenalty > 0,
+      "context channel must be positive when bottleneck coverage is below floor");
+    // aggregate = max(0.1, 0.9 − context)
+    const expectedAggregate = Math.max(0.1, Math.round((result.parserCoreConfidence - result.parserContextPenalty) * 100) / 100);
+    assert.equal(result.parserConfidence, expectedAggregate,
+      "aggregate must equal max(0.1, core − context)");
+  });
+
+  it("context penalty large enough to push aggregate to floor — documents floor-break behavior", () => {
+    // Construct a scenario where parserCoreConfidence = 0.1 (minimum)
+    // and there is a context penalty, so aggregate floors at 0.1.
+    // Use narrative plans (base=0.5) + health (-0.1) + budget (-0.1) = 0.3 core;
+    // then add enough bottleneck uncovered to push context penalty > 0.3.
+    // With 6 uncovered bottlenecks, delta = -min(0.30, 6*0.05) = -0.30 (capped).
+    const parsed = {
+      waves: [{ wave: 1, tasks: ["Fix one thing"] }],
+      // No projectHealth, no requestBudget → core = 0.5 − 0.1 − 0.1 = 0.3
+      topBottlenecks: Array.from({ length: 6 }, (_, i) => ({
+        id: `BN-${i + 1}`, title: `Bottleneck ${i + 1}`, severity: "critical"
+      })),
+      // No plans address any bottleneck → all 6 uncovered → max context penalty = 0.30
+    };
+    const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
+
+    assert.ok(result.parserContextPenalty > 0, "context penalty must be positive");
+    // parserConfidence must always be >= 0.1 regardless of penalties
+    assert.ok(result.parserConfidence >= 0.1,
+      `parserConfidence must always be >= 0.1; got ${result.parserConfidence}`);
+
+    // When floor kicks in, the simple arithmetic invariant breaks — document this explicitly
+    const rawDiff = Math.round((result.parserCoreConfidence - result.parserContextPenalty) * 100) / 100;
+    if (rawDiff < 0.1) {
+      // Floor-break case: parserConfidence is 0.1, not rawDiff
+      assert.equal(result.parserConfidence, 0.1,
+        "when core − context < 0.1, floor must be applied and parserConfidence must equal 0.1");
+    } else {
+      // Normal case: invariant holds
+      assert.equal(result.parserConfidence, rawDiff,
+        "when core − context >= 0.1, parserConfidence must equal core − context");
+    }
+  });
+
+  it("parserConfidence is always >= 0.1 across all penalty combinations (property invariant)", () => {
+    const cases = [
+      // Full score — no penalties
+      { projectHealth: "good", plans: [{ task: "x", role: "evolution-worker" }], requestBudget: { estimatedPremiumRequestsTotal: 1, errorMarginPercent: 15, hardCapTotal: 2 } },
+      // Narrative plans only
+      { waves: [{ wave: 1, tasks: ["x"] }] },
+      // No output at all
+      {},
+      // All penalties: no plans, no health, no budget, max bottlenecks
+      { topBottlenecks: Array.from({ length: 10 }, (_, i) => ({ id: `BN-${i}`, title: `BN ${i}`, severity: "critical" })) },
+      // Health alias
+      { projectHealth: "healthy", plans: [{ task: "x", role: "evolution-worker" }] },
+    ];
+    for (const parsed of cases) {
+      const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
+      assert.ok(result.parserConfidence >= 0.1,
+        `parserConfidence must never go below 0.1; got ${result.parserConfidence} for input: ${JSON.stringify(parsed)}`);
+    }
+  });
+
+  it("channel invariant holds exactly when floor is not triggered", () => {
+    // JSON plans (base=1.0) + explicit health (no penalty) + budget provided (no penalty)
+    // + 1 of 3 bottlenecks covered → context penalty fires (coverage=0.33 < FLOOR=0.5)
+    // but core − context = 1.0 − small_penalty >> 0.1 so floor does NOT kick in
+    const parsed = {
+      projectHealth: "good",
+      plans: [
+        { task: "Fix sequential worker dispatch wave infrastructure", role: "evolution-worker", _fromBottleneck: "BN-1" },
+      ],
+      topBottlenecks: [
+        { id: "BN-1", title: "Sequential dispatch ignores wave infrastructure", severity: "high" },
+        { id: "BN-2", title: "Trust boundary contract missing enforcement gate", severity: "critical" },
+        { id: "BN-3", title: "Parser fence handling drops multiline blocks", severity: "medium" },
+      ],
+      requestBudget: { estimatedPremiumRequestsTotal: 1, errorMarginPercent: 15, hardCapTotal: 2 },
+    };
+    const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
+
+    // core = 1.0 (JSON plans, explicit health, budget provided)
+    assert.equal(result.parserCoreConfidence, 1.0, "core must be 1.0 when no core penalties apply");
+    // context > 0 (BN-2 and BN-3 uncovered; coverage=1/3 < 0.5 → penalty fires)
+    assert.ok(result.parserContextPenalty > 0,
+      `context penalty must be positive when coverage is below floor; got parserContextPenalty=${result.parserContextPenalty}`);
+    // channel invariant: aggregate = core − context when above floor
+    const expected = Math.round((result.parserCoreConfidence - result.parserContextPenalty) * 100) / 100;
+    if (expected >= 0.1) {
+      assert.equal(result.parserConfidence, expected,
+        "channel invariant: parserConfidence must equal parserCoreConfidence − parserContextPenalty when above floor");
+    }
+  });
+
+  it("parserCoreConfidence floors at 0.1 even with stacked core penalties", () => {
+    // Narrative fallback (base=0.5) with many health/budget penalties can't go below 0.1.
+    // Use: base=0.1 (no plans) + health_missing -0.2 + budget -0.1 → clamped at 0.1 each step.
+    const result = normalizePrometheusParsedOutput({}, { raw: "" });
+
+    assert.equal(result.parserCoreConfidence, 0.1,
+      "core confidence must floor at 0.1 when cumulative core penalties exceed base");
+    assert.ok(result.parserCoreConfidence >= 0.1,
+      "core confidence must never go below 0.1");
+  });
+
+  it("requestBudget penalty goes to core channel, not context channel", () => {
+    const parsed = {
+      projectHealth: "good",
+      plans: [{ task: "Fix retry logic", role: "evolution-worker" }],
+      // No requestBudget → fallback penalty
+    };
+    const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
+
+    // core should be reduced (0.9), context should remain 0
+    assert.equal(result.parserCoreConfidence, 0.9,
+      "requestBudget fallback penalty must reduce core confidence, not context");
+    assert.equal(result.parserContextPenalty, 0,
+      "requestBudget fallback must not affect context-penalty channel");
+    assert.equal(result.parserConfidence, 0.9, "aggregate must equal core (0.9) when context is 0");
+  });
+
+  it("healthField penalty goes to core channel, not context channel", () => {
+    const parsed = {
+      plans: [{ task: "Fix retry logic", role: "evolution-worker" }],
+      requestBudget: { estimatedPremiumRequestsTotal: 1, errorMarginPercent: 15, hardCapTotal: 2 },
+      // No projectHealth → inferred → healthField penalty -0.1 goes to core
+    };
+    const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
+
+    assert.equal(result.parserCoreConfidence, 0.9,
+      "healthField inferred penalty must reduce core confidence, not context");
+    assert.equal(result.parserContextPenalty, 0,
+      "healthField penalty must not affect context-penalty channel");
+  });
+
+  it("rounding: parserCoreConfidence, parserContextPenalty, and parserConfidence are all 2-decimal values", () => {
+    const parsed = {
+      projectHealth: "good",
+      topBottlenecks: [
+        { id: "BN-1", title: "Wave dispatch broken", severity: "high" },
+        { id: "BN-2", title: "Trust boundary missing", severity: "critical" },
+        { id: "BN-3", title: "Parser fence drop", severity: "medium" },
+      ],
+      plans: [
+        { task: "Fix wave dispatch broken", role: "evolution-worker", _fromBottleneck: "BN-1" },
+      ],
+      requestBudget: { estimatedPremiumRequestsTotal: 1, errorMarginPercent: 15, hardCapTotal: 2 },
+    };
+    const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
+
+    // All three must be rounded to exactly 2 decimal places
+    const isRounded = (n: number) => Math.round(n * 100) / 100 === n;
+    assert.ok(isRounded(result.parserCoreConfidence),
+      `parserCoreConfidence=${result.parserCoreConfidence} must be a 2-decimal number`);
+    assert.ok(isRounded(result.parserContextPenalty),
+      `parserContextPenalty=${result.parserContextPenalty} must be a 2-decimal number`);
+    assert.ok(isRounded(result.parserConfidence),
+      `parserConfidence=${result.parserConfidence} must be a 2-decimal number`);
+  });
+});
+
 // ── Task 1: capacityDelta / requestROI hard filter at generation time ─────────
 
 import { validateAllPlans, PLAN_VIOLATION_SEVERITY } from "../../src/core/plan_contract_validator.js";

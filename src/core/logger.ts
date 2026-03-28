@@ -29,11 +29,12 @@ export function error(message, data = undefined) {
 export function chatLog(stateDir, speaker, message) {
   try {
     const ts = new Date().toISOString().replace("T", " ").slice(0, 19);
-    appendFileSync(
-      path.join(stateDir, "leadership_live.txt"),
-      `[${ts}] ${speaker.padEnd(20)} ${message}\n`,
-      "utf8"
-    );
+    const line = `[${ts}] ${speaker.padEnd(20)} ${message}\n`;
+    // Mirror to leadership_live.txt (combined view)
+    appendFileSync(path.join(stateDir, "leadership_live.txt"), line, "utf8");
+    // Mirror to per-role live file so each agent's log shows its own messages
+    const slug = String(speaker).trim().toLowerCase().replace(/\s+/g, "-");
+    appendFileSync(path.join(stateDir, `live_worker_${slug}.log`), line, "utf8");
   } catch { /* non-critical */ }
 }
 
