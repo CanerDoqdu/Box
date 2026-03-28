@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildRoleExecutionBatches, MAX_PLANS_PER_DEPENDENCY_BATCH } from "../../src/core/worker_batch_planner.js";
+import { buildRoleExecutionBatches, MAX_PLANS_PER_DEPENDENCY_BATCH, computeCriticalPathScores } from "../../src/core/worker_batch_planner.js";
 
 function buildPlan(index) {
   return {
@@ -369,5 +369,136 @@ describe("worker_batch_planner — wave-boundary enforcement", () => {
       const waves = new Set(batch.plans.map((p: any) => p.wave));
       assert.equal(waves.size, 1);
     }
+  });
+});
+
+// ── Critical-path scoring ─────────────────────────────────────────────────────
+
+describe("worker_batch_planner — computeCriticalPathScores", () => {
+  it("leaf tasks (no dependents) score 0", () => {
+    const tasks = [
+      { id: "A", dependsOn: [] },
+      { id: "B", dependsOn: [] },
+    ];
+    const scores = computeCriticalPathScores(tasks);
+    assert.equal(scores.get("A"), 0);
+    assert.equal(scores.get("B"), 0);
+  });
+
+  it("a linear chain A→B→C gives A=2, B=1, C=0", () => {
+    // C depends on B; B depends on A.
+    // A has 2 levels of downstream work, B has 1, C has 0.
+    const tasks = [
+      { id: "A", dependsOn: [] },
+      { id: "B", dependsOn: ["A"] },
+      { id: "C", dependsOn: ["B"] },
+    ];
+    const scores = computeCriticalPathScores(tasks);
+    assert.equal(scores.get("A"), 2, "A is upstream of B and C");
+    assert.equal(scores.get("B"), 1, "B is upstream of C only");
+    assert.equal(scores.get("C"), 0, "C is a leaf");
+  });
+
+  it("diamond DAG: A→B, A→C, B→D, C→D — A scores highest", () => {
+    // D depends on B and C; B and C both depend on A.
+    const tasks = [
+      { id: "A", dependsOn: [] },
+      { id: "B", dependsOn: ["A"] },
+      { id: "C", dependsOn: ["A"] },
+      { id: "D", dependsOn: ["B", "C"] },
+    ];
+    const scores = computeCriticalPathScores(tasks);
+    assert.equal(scores.get("D"), 0);
+    assert.equal(scores.get("B"), 1);
+    assert.equal(scores.get("C"), 1);
+    assert.equal(scores.get("A"), 2);
+  });
+
+  it("tasks not known to any other task all score 0", () => {
+    const tasks = [
+      { id: "X", dependsOn: [] },
+      { id: "Y", dependsOn: [] },
+      { id: "Z", dependsOn: [] },
+    ];
+    const scores = computeCriticalPathScores(tasks);
+    for (const t of tasks) assert.equal(scores.get(t.id), 0);
+  });
+
+  it("negative path: empty task array returns empty map", () => {
+    const scores = computeCriticalPathScores([]);
+    assert.equal(scores.size, 0);
+  });
+
+  it("negative path: cycle guard returns 0 instead of infinite recursion", () => {
+    // A depends on B, B depends on A — cycle. Guard must not throw.
+    const tasks = [
+      { id: "A", dependsOn: ["B"] },
+      { id: "B", dependsOn: ["A"] },
+    ];
+    assert.doesNotThrow(() => computeCriticalPathScores(tasks));
+    const scores = computeCriticalPathScores(tasks);
+    // Scores may be 0 due to cycle guard — just verify they are non-negative numbers
+    assert.ok((scores.get("A") ?? 0) >= 0);
+    assert.ok((scores.get("B") ?? 0) >= 0);
+  });
+});
+
+// ── Critical-path ordering within a wave ─────────────────────────────────────
+
+describe("worker_batch_planner — critical-path dispatch ordering", () => {
+  const baseConfig = { copilot: { defaultModel: "Claude Sonnet 4.6", modelContextReserveTokens: 0 } };
+
+  it("within a wave, the task with the longest downstream chain is dispatched first", () => {
+    // chain: root → mid → leaf (all wave 1)
+    // root has the longest downstream path and must appear first in the output.
+    const leaf = { role: "Evolution Worker", task: "leaf-task",  wave: 1, dependsOn: ["mid-task"] };
+    const mid  = { role: "Evolution Worker", task: "mid-task",   wave: 1, dependsOn: ["root-task"] };
+    const root = { role: "Evolution Worker", task: "root-task",  wave: 1, dependsOn: [] };
+
+    // Pass in reverse order to ensure the sort — not input order — drives placement
+    const batches = buildRoleExecutionBatches([leaf, mid, root], baseConfig);
+    const allPlans = batches.flatMap(b => b.plans) as any[];
+
+    const posRoot = allPlans.findIndex(p => p.task === "root-task");
+    const posMid  = allPlans.findIndex(p => p.task === "mid-task");
+    const posLeaf = allPlans.findIndex(p => p.task === "leaf-task");
+
+    assert.ok(posRoot !== -1, "root-task must be in batches");
+    assert.ok(posMid  !== -1, "mid-task must be in batches");
+    assert.ok(posLeaf !== -1, "leaf-task must be in batches");
+
+    assert.ok(posRoot < posMid,  `root (score 2) must precede mid (score 1); posRoot=${posRoot} posMid=${posMid}`);
+    assert.ok(posMid  < posLeaf, `mid (score 1) must precede leaf (score 0); posMid=${posMid} posLeaf=${posLeaf}`);
+  });
+
+  it("tasks without any dependency hints preserve their original priority order", () => {
+    // No dependsOn/filesInScope — critical-path scores all 0 → fall through to priority
+    const plans = [
+      { role: "Evolution Worker", task: "T0", wave: 1, priority: 0 },
+      { role: "Evolution Worker", task: "T1", wave: 1, priority: 1 },
+      { role: "Evolution Worker", task: "T2", wave: 1, priority: 2 },
+    ];
+    const batches = buildRoleExecutionBatches(plans, baseConfig);
+    const allPlans = batches.flatMap(b => b.plans) as any[];
+    const positions = plans.map(p => allPlans.findIndex(bp => (bp as any).task === p.task));
+    // Priority-0 must come before priority-1, which must come before priority-2
+    assert.ok(positions[0] < positions[1], "priority 0 before priority 1");
+    assert.ok(positions[1] < positions[2], "priority 1 before priority 2");
+  });
+
+  it("wave ordering is never overridden by critical-path scores", () => {
+    // leaf is in wave 1, root is in wave 2 — root depends on leaf.
+    // Even though root has dependents (none), wave 1 tasks must come first.
+    const planA = { role: "Evolution Worker", task: "wave1-task", wave: 1 };
+    const planB = { role: "Evolution Worker", task: "wave2-task", wave: 2, dependsOn: ["wave1-task"] };
+
+    const batches = buildRoleExecutionBatches([planB, planA], baseConfig);
+    const batchA = batches.find(b => b.plans.some((p: any) => p.task === "wave1-task"));
+    const batchB = batches.find(b => b.plans.some((p: any) => p.task === "wave2-task"));
+
+    assert.ok(batchA, "wave1-task must be in some batch");
+    assert.ok(batchB, "wave2-task must be in some batch");
+    assert.ok((batchA as any).bundleIndex < (batchB as any).bundleIndex,
+      "wave-1 batch must precede wave-2 batch regardless of critical-path score");
   });
 });

@@ -826,6 +826,15 @@ async function tryResumeDispatchFromCheckpoint(config, options: { force?: boolea
     forcedResume: force
   });
 
+  // ── Strict wave boundary tracking (resume path) ──────────────────────────
+  // Mirror the same wave-boundary gate used in the primary dispatch path.
+  // Initialise from the wave of the last completed batch if we are resuming
+  // mid-run, so the first crossing event accurately reflects the transition.
+  let resumeCurrentWave: number | null = startIndex > 0
+    ? (typeof (workerBatches[startIndex - 1] as any)?.wave === "number"
+       ? (workerBatches[startIndex - 1] as any).wave : null)
+    : null;
+
   for (let index = startIndex; index < workerBatches.length; index += 1) {
     const stopReq = await readStopRequest(config);
     if (stopReq?.requestedAt) {
@@ -834,6 +843,21 @@ async function tryResumeDispatchFromCheckpoint(config, options: { force?: boolea
     }
 
     const batch = workerBatches[index];
+
+    // ── Wave boundary gate (resume) ────────────────────────────────────────
+    const resumeBatchWave = typeof (batch as any).wave === "number" ? (batch as any).wave : null;
+    if (resumeBatchWave !== null && resumeBatchWave !== resumeCurrentWave) {
+      if (resumeCurrentWave !== null) {
+        await appendProgress(config,
+          `[WAVE_BOUNDARY] Wave ${resumeCurrentWave} complete — all batches succeeded. Crossing to wave ${resumeBatchWave}.`
+        );
+      }
+      resumeCurrentWave = resumeBatchWave;
+      await appendProgress(config,
+        `[WAVE_BOUNDARY] Starting wave ${resumeBatchWave} — batch ${index + 1}/${workerBatches.length}`
+      );
+    }
+
     await safeUpdatePipelineProgress(config, "workers_running", `Resumed worker batch ${index + 1}/${workerBatches.length}: ${batch.role}`, {
       workersTotal: workerBatches.length,
       workersDone: index,
@@ -1786,11 +1810,33 @@ async function runSingleCycle(config) {
   // carry-forward auto-close matching at end of cycle.
   const resolvedPlanItems: Array<{ taskText: string; verificationEvidence: string }> = [];
 
+  // ── Strict wave boundary tracking ──────────────────────────────────────────
+  // Each time the wave number changes, we log an explicit boundary event.
+  // Reaching a new wave boundary in the loop guarantees all preceding wave's
+  // batches completed successfully (the loop returns early on any failure),
+  // giving a hard sequential barrier between waves.
+  let currentDispatchWave: number | null = null;
+
   for (const batch of workerBatches) {
     const stopReq = await readStopRequest(config);
     if (stopReq?.requestedAt) {
       await appendProgress(config, `[CYCLE] Stop requested — halting dispatch`);
       return;
+    }
+
+    // ── Wave boundary gate ───────────────────────────────────────────────────
+    // Detect wave transitions. Arrival here proves all prior-wave batches done.
+    const batchWave = typeof (batch as any).wave === "number" ? (batch as any).wave : null;
+    if (batchWave !== null && batchWave !== currentDispatchWave) {
+      if (currentDispatchWave !== null) {
+        await appendProgress(config,
+          `[WAVE_BOUNDARY] Wave ${currentDispatchWave} complete — all batches succeeded. Crossing to wave ${batchWave}.`
+        );
+      }
+      currentDispatchWave = batchWave;
+      await appendProgress(config,
+        `[WAVE_BOUNDARY] Starting wave ${batchWave} — batch ${workersDone + 1}/${workerBatches.length}`
+      );
     }
 
     await safeUpdatePipelineProgress(config, "workers_running", `Running worker batch ${workersDone + 1}/${workerBatches.length}: ${batch.role}`, {

@@ -222,6 +222,55 @@ function buildSharedBranchName(roleName, plans) {
   return `box/${roleSlug}-${firstTask || "batch"}`;
 }
 
+/**
+ * Compute critical-path scores for a set of tasks.
+ *
+ * Score = length of the longest downstream dependency chain rooted at each task:
+ *   - A task with no downstream dependents scores 0.
+ *   - A task whose dependents have max score S scores S + 1.
+ *
+ * Higher score → task is on the critical path → should be dispatched first
+ * within its wave so the longest tail of dependent work starts as early as
+ * possible.
+ *
+ * The computation is advisory and cycle-safe: if a dependency cycle is present
+ * (which the graph resolver would have caught earlier), the visiting-set guard
+ * returns 0 for any node that re-enters.
+ *
+ * @param tasks - Array of { id: string; dependsOn: string[] } task descriptors.
+ * @returns Map<taskId, criticalPathScore>
+ */
+export function computeCriticalPathScores(
+  tasks: Array<{ id: string; dependsOn: string[] }>
+): Map<string, number> {
+  // Build reverse adjacency: id → ids of tasks that directly depend on it
+  const dependentsOf = new Map<string, string[]>();
+  for (const task of tasks) {
+    if (!dependentsOf.has(task.id)) dependentsOf.set(task.id, []);
+    for (const depId of (task.dependsOn || [])) {
+      if (!dependentsOf.has(depId)) dependentsOf.set(depId, []);
+      dependentsOf.get(depId)!.push(task.id);
+    }
+  }
+
+  const memo = new Map<string, number>();
+
+  function downstreamDepth(id: string, visiting: Set<string>): number {
+    if (memo.has(id)) return memo.get(id)!;
+    if (visiting.has(id)) return 0; // cycle guard — DAG assumption; should not trigger
+    const deps = dependentsOf.get(id) || [];
+    if (deps.length === 0) { memo.set(id, 0); return 0; }
+    const next = new Set([...visiting, id]);
+    const maxChild = deps.reduce((m, d) => Math.max(m, downstreamDepth(d, next)), 0);
+    const score = 1 + maxChild;
+    memo.set(id, score);
+    return score;
+  }
+
+  for (const task of tasks) downstreamDepth(task.id, new Set());
+  return memo;
+}
+
 export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResult = null) {
   // ── Dependency graph resolution ───────────────────────────────────────────
   // When any plan carries explicit dependency or file-scope hints, resolve the
@@ -231,6 +280,10 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
   // Graph resolution is advisory — a failure never blocks scheduling.
   const graphWaveByPlanId = new Map<string, number>();
   const graphConflictList: Array<[string, string]> = [];
+  // Critical-path scores computed from the dependency graph.
+  // Within the same wave, tasks with higher scores are dispatched first so the
+  // longest tail of blocked downstream work is unblocked as early as possible.
+  const criticalPathScoreByPlanId = new Map<string, number>();
 
   const hasGraphHints = (plans as any[]).some(p =>
     (Array.isArray(p.filesInScope)   && p.filesInScope.length   > 0) ||
@@ -258,6 +311,11 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
           graphConflictList.push([cp.taskA, cp.taskB]);
         }
       }
+      // Compute critical-path scores for within-wave ordering.
+      // Runs unconditionally so scores are available even when graph.status
+      // is not OK (e.g. cycle detected) — the scores still reflect declared deps.
+      const scores = computeCriticalPathScores(graphTasks);
+      for (const [id, score] of scores) criticalPathScoreByPlanId.set(id, score);
     } catch {
       // advisory — never block scheduling on graph resolution error
     }
@@ -271,6 +329,13 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
     const waveB = Number(b?.wave ?? graphWaveByPlanId.get(idB) ?? 0);
     const waveDelta = waveA - waveB;
     if (waveDelta !== 0) return waveDelta;
+    // Within the same wave, dispatch critical-path tasks first.
+    // Higher critical-path score means more downstream work is blocked on this
+    // task — running it earlier maximises throughput across the wave.
+    const scoreA = criticalPathScoreByPlanId.get(idA) ?? 0;
+    const scoreB = criticalPathScoreByPlanId.get(idB) ?? 0;
+    const scoreDelta = scoreB - scoreA; // descending: higher score → earlier dispatch
+    if (scoreDelta !== 0) return scoreDelta;
     return Number(a?.priority || 0) - Number(b?.priority || 0);
   });
 
