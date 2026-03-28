@@ -56,3 +56,30 @@ export function parseContractHealth(line: string): ContractHealth | null {
 export function isContractHealthy(health: ContractHealth): boolean {
   return health.env_vars === "pass" && health.payload === "pass" && health.role === "pass";
 }
+
+/**
+ * Named startup-contract verification anchor.
+ *
+ * Emitted once per successful startup, after all contract slots pass.
+ * Downstream gates use this marker to distinguish a freshly-verified
+ * contract from a carry-forward WORKER_CONTRACT_HEALTH line present in
+ * logs from a previous run — closing the recurring carry-forward
+ * ambiguity.
+ *
+ * Format: WORKER_STARTUP_CONTRACT_ANCHOR=verified
+ */
+export const STARTUP_CONTRACT_ANCHOR_KEY = "WORKER_STARTUP_CONTRACT_ANCHOR";
+
+/** Emit the named startup-contract verification anchor line. */
+export function formatStartupContractAnchor(): string {
+  return `${STARTUP_CONTRACT_ANCHOR_KEY}=verified`;
+}
+
+/**
+ * Returns true when the given line contains the startup-contract
+ * verification anchor — confirming this startup cycle completed all
+ * contract checks.
+ */
+export function parseStartupContractAnchor(line: string): boolean {
+  return String(line || "").includes(`${STARTUP_CONTRACT_ANCHOR_KEY}=verified`);
+}

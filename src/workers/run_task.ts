@@ -35,7 +35,7 @@
  */
 
 import process from "node:process";
-import { formatContractHealth } from "./contract_health.js";
+import { formatContractHealth, formatStartupContractAnchor } from "./contract_health.js";
 
 const REQUIRED_VARS = ["WORKER_ROLE", "TASK_PAYLOAD", "TARGET_REPO", "GITHUB_TOKEN"];
 
@@ -80,6 +80,11 @@ function main(): void {
   // WORKER_ROLE was already confirmed non-empty by REQUIRED_VARS check.
   // Emit the full-pass health line to stdout as a first-class runtime gate signal.
   process.stdout.write(formatContractHealth({ env_vars: "pass", payload: "pass", role: "pass" }) + "\n");
+  // Emit the named startup-contract verification anchor immediately after the
+  // health line.  This anchor unambiguously marks that all contract checks
+  // completed in THIS startup cycle — downstream gates use it to distinguish
+  // a fresh verification from a carry-forward health line in stale logs.
+  process.stdout.write(formatStartupContractAnchor() + "\n");
 
   // Container workers are currently invoked by the orchestrator via
   // src/core/worker_runner.js which calls the Copilot CLI directly.

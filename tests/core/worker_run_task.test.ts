@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseContractHealth, isContractHealthy, formatContractHealth } from "../../src/workers/contract_health.js";
+import { parseContractHealth, isContractHealthy, formatContractHealth, parseStartupContractAnchor, formatStartupContractAnchor, STARTUP_CONTRACT_ANCHOR_KEY } from "../../src/workers/contract_health.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ENTRY = path.resolve(__dirname, "../../src/workers/run_task.ts");
@@ -409,5 +409,96 @@ describe("run_task.js — exact named required-env-var contract", () => {
     assert.equal(health!.env_vars, "pass");
     assert.equal(health!.payload, "pass");
     assert.equal(health!.role, "pass");
+  });
+});
+
+// ── Named startup-contract verification anchor ────────────────────────────────
+
+/**
+ * STARTUP_CONTRACT_ANCHOR — explicit named verification anchor.
+ *
+ * These tests pin the named anchor (WORKER_STARTUP_CONTRACT_ANCHOR=verified)
+ * that closes carry-forward ambiguity: downstream gates use this line to
+ * distinguish a freshly-verified contract from a stale health line carried
+ * forward in logs from a previous startup cycle.
+ */
+describe("run_task.js — STARTUP_CONTRACT_ANCHOR named verification anchor", () => {
+  it("STARTUP_CONTRACT_ANCHOR: emits WORKER_STARTUP_CONTRACT_ANCHOR=verified on successful startup", () => {
+    const task = JSON.stringify({ id: "t-anchor", kind: "infrastructure" });
+    const result = run({
+      WORKER_ROLE: "evolution-worker",
+      TASK_PAYLOAD: task,
+      TARGET_REPO: "owner/repo",
+      GITHUB_TOKEN: "ghp_fake",
+    });
+    assert.equal(result.status, 0, "must exit 0 for a valid startup");
+    assert.ok(
+      result.stdout.includes(`${STARTUP_CONTRACT_ANCHOR_KEY}=verified`),
+      `stdout must contain '${STARTUP_CONTRACT_ANCHOR_KEY}=verified' to confirm startup-contract verification completed`
+    );
+  });
+
+  it("STARTUP_CONTRACT_ANCHOR: parseStartupContractAnchor returns true for the anchor line", () => {
+    const anchorLine = formatStartupContractAnchor();
+    assert.equal(anchorLine, `${STARTUP_CONTRACT_ANCHOR_KEY}=verified`);
+    assert.equal(parseStartupContractAnchor(anchorLine), true);
+  });
+
+  it("STARTUP_CONTRACT_ANCHOR: parseStartupContractAnchor returns false for unrelated lines", () => {
+    assert.equal(parseStartupContractAnchor(""), false);
+    assert.equal(parseStartupContractAnchor("WORKER_CONTRACT_HEALTH=env_vars:pass;payload:pass;role:pass"), false);
+    assert.equal(parseStartupContractAnchor("BOX_STATUS=done"), false);
+    assert.equal(parseStartupContractAnchor("[run_task] Worker ready."), false);
+  });
+
+  it("STARTUP_CONTRACT_ANCHOR: anchor appears after contract health line in stdout (post-gate ordering)", () => {
+    const task = JSON.stringify({ id: "t-ordering", kind: "devops" });
+    const result = run({
+      WORKER_ROLE: "noah",
+      TASK_PAYLOAD: task,
+      TARGET_REPO: "owner/repo",
+      GITHUB_TOKEN: "ghp_fake",
+    });
+    assert.equal(result.status, 0);
+
+    const lines = result.stdout.split("\n").filter(l => l.trim().length > 0);
+    const healthIdx = lines.findIndex(l => l.includes("WORKER_CONTRACT_HEALTH="));
+    const anchorIdx = lines.findIndex(l => l.includes(`${STARTUP_CONTRACT_ANCHOR_KEY}=verified`));
+
+    assert.ok(healthIdx >= 0, "WORKER_CONTRACT_HEALTH line must appear in stdout");
+    assert.ok(anchorIdx >= 0, `${STARTUP_CONTRACT_ANCHOR_KEY}=verified line must appear in stdout`);
+    assert.ok(healthIdx < anchorIdx,
+      "contract health line must appear BEFORE the anchor (health gate precedes anchor emission)"
+    );
+  });
+
+  it("negative: STARTUP_CONTRACT_ANCHOR is NOT emitted when env_vars check fails", () => {
+    const result = run({
+      WORKER_ROLE: "",
+      TASK_PAYLOAD: "",
+      TARGET_REPO: "",
+      GITHUB_TOKEN: "",
+    });
+    assert.equal(result.status, 1);
+    const combined = result.stdout + result.stderr;
+    assert.ok(
+      !combined.includes(`${STARTUP_CONTRACT_ANCHOR_KEY}=verified`),
+      "startup-contract anchor must NOT appear when env_vars check fails — it is only emitted after all slots pass"
+    );
+  });
+
+  it("negative: STARTUP_CONTRACT_ANCHOR is NOT emitted when TASK_PAYLOAD is invalid JSON", () => {
+    const result = run({
+      WORKER_ROLE: "noah",
+      TASK_PAYLOAD: "{broken",
+      TARGET_REPO: "owner/repo",
+      GITHUB_TOKEN: "ghp_fake",
+    });
+    assert.equal(result.status, 1);
+    const combined = result.stdout + result.stderr;
+    assert.ok(
+      !combined.includes(`${STARTUP_CONTRACT_ANCHOR_KEY}=verified`),
+      "startup-contract anchor must NOT appear when payload check fails"
+    );
   });
 });
