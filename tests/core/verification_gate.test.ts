@@ -632,3 +632,99 @@ describe("verification_gate — artifact gate non-bypassable (Task 1 hardening)"
     );
   });
 });
+
+// ── Task 3: Explicit merged SHA marker + npm test output block ─────────────────
+
+import { extractMergedSha } from "../../src/core/verification_gate.js";
+
+describe("verification_gate — BOX_MERGED_SHA explicit marker (Task 3)", () => {
+  it("checkPostMergeArtifact detects explicit BOX_MERGED_SHA= marker", () => {
+    const output = "BOX_MERGED_SHA=abc1234f\n# tests 5 pass 5 fail 0";
+    const result = checkPostMergeArtifact(output);
+    assert.equal(result.hasSha, true);
+    assert.equal(result.hasExplicitShaMarker, true);
+    assert.equal(result.mergedSha, "abc1234f");
+  });
+
+  it("checkPostMergeArtifact falls back to loose hex detection when no explicit marker", () => {
+    const output = "Merged abc1234f into main\n# tests 5 pass";
+    const result = checkPostMergeArtifact(output);
+    assert.equal(result.hasSha, true);
+    assert.equal(result.hasExplicitShaMarker, false);
+    assert.equal(result.mergedSha, null, "loose SHA detection must not set mergedSha");
+  });
+
+  it("extractMergedSha returns the SHA from BOX_MERGED_SHA= marker", () => {
+    const sha = extractMergedSha("BOX_MERGED_SHA=deadbeef1234567");
+    assert.equal(sha, "deadbeef1234567");
+  });
+
+  it("extractMergedSha returns null when marker is absent", () => {
+    assert.equal(extractMergedSha("Merged abc123 into main"), null);
+    assert.equal(extractMergedSha(""), null);
+  });
+
+  it("extractMergedSha is case-insensitive for the marker", () => {
+    assert.equal(extractMergedSha("box_merged_sha=abc1234f"), "abc1234f");
+  });
+
+  it("checkPostMergeArtifact detects explicit NPM test output block markers", () => {
+    const output = [
+      "BOX_MERGED_SHA=abc1234",
+      "===NPM TEST OUTPUT START===",
+      "# tests 10",
+      "# pass 10",
+      "# fail 0",
+      "===NPM TEST OUTPUT END===",
+    ].join("\n");
+    const result = checkPostMergeArtifact(output);
+    assert.equal(result.hasExplicitTestBlock, true);
+    assert.equal(result.hasTestOutput, true);
+    assert.equal(result.hasArtifact, true);
+  });
+
+  it("checkPostMergeArtifact hasExplicitTestBlock=false when only loose npm output present", () => {
+    const output = "abc1234 merged\n# tests 10 pass";
+    const result = checkPostMergeArtifact(output);
+    assert.equal(result.hasExplicitTestBlock, false);
+    assert.equal(result.hasTestOutput, true, "loose detection still counts as test output");
+  });
+
+  it("negative path: output with BOX_MERGED_SHA but no test output fails artifact gate", () => {
+    const result = checkPostMergeArtifact("BOX_MERGED_SHA=abc1234");
+    assert.equal(result.hasSha, true);
+    assert.equal(result.hasTestOutput, false);
+    assert.equal(result.hasArtifact, false);
+  });
+
+  it("negative path: output with npm test block but no SHA fails artifact gate", () => {
+    const result = checkPostMergeArtifact(
+      "===NPM TEST OUTPUT START===\n# pass 10\n===NPM TEST OUTPUT END===\n"
+    );
+    assert.equal(result.hasTestOutput, true);
+    assert.equal(result.hasSha, false);
+    assert.equal(result.hasArtifact, false);
+  });
+});
+
+describe("worker_runner — mergedSha extraction in parseWorkerResponse (Task 3)", () => {
+  it("extracts mergedSha from BOX_MERGED_SHA marker in worker output", async () => {
+    const { parseWorkerResponse } = await import("../../src/core/worker_runner.js");
+    const stdout = [
+      "BOX_STATUS=done",
+      "BOX_MERGED_SHA=abc1234f",
+      "# tests 10 pass 10",
+      "VERIFICATION_REPORT: BUILD=pass; TESTS=pass",
+    ].join("\n");
+    const result = parseWorkerResponse(stdout, "");
+    assert.equal((result as any).mergedSha, "abc1234f",
+      "mergedSha must be extracted from BOX_MERGED_SHA marker");
+  });
+
+  it("mergedSha is null when BOX_MERGED_SHA marker is absent", async () => {
+    const { parseWorkerResponse } = await import("../../src/core/worker_runner.js");
+    const result = parseWorkerResponse("BOX_STATUS=done\nSome output without SHA marker", "");
+    assert.equal((result as any).mergedSha, null,
+      "mergedSha must be null when explicit marker is absent");
+  });
+});

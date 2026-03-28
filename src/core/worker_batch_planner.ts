@@ -1,6 +1,7 @@
 import { getRoleRegistry } from "./role_registry.js";
 import { enforceModelPolicy } from "./model_policy.js";
 import { resolveDependencyGraph, GRAPH_STATUS } from "./dependency_graph_resolver.js";
+import { enforceLaneDiversity } from "./capability_pool.js";
 
 const CHARS_PER_TOKEN = 4;
 const DEFAULT_CONTEXT_WINDOW_TOKENS = 100000;
@@ -456,6 +457,24 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
     }
   }
 
+  // ── Lane diversity enforcement ───────────────────────────────────────────────
+  // When a capabilityPoolResult is available (computed by capability_pool before
+  // dispatch), enforce the minimum lane diversity threshold.  A violation is
+  // advisory — it does NOT block scheduling — but it is surfaced on every batch
+  // descriptor so the orchestrator or cycle-analytics can observe and react.
+  //
+  // Configurable via config.runtime.minDiversityLanes (default: 2).
+  const minDiversityLanes = Number(
+    (config as any)?.runtime?.minDiversityLanes ?? 2
+  );
+  const diversityCheck = capabilityPoolResult
+    ? enforceLaneDiversity(capabilityPoolResult, { minLanes: minDiversityLanes })
+    : { meetsMinimum: true, activeLaneCount: 0, warning: "" };
+
+  const diversityViolation = !diversityCheck.meetsMinimum
+    ? { activeLaneCount: diversityCheck.activeLaneCount, minRequired: minDiversityLanes, warning: diversityCheck.warning }
+    : null;
+
   // Sort by wave so that sequential dispatch (orchestrator's for-loop) respects the
   // global wave boundary across roles.  Without this, role-grouped insertion order
   // produces [A-wave1, A-wave2, B-wave1, B-wave2] — causing wave-2 work to start
@@ -466,5 +485,6 @@ export function buildRoleExecutionBatches(plans = [], config, capabilityPoolResu
     ...batch,
     bundleIndex: index + 1,
     totalBundles: flattened.length,
+    diversityViolation,
   }));
 }

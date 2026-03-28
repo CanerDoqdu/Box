@@ -22,7 +22,7 @@ import { appendProgress, appendLineageEntry, appendFailureClassification } from 
 import { buildAgentArgs, nameToSlug } from "./agent_loader.js";
 import { buildVerificationChecklist } from "./verification_profiles.js";
 import { getVerificationCommands } from "./verification_command_registry.js";
-import { parseVerificationReport, parseResponsiveMatrix, validateWorkerContract, decideRework, checkPostMergeArtifact, collectArtifactGaps, isArtifactGateRequired } from "./verification_gate.js";
+import { parseVerificationReport, parseResponsiveMatrix, validateWorkerContract, decideRework, checkPostMergeArtifact, collectArtifactGaps, isArtifactGateRequired, extractMergedSha } from "./verification_gate.js";
 import { enforceModelPolicy, routeModelWithUncertainty, classifyComplexityTier, COMPLEXITY_TIER } from "./model_policy.js";
 import { deriveRoutingAdjustments, buildPromptHardConstraints } from "./learning_policy_compiler.js";
 import { loadPolicy, getProtectedPathMatches, getRolePathViolations } from "./policy_engine.js";
@@ -498,6 +498,17 @@ function buildConversationContext(history, instruction, sessionState: WorkerSess
   parts.push("BOX_ACCESS=repo:<ok|blocked>;files:<ok|blocked>;tools:<ok|blocked>;api:<ok|blocked>  (if you encountered access issues)");
   parts.push("If BOX_STATUS is omitted, it defaults to done.");
   parts.push("PR POLICY: If your task changes code, open or update your PR and carry it to merge when checks are green.");
+  parts.push("");
+  parts.push("## DONE-PATH ARTIFACT REQUIREMENTS (MANDATORY for BOX_STATUS=done on merge tasks)");
+  parts.push("When reporting BOX_STATUS=done after merging code, you MUST include BOTH of the following:");
+  parts.push("1. BOX_MERGED_SHA=<7-40 char hex commit SHA from the merged state>");
+  parts.push("   Example: BOX_MERGED_SHA=abc1234");
+  parts.push("   Run: git rev-parse HEAD   (after merge is confirmed)");
+  parts.push("2. A raw npm test output block wrapped in explicit markers:");
+  parts.push("   ===NPM TEST OUTPUT START===");
+  parts.push("   <paste full stdout from 'npm test' run on the merged branch>");
+  parts.push("   ===NPM TEST OUTPUT END===");
+  parts.push("Omitting either artifact will cause the verification gate to reject your done status.");
   parts.push(String(instruction.task || ""));
 
   // Warn when the task text provides no specific test file targets so the worker
@@ -579,6 +590,10 @@ export function parseWorkerResponse(stdout, stderr) {
   const verificationReport = parseVerificationReport(output);
   const responsiveMatrix = parseResponsiveMatrix(output);
 
+  // Extract explicit merged SHA marker (BOX_MERGED_SHA=<sha>).
+  // Stored for audit and lineage — also surfaced in the done-path artifact check.
+  const mergedSha = extractMergedSha(output);
+
   return {
     status: normalizedStatus,
     prUrl,
@@ -587,7 +602,8 @@ export function parseWorkerResponse(stdout, stderr) {
     summary,
     fullOutput: output,
     verificationReport,
-    responsiveMatrix
+    responsiveMatrix,
+    mergedSha,
   };
 }
 

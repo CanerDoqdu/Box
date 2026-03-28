@@ -19,8 +19,24 @@ import { getVerificationProfile } from "./verification_profiles.js";
 /** Regex matching a 7-40 character hex git SHA in output. */
 const GIT_SHA_PATTERN = /\b[0-9a-f]{7,40}\b/i;
 
+/**
+ * Regex matching an explicit BOX_MERGED_SHA marker.
+ * Workers that include this explicit marker provide stronger evidence than
+ * pattern-detected hex strings, since it unambiguously identifies the post-merge
+ * commit SHA rather than any incidental hex value in the output.
+ */
+const BOX_MERGED_SHA_PATTERN = /BOX_MERGED_SHA\s*=\s*([0-9a-f]{7,40})/i;
+
 /** Regex matching raw npm test output block (pass/fail counts). */
 const NPM_TEST_OUTPUT_PATTERN = /(?:passing|failing|tests?\s+\d|✓|✗|#\s+tests\s+\d|test result|suites?\s+\d|\d+\s+pass)/i;
+
+/**
+ * Regex matching an explicit NPM test output block delimited by
+ * ===NPM TEST OUTPUT START=== / ===NPM TEST OUTPUT END=== markers.
+ * Workers that include this explicit block provide stronger evidence than
+ * scattered pattern matches across the full output.
+ */
+const NPM_TEST_BLOCK_PATTERN = /={3,}\s*NPM TEST OUTPUT\s*(?:START\s*)?={3,}[\s\S]*?={3,}\s*(?:NPM TEST OUTPUT\s*)?(?:END\s*)?={3,}/i;
 
 /** Placeholder literal that must be replaced in verification reports. */
 export const POST_MERGE_PLACEHOLDER = "POST_MERGE_TEST_OUTPUT";
@@ -43,13 +59,27 @@ export const ARTIFACT_GATE_ERROR_PREFIX = "artifact-gate";
  * Check if worker output contains the required post-merge verification artifact.
  * The artifact is: a git SHA + raw npm test stdout block.
  *
+ * Explicit markers are preferred over pattern detection:
+ *   - BOX_MERGED_SHA=<sha>  takes precedence over any 7-40 hex string in the output.
+ *   - ===NPM TEST OUTPUT START=== ... ===NPM TEST OUTPUT END=== block is preferred over
+ *     scattered npm output patterns; falls back to the legacy pattern for compatibility.
+ *
  * @param {string} output — full worker output text
- * @returns {{ hasArtifact: boolean, hasSha: boolean, hasTestOutput: boolean, hasUnfilledPlaceholder: boolean }}
+ * @returns {{ hasArtifact: boolean, hasSha: boolean, hasTestOutput: boolean, hasUnfilledPlaceholder: boolean, mergedSha: string | null, hasExplicitShaMarker: boolean, hasExplicitTestBlock: boolean }}
  */
 export function checkPostMergeArtifact(output) {
   const text = String(output || "");
-  const hasSha = GIT_SHA_PATTERN.test(text);
-  const hasTestOutput = NPM_TEST_OUTPUT_PATTERN.test(text);
+
+  // Prefer explicit BOX_MERGED_SHA=<sha> marker; fall back to loose hex detection.
+  const explicitShaMatch = BOX_MERGED_SHA_PATTERN.exec(text);
+  const hasExplicitShaMarker = explicitShaMatch !== null;
+  const mergedSha: string | null = explicitShaMatch ? explicitShaMatch[1] : null;
+  const hasSha = hasExplicitShaMarker || GIT_SHA_PATTERN.test(text);
+
+  // Prefer explicit NPM test output block; fall back to legacy pattern.
+  const hasExplicitTestBlock = NPM_TEST_BLOCK_PATTERN.test(text);
+  const hasTestOutput = hasExplicitTestBlock || NPM_TEST_OUTPUT_PATTERN.test(text);
+
   const hasUnfilledPlaceholder = text.includes(POST_MERGE_PLACEHOLDER);
 
   return {
@@ -57,7 +87,25 @@ export function checkPostMergeArtifact(output) {
     hasSha,
     hasTestOutput,
     hasUnfilledPlaceholder,
+    mergedSha,
+    hasExplicitShaMarker,
+    hasExplicitTestBlock,
   };
+}
+
+/**
+ * Extract the merged commit SHA from worker output.
+ *
+ * Returns the value from the explicit BOX_MERGED_SHA=<sha> marker when present.
+ * Falls back to null when the explicit marker is absent (loose SHA detection is
+ * intentionally NOT used here — loose detection is for the hasArtifact check only).
+ *
+ * @param {string} output — full worker output text
+ * @returns {string | null} — 7-40 char hex SHA, or null when not explicitly declared
+ */
+export function extractMergedSha(output: string): string | null {
+  const match = BOX_MERGED_SHA_PATTERN.exec(String(output || ""));
+  return match ? match[1] : null;
 }
 
 /**

@@ -172,9 +172,121 @@ export function rankStaleRefsAsRemediationCandidates(
 }
 
 /**
- * Recurse into a directory, yielding relative paths (from rootDir) for all .md files.
- * Handles nested subdirectory trees.
+ * A deterministic planner debt task derived from an architecture drift finding.
+ * These tasks are injected into the Prometheus planning queue so unresolved drift
+ * is treated as first-class backlog, not silently ignored.
+ *
+ * Confidence effects:
+ *   high   priority → confidence 0.50  (core infra staleness blocks safe refactoring)
+ *   medium priority → confidence 0.75  (product code or deprecated API usage)
+ *   low    priority → confidence 0.90  (docs/docker/scripts — low blast radius)
  */
+export interface PlannerDebtTask {
+  /** Deterministic task identifier derived from type + docPath + line. */
+  taskId: string;
+  /** Ready-to-execute task description for the Prometheus planning prompt. */
+  task: string;
+  /** Remediation priority bucket. */
+  priority: "high" | "medium" | "low";
+  /**
+   * Planner confidence score (0–1).
+   * Lower confidence means the planner should treat this as higher urgency and
+   * reduce confidence in related architectural decisions until the debt is resolved.
+   */
+  confidence: number;
+  /** Finding type: stale file reference or deprecated API token. */
+  type: "stale_ref" | "deprecated_token";
+  /** Document containing the finding. */
+  source: string;
+  /** Debt class label for downstream filtering and analytics. */
+  debtClass: "architecture_drift";
+  /** ISO-8601 creation timestamp (stable across identical input — set by caller if determinism required). */
+  createdAt: string;
+}
+
+/**
+ * Planner confidence by priority bucket.
+ *
+ * High-priority drift (stale src/core refs) reduces planner confidence the most:
+ * these findings indicate the architecture doc is out of sync with active infra,
+ * which raises the risk of planning work against a ghost file path.
+ */
+export const DEBT_CONFIDENCE_BY_PRIORITY: Record<"high" | "medium" | "low", number> = Object.freeze({
+  high:   0.50,
+  medium: 0.75,
+  low:    0.90,
+});
+
+/**
+ * Build a deterministic task ID for a drift finding.
+ * Uses a simple hash of type + docPath + line to ensure:
+ *   1. Same finding always produces the same ID.
+ *   2. Different findings always produce different IDs.
+ *
+ * No external crypto dependency — uses pure string manipulation.
+ */
+function buildDebtTaskId(type: string, docPath: string, line: number, token?: string): string {
+  const raw = `${type}::${docPath}::${line}::${token || ""}`;
+  // Deterministic CRC-16-like fold
+  let h = 0x811c9dc5;
+  for (let i = 0; i < raw.length; i++) {
+    h ^= raw.charCodeAt(i);
+    h = (h * 0x01000193) >>> 0;
+  }
+  return `drift-${h.toString(16).padStart(8, "0")}`;
+}
+
+/**
+ * Convert ranked remediation candidates from an architecture drift report into
+ * deterministic planner debt tasks with confidence effects.
+ *
+ * Output is sorted by priority (high → medium → low), then by docPath for full
+ * determinism given identical input.  The `createdAt` field is supplied by the
+ * caller so callers that need reproducible output can pass a fixed timestamp.
+ *
+ * Confidence effects:
+ *   - Each task carries a `confidence` score derived from its priority bucket.
+ *   - Prometheus/Athena should reduce planning confidence for work that depends on
+ *     files referenced in high-priority stale findings.
+ *
+ * @param candidates - sorted output of rankStaleRefsAsRemediationCandidates()
+ * @param createdAt  - ISO-8601 timestamp; defaults to current time when omitted
+ * @returns deterministic list of PlannerDebtTask objects, highest priority first
+ */
+export function convertRemediationCandidatesToDebtTasks(
+  candidates: RemediationCandidate[],
+  createdAt?: string
+): PlannerDebtTask[] {
+  if (!Array.isArray(candidates) || candidates.length === 0) return [];
+
+  const ts = createdAt || new Date().toISOString();
+
+  const tasks: PlannerDebtTask[] = candidates.map((candidate) => ({
+    taskId: buildDebtTaskId(
+      candidate.type,
+      candidate.docPath,
+      candidate.line,
+      candidate.token
+    ),
+    task: candidate.suggestedTask,
+    priority: candidate.priority,
+    confidence: DEBT_CONFIDENCE_BY_PRIORITY[candidate.priority],
+    type: candidate.type,
+    source: candidate.docPath,
+    debtClass: "architecture_drift" as const,
+    createdAt: ts,
+  }));
+
+  // Ensure deterministic ordering: high before medium before low; ties broken by docPath.
+  const PRIORITY_ORDER: Record<string, number> = { high: 0, medium: 1, low: 2 };
+  tasks.sort((a, b) => {
+    const pDiff = PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority];
+    if (pDiff !== 0) return pDiff;
+    return a.source.localeCompare(b.source);
+  });
+
+  return tasks;
+}
 async function collectDocFilesRecursive(rootDir: string, relDir: string, results: string[]): Promise<void> {
   const absDir = path.join(rootDir, relDir);
   let entries;
