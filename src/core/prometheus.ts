@@ -42,6 +42,12 @@ import { section, compilePrompt } from "./prompt_compiler.js";
 import { computeFingerprint } from "./carry_forward_ledger.js";
 import { rewriteVerificationCommand } from "./verification_command_registry.js";
 import { checkCarryForwardGate, hardGateRecurrenceToPolicies } from "./learning_policy_compiler.js";
+import {
+  appendCorpusEntry,
+  loadCorpus,
+  replayCorpus,
+  persistReplayRegressionState,
+} from "./parser_replay_harness.js";
 
 export function detectModelFallback(rawText) {
   const text = String(rawText || "");
@@ -1016,20 +1022,36 @@ export function normalizePrometheusParsedOutput(parsed, aiResult: any = {}) {
   ).trim();
 
   const rawPlans = Array.isArray(input.plans) ? input.plans : [];
+
+  // planSource tracks which extraction path produced the final plans.
+  // "json"      — plans[] key present in model output (full schema fidelity)
+  // "alt-shape" — structured JSON present but using waves/tasks or bottlenecks+waves schema
+  //               (recoverable format variance: model used a valid alternative structure)
+  // "narrative" — no JSON structure; plans parsed from free-form text (degraded output)
+  // "none"      — nothing parseable found (true schema loss)
+  type PlanSource = "json" | "alt-shape" | "narrative" | "none";
+  let planSource: PlanSource = rawPlans.length > 0 ? "json" : "none";
+
   let plans = rawPlans.length > 0
     ? rawPlans.map((plan, i) => normalizePlanFromTask(plan, i, plan?.wave || 1))
     : buildPlansFromAlternativeShape(input);
+
+  if (rawPlans.length === 0 && plans.length > 0) {
+    planSource = "alt-shape";
+  }
 
   // Third shape: GPT analytical format — topBottlenecks[] + waves[].tasks (strings)
   if (plans.length === 0 && (Array.isArray(input.topBottlenecks) || Array.isArray(input.waves))) {
     plans = buildPlansFromBottlenecksShape(input)
       .map((plan, i) => normalizePlanFromTask(plan, i, plan?.wave || 1));
+    if (plans.length > 0) planSource = "alt-shape";
   }
 
   // Final fallback: parse wave + numbered narrative plans from free-form output.
   if (plans.length === 0 && analysisText.length > 0) {
     plans = buildPlansFromNarrative(analysisText)
       .map((plan, i) => normalizePlanFromTask(plan, i, plan?.wave || 1));
+    if (plans.length > 0) planSource = "narrative";
   }
 
   const health = normalizeProjectHealthAlias(String(input.projectHealth || "").trim());
@@ -1078,40 +1100,59 @@ export function normalizePrometheusParsedOutput(parsed, aiResult: any = {}) {
   // parserConfidencePenalties: explicit list of reasons why the score was reduced.
   // The aggregate parserConfidence remains a single 0-1 value (backward compatible).
   //
-  //   plansShape          — 1.0 = JSON plans direct, 0.5 = narrative/alt-shape fallback, 0.0 = no plans
-  //   healthField         — 1.0 = canonical/alias health from field, 0.9 = inferred from analysis text, 0.8 = unresolvable
+  //   plansShape          — 1.0  = plans[] key present (full schema fidelity)
+  //                         0.75 = structured JSON alt-shape (waves/tasks or bottlenecks+waves)
+  //                                → recoverable format variance: intent is clear, key layout differs
+  //                         0.5  = free-form narrative fallback (heuristic extraction)
+  //                         0.0  = no plans found at all (true schema loss)
+  //   healthField         — 1.0 = resolved from input field (canonical or alias), 0.9 = inferred from analysis text, 0.8 = unresolvable
   //   requestBudget       — 1.0 = budget provided by model, 0.9 = fallback rebuilt deterministically
   //   bottleneckCoverage  — 1.0 = all declared bottlenecks addressed, reduced by uncovered fraction
 
   const parserConfidencePenalties: Array<{ reason: string; component: string; delta: number }> = [];
 
   let plansShapeScore: number;
-  if (rawPlans.length > 0) {
+  if (planSource === "json") {
     plansShapeScore = 1.0;
-  } else if (plans.length > 0) {
+  } else if (planSource === "alt-shape") {
+    // Structured JSON alt-shape: model used waves/tasks or bottlenecks+waves instead of plans[].
+    // Recoverable format variance — lighter penalty than narrative because schema intent is intact.
+    plansShapeScore = 0.75;
+    parserConfidencePenalties.push({ reason: "plans_from_alt_shape", component: "plansShape", delta: -0.25 });
+  } else if (planSource === "narrative") {
+    // Free-form text fallback — no structured JSON, heuristic extraction used.
     plansShapeScore = 0.5;
     parserConfidencePenalties.push({ reason: "plans_from_narrative_fallback", component: "plansShape", delta: -0.5 });
   } else {
+    // True schema loss — nothing parseable found.
     plansShapeScore = 0.0;
     parserConfidencePenalties.push({ reason: "no_plans_extracted", component: "plansShape", delta: -0.9 });
   }
 
-  // `health` is alias-normalized from input.projectHealth; `projectHealth` is the fully
-  // resolved canonical value (filled via inferProjectHealth when the field was absent or
-  // unrecognized).  Scoring uses the resolved canonical health so that successfully-inferred
-  // health carries a lighter penalty than a truly unresolvable field.
+  // Scoring evaluates the resolved canonical/inferred projectHealth directly rather than
+  // checking raw input field presence.
+  //
+  // `health`        — alias-normalised from input.projectHealth (intermediate value)
+  // `projectHealth` — fully resolved canonical value: set directly from `health` when the
+  //                   input field was recognisable (canonical or alias), otherwise inferred
+  //                   via inferProjectHealth(analysisText).
+  //
+  // healthFromInputField: true when projectHealth was set directly from the input field
+  //   (i.e. health !== "" and health equals the resolved projectHealth — no inference needed).
+  // healthCanonical: true when the resolved projectHealth is a valid canonical value.
   const CANONICAL_HEALTH_VALS = ["good", "needs-work", "critical"] as const;
-  const healthFieldExplicit = Boolean(health && CANONICAL_HEALTH_VALS.includes(health as typeof CANONICAL_HEALTH_VALS[number]));
-  const healthFieldResolved = CANONICAL_HEALTH_VALS.includes(projectHealth as typeof CANONICAL_HEALTH_VALS[number]);
+  const healthFromInputField = health !== "" && health === projectHealth;
+  const healthCanonical = CANONICAL_HEALTH_VALS.includes(projectHealth as typeof CANONICAL_HEALTH_VALS[number]);
   let healthFieldScore: number;
-  if (healthFieldExplicit) {
+  if (healthFromInputField) {
+    // Input field provided a recognisable health value (canonical or alias) — full confidence.
     healthFieldScore = 1.0;
-  } else if (healthFieldResolved) {
-    // Health was resolved via text inference — slight penalty to signal field was not explicit.
+  } else if (healthCanonical) {
+    // projectHealth resolved via text inference — slight penalty to signal field was not explicit.
     healthFieldScore = 0.9;
     parserConfidencePenalties.push({ reason: "health_field_inferred_from_text", component: "healthField", delta: -0.1 });
   } else {
-    // Field absent and inference also produced no canonical value (defensive; currently unreachable).
+    // projectHealth could not be resolved to a canonical value (defensive; currently unreachable).
     healthFieldScore = 0.8;
     parserConfidencePenalties.push({ reason: "health_field_missing_or_invalid", component: "healthField", delta: -0.2 });
   }
@@ -1158,7 +1199,7 @@ export function normalizePrometheusParsedOutput(parsed, aiResult: any = {}) {
   //   architectureDrift) applied on top of the core score.
   // parserConfidence remains the aggregate (core − context) for backward compat.
   const CONTEXT_PENALTY_COMPONENTS = new Set(["bottleneckCoverage", "architectureDrift"]);
-  const coreBase = rawPlans.length > 0 ? 1.0 : plans.length > 0 ? 0.5 : 0.1;
+  const coreBase = planSource === "json" ? 1.0 : planSource === "alt-shape" ? 0.75 : planSource === "narrative" ? 0.5 : 0.1;
   let parserCoreConfidence = coreBase;
   let parserContextPenalty = 0;
   for (const penalty of parserConfidencePenalties) {
@@ -1177,8 +1218,11 @@ export function normalizePrometheusParsedOutput(parsed, aiResult: any = {}) {
   // If confidence is below the floor, fail-closed: reject plans rather than
   // dispatching low-quality work. Plans are replaced with an empty set and
   // the analysis is preserved for manual review.
-  // Floor set at 0.15 to catch truly unparseable output (base 0.1) while
-  // allowing legitimate narrative-fallback parses (base 0.5 with penalties).
+  // Floor set at 0.15 to catch truly unparseable output (base 0.1 — true schema loss)
+  // while allowing all recovery paths to proceed:
+  //   - alt-shape  (base 0.75, min reachable with all structural penalties: ~0.45)
+  //   - narrative  (base 0.5,  min reachable with all structural penalties: ~0.2)
+  // Only planSource="none" (base 0.1) can realistically fall below this floor.
   const PARSER_CONFIDENCE_FLOOR = 0.15;
   const belowFloor = parserConfidence < PARSER_CONFIDENCE_FLOOR;
   const finalPlans = belowFloor ? [] : plans;
@@ -2323,6 +2367,50 @@ Consider whether the root causes are:
       };
       await appendProgress(config, `[PROMETHEUS][WARN] Dependency graph resolver error (non-fatal): ${String(err?.message || err)}`).catch(() => {});
     }
+  }
+
+  // ── Replay-corpus state persistence (planning completion) ────────────────
+  // After each successful planning cycle: append the current run to the parser
+  // replay corpus, re-run the corpus against the current parser, persist the
+  // regression state, and emit a regression snapshot to the progress log.
+  try {
+    const corpusEntryId = `prometheus-${Date.now()}`;
+    const parseMode = Array.isArray(aiResult?.parsed?.plans) ? "json-direct" : "fallback";
+    await appendCorpusEntry(config, {
+      id:                  corpusEntryId,
+      raw:                 raw.slice(0, 5000),
+      expectedPlanCount:   planCount,
+      baselineConfidence:  parsedForValidation.parserConfidence ?? 0,
+      recordedAt:          analysis.analyzedAt,
+      requiredKeys:        ["task", "role"],
+      parseMode,
+    });
+
+    const corpus = await loadCorpus(config);
+
+    // Parser function: mirrors the prometheus parse pipeline for replay.
+    const prometheusParserFn = (rawText: string) => {
+      const agentResult = parseAgentOutput(rawText);
+      const rawParsed = agentResult?.parsed || {};
+      const normalized = normalizePrometheusParsedOutput(rawParsed, { raw: rawText });
+      return {
+        plans:      Array.isArray(normalized.plans) ? normalized.plans : [],
+        confidence: typeof normalized.parserConfidence === "number" ? normalized.parserConfidence : 0,
+      };
+    };
+
+    const replayResult = replayCorpus(corpus, prometheusParserFn);
+    await persistReplayRegressionState(config, replayResult);
+
+    await appendProgress(config,
+      `[PROMETHEUS][REPLAY] Corpus replay complete — entries=${corpus.length} ` +
+      `regressions=${replayResult.regressionCount} passed=${replayResult.passed} ` +
+      `regressionRate=${corpus.length > 0 ? ((replayResult.regressionCount / corpus.length) * 100).toFixed(0) : 0}%`
+    );
+  } catch (err) {
+    await appendProgress(config,
+      `[PROMETHEUS][WARN] Replay-corpus persistence failed (non-fatal): ${String((err as any)?.message || err)}`
+    ).catch(() => {});
   }
 
   return analysis;

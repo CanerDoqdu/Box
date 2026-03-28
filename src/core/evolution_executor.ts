@@ -27,7 +27,7 @@ import { appendProgress } from "./state_tracker.js";
 import { buildAgentArgs, parseAgentOutput } from "./agent_loader.js";
 import { spawnAsync } from "./fs_utils.js";
 import { getRoleRegistry } from "./role_registry.js";
-import { checkPostMergeArtifact, collectArtifactGaps, ARTIFACT_GATE_ERROR_PREFIX, isArtifactGateRequired } from "./verification_gate.js";
+import { checkPostMergeArtifact, collectArtifactGaps, ARTIFACT_GATE_ERROR_PREFIX, isArtifactGateRequired, applyDispatchCommandGate, type DispatchCommandValidationResult } from "./verification_gate.js";
 import { VERIFICATION_DEFAULTS, rewriteVerificationCommand, checkForbiddenCommands } from "./verification_command_registry.js";
 import { isNonSpecificVerification } from "./plan_contract_validator.js";
 
@@ -913,6 +913,22 @@ function extractAthenaVerdict(athenaResult) {
 // ── Main Loop ─────────────────────────────────────────────────────────────────
 
 /**
+ * Apply the dispatch command gate to a prepared task, sanitising non-portable
+ * verification commands and returning the safe task alongside the gate audit record.
+ *
+ * This is the public entry point for the dispatch sanitisation step so that
+ * integration tests can verify the executor consumes sanitised commands without
+ * needing to invoke the full runEvolutionLoop.
+ *
+ * @param task — prepared task (output of repairPrometheusTask or similar)
+ * @returns {{ task: PreparedEvolutionTask, gate: DispatchCommandValidationResult }}
+ */
+export function sanitizeTaskForDispatch(task: PreparedEvolutionTask): { task: PreparedEvolutionTask; gate: DispatchCommandValidationResult } {
+  const { task: sanitized, gate } = applyDispatchCommandGate(task);
+  return { task: sanitized as PreparedEvolutionTask, gate };
+}
+
+/**
  * Run the full evolution loop from the next pending task.
  * Saves progress after every task, resume-safe.
  *
@@ -1012,6 +1028,20 @@ export async function runEvolutionLoop(config, options: { fromTaskId?: string; d
         reason: `Auto-converted to execution after missing-item injection: ${preReview.reason || "Athena requested additional constraints"}`
       };
     }
+
+    // Apply the dispatch command gate: sanitise any non-portable verification commands
+    // and produce an audit trail of rewrites before the task reaches the worker.
+    // repairPrometheusTask already normalises commands via rewriteVerificationCommand,
+    // so the gate will typically find safe=true — but it serves as an explicit audit
+    // checkpoint and safety net for future changes.
+    const { task: gatedTask, gate: dispatchGate } = applyDispatchCommandGate(activeTask);
+    if (!dispatchGate.safe) {
+      console.log(`[evolution] Dispatch command gate rewrote ${dispatchGate.rewrites.length} command(s) for ${task.task_id}:`);
+      for (const rw of dispatchGate.rewrites) {
+        console.log(`  [gate] "${rw.original}" → "${rw.rewritten}"`);
+      }
+    }
+    activeTask = gatedTask as typeof activeTask;
 
     // Rework loop for this task
     let taskDone = false;

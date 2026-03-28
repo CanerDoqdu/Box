@@ -233,7 +233,7 @@ describe("normalizePrometheusParsedOutput — confidence components", () => {
     assert.equal(result.parserConfidence, 1.0);
   });
 
-  it("emits plansShape=0.5 and a narrative-fallback penalty when plans come from waves", () => {
+  it("emits plansShape=0.75 and an alt-shape penalty when plans come from waves (structured JSON alt-shape)", () => {
     const parsed = {
       projectHealth: "needs-work",
       waves: [{ wave: 1, tasks: ["Fix trust boundary"] }],
@@ -241,12 +241,61 @@ describe("normalizePrometheusParsedOutput — confidence components", () => {
     };
     const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
 
-    assert.equal(result.parserConfidenceComponents.plansShape, 0.5);
+    assert.equal(result.parserConfidenceComponents.plansShape, 0.75,
+      "structured waves alt-shape must score plansShape=0.75 (recoverable format variance)");
     const penalty = result.parserConfidencePenalties.find(p => p.component === "plansShape");
     assert.ok(penalty, "must have a plansShape penalty");
+    assert.equal(penalty.reason, "plans_from_alt_shape",
+      "penalty reason must be plans_from_alt_shape for structured JSON alt-shape");
+    assert.equal(penalty.delta, -0.25);
+    assert.equal(result.parserConfidence, 0.75);
+  });
+
+  it("emits plansShape=0.5 and narrative-fallback penalty when plans come from free-form text only", () => {
+    // No JSON structure at all — only free-form narrative text
+    const parsed = {};
+    const thinking = `
+Wave 1 (blocking)
+1) Fix Windows verification harness
+2) Add planning gate for missing harness fix
+
+Wave 2
+3) Upgrade evaluation stack
+`;
+    const result = normalizePrometheusParsedOutput(parsed, {
+      thinking,
+      requestBudget: { estimatedPremiumRequestsTotal: 3, errorMarginPercent: 15, hardCapTotal: 4 }
+    });
+
+    assert.equal(result.parserConfidenceComponents.plansShape, 0.5,
+      "narrative-only fallback must score plansShape=0.5 (degraded but parseable)");
+    const penalty = result.parserConfidencePenalties.find(p => p.component === "plansShape");
+    assert.ok(penalty, "must have a plansShape penalty for narrative fallback");
     assert.equal(penalty.reason, "plans_from_narrative_fallback");
     assert.equal(penalty.delta, -0.5);
-    assert.equal(result.parserConfidence, 0.5);
+  });
+
+  it("narrative fallback confidence (0.5 base) is strictly lower than alt-shape confidence (0.75 base)", () => {
+    // Alt-shape: waves JSON with all other fields perfect
+    const altShape = normalizePrometheusParsedOutput({
+      projectHealth: "good",
+      waves: [{ wave: 1, tasks: ["Fix trust boundary"] }],
+      requestBudget: { estimatedPremiumRequestsTotal: 1, errorMarginPercent: 15, hardCapTotal: 2 },
+    }, { raw: "" });
+
+    // Narrative: free-form text with all other fields perfect
+    const narrative = normalizePrometheusParsedOutput({
+      projectHealth: "good",
+      requestBudget: { estimatedPremiumRequestsTotal: 1, errorMarginPercent: 15, hardCapTotal: 2 },
+    }, {
+      thinking: "Wave 1 (blocking)\n1) Fix Windows verification harness",
+      raw: "",
+    });
+
+    assert.ok(
+      altShape.parserCoreConfidence > narrative.parserCoreConfidence,
+      `alt-shape core (${altShape.parserCoreConfidence}) must be strictly greater than narrative core (${narrative.parserCoreConfidence})`
+    );
   });
 
   it("emits healthField=0.9 and a health_field_inferred penalty when projectHealth is missing", () => {
@@ -280,18 +329,19 @@ describe("normalizePrometheusParsedOutput — confidence components", () => {
   });
 
   it("accumulates multiple penalties correctly", () => {
-    // Narrative plans (base=0.5) + inferred health (-0.1) + no budget (-0.1) = 0.3
+    // Alt-shape plans (base=0.75) + inferred health (-0.1) + no budget (-0.1) = 0.55
     const parsed = {
       waves: [{ wave: 1, tasks: ["Fix parser"] }],
     };
     const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
 
-    assert.equal(result.parserConfidenceComponents.plansShape, 0.5);
+    assert.equal(result.parserConfidenceComponents.plansShape, 0.75,
+      "waves alt-shape must score plansShape=0.75");
     assert.equal(result.parserConfidenceComponents.healthField, 0.9);
     assert.equal(result.parserConfidenceComponents.requestBudget, 0.9);
     assert.equal(result.parserConfidencePenalties.length, 3);
-    // 0.5 - 0.1 - 0.1 = 0.3
-    assert.equal(result.parserConfidence, 0.3);
+    // 0.75 - 0.1 - 0.1 = 0.55
+    assert.equal(result.parserConfidence, 0.55);
   });
 
   it("emits plansShape=0.0 and no_plans_extracted penalty when no plans are found", () => {
@@ -432,6 +482,37 @@ describe("normalizePrometheusParsedOutput — confidence components", () => {
     assert.equal(penalty.reason, "health_field_inferred_from_text");
   });
 
+  // ── healthField evaluates resolved projectHealth origin (input-field vs inference) ──
+
+  it("healthField scoring evaluates resolved projectHealth origin — explicit input vs text inference", () => {
+    // When projectHealth comes from the input field (canonical), score is 1.0.
+    const fromInput = normalizePrometheusParsedOutput({
+      projectHealth: "critical",
+      plans: [{ task: "Fix memory leak", role: "evolution-worker" }],
+      requestBudget: { estimatedPremiumRequestsTotal: 1, errorMarginPercent: 15, hardCapTotal: 2 },
+      analysis: "System is in critical state requiring immediate intervention",
+    }, { raw: "" });
+    assert.equal(fromInput.parserConfidenceComponents.healthField, 1.0,
+      "explicit canonical input field scores healthField=1.0 — projectHealth came from input");
+    assert.ok(!fromInput.parserConfidencePenalties.some(p => p.component === "healthField"),
+      "no healthField penalty expected when projectHealth resolved from input field");
+
+    // When analysisText contains 'critical' but projectHealth field is absent,
+    // inference produces 'critical' — but score is still 0.9 because it was inferred.
+    const fromInference = normalizePrometheusParsedOutput({
+      plans: [{ task: "Fix memory leak", role: "evolution-worker" }],
+      requestBudget: { estimatedPremiumRequestsTotal: 1, errorMarginPercent: 15, hardCapTotal: 2 },
+      analysis: "System is in critical state requiring immediate intervention",
+    }, { raw: "" });
+    assert.equal(fromInference.projectHealth, "critical",
+      "inferProjectHealth must pick 'critical' from analysis text");
+    assert.equal(fromInference.parserConfidenceComponents.healthField, 0.9,
+      "inferred 'critical' scores healthField=0.9, not 1.0 — origin is inference, not the input field");
+    assert.ok(fromInference.parserConfidencePenalties.some(
+      p => p.component === "healthField" && p.reason === "health_field_inferred_from_text"),
+      "health_field_inferred_from_text penalty must be present when health came from inference");
+  });
+
   // ── Channel split: parser-core vs context-penalty ──────────────────────────
 
   it("parserCoreConfidence equals 1.0 and parserContextPenalty equals 0 for full-score input", () => {
@@ -448,17 +529,17 @@ describe("normalizePrometheusParsedOutput — confidence components", () => {
   });
 
   it("parserCoreConfidence absorbs healthField and requestBudget penalties; context channel stays 0", () => {
-    // Narrative plans (base=0.5) + inferred health (-0.1) + no budget (-0.1)
+    // Alt-shape plans (base=0.75) + inferred health (-0.1) + no budget (-0.1)
     const parsed = {
       waves: [{ wave: 1, tasks: ["Fix parser"] }],
     };
     const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
 
-    assert.equal(result.parserCoreConfidence, 0.3,
-      "core confidence = 0.5 base − 0.1 healthField inferred − 0.1 requestBudget = 0.3");
+    assert.equal(result.parserCoreConfidence, 0.55,
+      "core confidence = 0.75 base (alt-shape) − 0.1 healthField inferred − 0.1 requestBudget = 0.55");
     assert.equal(result.parserContextPenalty, 0,
       "context-penalty must be 0 — bottleneckCoverage and architectureDrift are context signals, not present here");
-    assert.equal(result.parserConfidence, 0.3,
+    assert.equal(result.parserConfidence, 0.55,
       "aggregate parserConfidence must equal parserCoreConfidence (backward compat)");
   });
 
@@ -500,6 +581,51 @@ describe("normalizePrometheusParsedOutput — confidence components", () => {
       "core channel must floor at 0.1 for unparseable output");
     assert.equal(result.parserContextPenalty, 0,
       "context-penalty channel must be 0 when no context signals are present");
+  });
+
+  it("true schema loss (no plans, no analysisText) triggers _parserBelowFloor=true and empty plans", () => {
+    // planSource="none": base=0.1 which is below PARSER_CONFIDENCE_FLOOR=0.15
+    const result = normalizePrometheusParsedOutput({}, { raw: "" });
+
+    assert.equal(result._parserBelowFloor, true,
+      "no-plans output must be flagged as below parser confidence floor");
+    assert.deepEqual(result.plans, [],
+      "plans must be empty when confidence is below floor (fail-closed gate)");
+    assert.ok(result.parserConfidence < result._parserConfidenceFloor,
+      "parserConfidence must be below the floor threshold");
+  });
+
+  it("alt-shape plans are NOT rejected by confidence floor even with multiple penalties", () => {
+    // Alt-shape (0.75 base) with all structural penalties: -0.25 -0.1 -0.1 = 0.45
+    // Must stay above PARSER_CONFIDENCE_FLOOR=0.15
+    const parsed = {
+      waves: [{ wave: 1, tasks: ["Fix parser"] }],
+      // no projectHealth → -0.1 health penalty
+      // no requestBudget → -0.1 budget penalty
+    };
+    const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
+
+    assert.equal(result._parserBelowFloor, false,
+      "alt-shape output must NOT be rejected by the confidence floor");
+    assert.ok(result.plans.length > 0,
+      "plans must be preserved when alt-shape confidence is above floor");
+    assert.ok(result.parserConfidence >= result._parserConfidenceFloor,
+      "alt-shape confidence must remain above floor even with all structural penalties applied");
+  });
+
+  it("narrative fallback plans are NOT rejected by confidence floor", () => {
+    // Narrative (0.5 base) with health penalty: 0.5 - 0.1 = 0.4, well above floor=0.15
+    const thinking = "Wave 1 (blocking)\n1) Fix Windows verification harness";
+    const result = normalizePrometheusParsedOutput({}, {
+      thinking,
+      projectHealth: "good",
+      requestBudget: { estimatedPremiumRequestsTotal: 1, errorMarginPercent: 15, hardCapTotal: 2 },
+    });
+
+    assert.equal(result._parserBelowFloor, false,
+      "narrative fallback must NOT be rejected by confidence floor — it is recoverable");
+    assert.ok(result.plans.length > 0,
+      "narrative plans must be preserved (above floor)");
   });
 });
 

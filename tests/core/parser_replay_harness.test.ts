@@ -694,3 +694,177 @@ describe("persistReplayRegressionState / loadReplayRegressionState", () => {
     }
   });
 });
+
+// ── Planning-completion corpus persistence pipeline ────────────────────────────
+// These tests verify the full cycle: appendCorpusEntry → loadCorpus →
+// replayCorpus → persistReplayRegressionState → loadReplayRegressionState,
+// mirroring what prometheus.ts executes at planning completion.
+
+describe("planning-completion corpus persistence pipeline", () => {
+  it("full cycle: append + replay + persist + load produces consistent state", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "prh-cycle-"));
+    try {
+      const config = { paths: { stateDir: tmpDir } };
+
+      // Simulate two prior corpus entries
+      await appendCorpusEntry(config, {
+        id: "prior-1",
+        raw: "raw output alpha",
+        expectedPlanCount: 2,
+        baselineConfidence: 0.85,
+        recordedAt: new Date().toISOString(),
+        requiredKeys: ["task", "role"],
+        parseMode: "json-direct",
+      });
+      await appendCorpusEntry(config, {
+        id: "prior-2",
+        raw: "raw output beta",
+        expectedPlanCount: 1,
+        baselineConfidence: 0.75,
+        recordedAt: new Date().toISOString(),
+        requiredKeys: ["task"],
+        parseMode: "fallback",
+      });
+
+      // Add current planning run entry (as prometheus does at completion)
+      await appendCorpusEntry(config, {
+        id: "current-run",
+        raw: "raw output current",
+        expectedPlanCount: 3,
+        baselineConfidence: 0.9,
+        recordedAt: new Date().toISOString(),
+        requiredKeys: ["task", "role"],
+        parseMode: "json-direct",
+      });
+
+      const corpus = await loadCorpus(config);
+      assert.equal(corpus.length, 3, "corpus should contain all three entries");
+
+      // Healthy parser returns all required keys and confident scores
+      const healthyParserFn = (_raw: string) => ({
+        plans: [{ task: "Fix something", role: "coder" }],
+        confidence: 0.88,
+      });
+
+      const replayResult = replayCorpus(corpus, healthyParserFn);
+      assert.equal(replayResult.regressionCount, 0, "healthy parser should produce zero regressions");
+      assert.equal(replayResult.passed, true);
+      assert.equal(replayResult.results.length, 3);
+
+      await persistReplayRegressionState(config, replayResult);
+      const loaded = await loadReplayRegressionState(config);
+
+      assert.ok(loaded !== null, "persisted state must be loadable");
+      assert.equal(loaded!.regressionCount, 0);
+      assert.equal(loaded!.totalCount, 3);
+      assert.equal(loaded!.passed, true);
+      assert.ok(typeof loaded!.computedAt === "string");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("negative path: regressing parser produces non-zero regressionCount in persisted state", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "prh-regress-"));
+    try {
+      const config = { paths: { stateDir: tmpDir } };
+
+      await appendCorpusEntry(config, {
+        id: "stable-entry",
+        raw: "some raw text",
+        expectedPlanCount: 1,
+        baselineConfidence: 0.9,
+        recordedAt: new Date().toISOString(),
+        requiredKeys: ["task", "role"],
+        parseMode: "json-direct",
+      });
+
+      const corpus = await loadCorpus(config);
+
+      // Regressing parser: drops confidence and omits required key 'role'
+      const regressingParserFn = (_raw: string) => ({
+        plans: [{ task: "partial plan" }], // missing 'role'
+        confidence: 0.5, // dropped from 0.9
+      });
+
+      const replayResult = replayCorpus(corpus, regressingParserFn);
+      assert.ok(replayResult.regressionCount > 0, "regression must be detected");
+      assert.equal(replayResult.passed, false);
+
+      await persistReplayRegressionState(config, replayResult);
+      const loaded = await loadReplayRegressionState(config);
+
+      assert.ok(loaded !== null);
+      assert.ok(loaded!.regressionCount > 0, "persisted state must reflect regression count");
+      assert.equal(loaded!.passed, false);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("corpus is bounded to MAX_CORPUS_SIZE entries after repeated appends", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "prh-bounded-"));
+    try {
+      const config = { paths: { stateDir: tmpDir } };
+
+      // Append 55 entries — should be trimmed to 50 (MAX_CORPUS_SIZE)
+      for (let i = 0; i < 55; i++) {
+        await appendCorpusEntry(config, {
+          id: `entry-${i}`,
+          raw: `raw ${i}`,
+          expectedPlanCount: 1,
+          baselineConfidence: 0.8,
+          recordedAt: new Date().toISOString(),
+        });
+      }
+
+      const corpus = await loadCorpus(config);
+      assert.ok(corpus.length <= 50, `corpus must not exceed MAX_CORPUS_SIZE (50), got ${corpus.length}`);
+      // Most recent entries should be retained
+      assert.equal(corpus[corpus.length - 1].id, "entry-54", "last entry should be the most recent");
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("regression snapshot contains regressionRate information derivable from persisted state", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "prh-snapshot-"));
+    try {
+      const config = { paths: { stateDir: tmpDir } };
+
+      // 3 corpus entries, 1 will regress
+      for (let i = 0; i < 3; i++) {
+        await appendCorpusEntry(config, {
+          id: `snap-${i}`,
+          raw: `raw ${i}`,
+          expectedPlanCount: 1,
+          baselineConfidence: 0.9,
+          recordedAt: new Date().toISOString(),
+          requiredKeys: ["task"],
+        });
+      }
+
+      const corpus = await loadCorpus(config);
+      let callCount = 0;
+      const partiallyRegressingFn = (_raw: string) => {
+        callCount++;
+        // First call regresses, rest pass
+        if (callCount === 1) return { plans: [], confidence: 0.5 };
+        return { plans: [{ task: "ok" }], confidence: 0.9 };
+      };
+
+      const replayResult = replayCorpus(corpus, partiallyRegressingFn);
+      await persistReplayRegressionState(config, replayResult);
+      const loaded = await loadReplayRegressionState(config);
+
+      assert.ok(loaded !== null);
+      assert.equal(loaded!.totalCount, 3);
+      assert.equal(loaded!.regressionCount, 1);
+      // Verify regressionRate can be computed from persisted state
+      const rate = loaded!.regressionCount / loaded!.totalCount;
+      assert.ok(rate > 0 && rate < 1, `regressionRate should be partial, got ${rate}`);
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
