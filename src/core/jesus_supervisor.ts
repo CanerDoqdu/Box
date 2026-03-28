@@ -26,6 +26,11 @@ import {
   TRUST_BOUNDARY_ERROR,
 } from "./trust_boundary.js";
 import { getRecentCapacity, computeTrend } from "./capacity_scoreboard.js";
+import {
+  buildExpectedOutcome,
+  computeCalibrationRecord,
+  appendCalibrationHistory,
+} from "./jesus_calibration.js";
 
 async function callCopilotAgent(command, agentSlug, contextPrompt) {
   const args = buildAgentArgs({ agentSlug, prompt: contextPrompt, allowAll: true, noAskUser: true });
@@ -375,6 +380,8 @@ export async function runJesusCycle(config) {
     });
   }
 
+  // ── Strategic Calibration — compare previous directive expectations vs reality ──
+  // This runs every cycle (before AI call) to build a feedback loop on decision quality.
   const activeSessions = Object.keys(sessions).filter(k => sessions[k]?.status === "working").length;
   const lastCycleAt = lastDirective?.decidedAt ? new Date(lastDirective.decidedAt).toLocaleString() : "never";
   const prometheusLastRunAt = prometheusAnalysis?.analyzedAt ? new Date(prometheusAnalysis.analyzedAt).toLocaleString() : "never";
@@ -402,6 +409,43 @@ export async function runJesusCycle(config) {
     chatLog(stateDir, jesusName, `State unchanged — reusing last directive (saved AI call)`);
     return lastDirective;
   }
+
+  // Calibrate previous directive's expected outcome against realized current state.
+  // We do this AFTER the fresh-directive check so we only calibrate on real new cycles.
+  try {
+    const calibrationHealthFindings = await runSystemHealthAudit(config, githubState, AthenaCoordination, sessions);
+    const criticalCount = calibrationHealthFindings.filter(f => f.severity === "critical").length;
+    const importantCount = calibrationHealthFindings.filter(f => f.severity === "important").length;
+    let realizedHealth = "good";
+    if (criticalCount > 0) realizedHealth = "critical";
+    else if (importantCount > 0) realizedHealth = "degraded";
+
+    const prevPrometheusAt = lastDirective?.decidedAt
+      ? new Date(lastDirective.decidedAt).getTime() : 0;
+    const prometheusRanAfter = prometheusAnalysis?.analyzedAt
+      ? new Date(prometheusAnalysis.analyzedAt).getTime() > prevPrometheusAt
+      : false;
+    const athenaCoordinationAt = AthenaCoordination?.updatedAt || AthenaCoordination?.coordinatedAt;
+    const athenaActivatedAfter = athenaCoordinationAt
+      ? new Date(athenaCoordinationAt).getTime() > prevPrometheusAt
+      : false;
+
+    const calibRec = computeCalibrationRecord(lastDirective, {
+      systemHealth: realizedHealth,
+      decision: "tactical", // placeholder; actual decision determined after AI call this cycle
+      athenaActivated: athenaActivatedAfter,
+      prometheusRan: prometheusRanAfter,
+      workItemCount: Array.isArray(AthenaCoordination?.completedTasks)
+        ? AthenaCoordination.completedTasks.length : 0,
+    });
+
+    if (calibRec) {
+      await appendCalibrationHistory(stateDir, calibRec);
+      await appendProgress(config,
+        `[JESUS][CALIBRATION] score=${calibRec.scores.overall}/100 healthMatch=${calibRec.scores.healthMatch} decisionMatch=${calibRec.scores.decisionMatch}`
+      );
+    }
+  } catch { /* calibration is non-critical — never block the main cycle */ }
 
   const prometheusAgeHours = prometheusAnalysis?.analyzedAt
     ? (now - new Date(prometheusAnalysis.analyzedAt).getTime()) / 3600000
@@ -572,7 +616,13 @@ ${workersList}`;
   if (!d.callPrometheus) {
     try {
       const athenaRejection = await readJsonSafe(path.join(stateDir, "athena_plan_rejection.json"));
-      if (athenaRejection && typeof athenaRejection === "object") {
+      const hasRejectedPlan = Boolean(
+        athenaRejection?.ok &&
+        athenaRejection.data &&
+        typeof athenaRejection.data === "object" &&
+        athenaRejection.data.rejectedAt
+      );
+      if (hasRejectedPlan) {
         d.callPrometheus = true;
         d.prometheusReason = (d.prometheusReason || "") + " [OVERRIDE: Athena rejected previous plan — forced callPrometheus=true for replan]";
         await appendProgress(config, `[JESUS] callPrometheus overridden to true — Athena rejection detected, mandatory replan`);
@@ -593,6 +643,8 @@ ${workersList}`;
     parserConfidence, planCount, optimizerStatus, budgetUsed, budgetLimit
   });
 
+  const expectedOutcome = buildExpectedOutcome(d);
+
   const directive = {
     ...d,
     thinking: aiResult.thinking,
@@ -602,6 +654,7 @@ ${workersList}`;
     repo: config.env?.targetRepo,
     githubStateHash: ghFingerprint,
     capacityDelta,
+    expectedOutcome,
   };
 
   await writeJson(path.join(stateDir, "jesus_directive.json"), directive);

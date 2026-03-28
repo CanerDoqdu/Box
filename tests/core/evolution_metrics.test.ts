@@ -31,6 +31,10 @@ describe("evolution_metrics", () => {
     assert.equal(metrics.cycleWallClockP50Ms, 15);
     const saved = JSON.parse(await fs.readFile(path.join(stateDir, "evolution_metrics.json"), "utf8"));
     assert.equal(saved.jesusContextCorrect, true);
+    // jesusCalibration field must be present (null metrics when no history)
+    assert.ok("jesusCalibration" in saved, "jesusCalibration must be present in saved metrics");
+    assert.equal(saved.jesusCalibration.totalRecords, 0);
+    assert.equal(saved.jesusCalibration.averageOverallScore, null);
   });
 
   it("negative path: handles missing input files deterministically", async () => {
@@ -38,6 +42,10 @@ describe("evolution_metrics", () => {
     assert.equal(metrics.deterministicPostmortem.totalCount, 0);
     assert.equal(metrics.premiumRequestsPerDay, 0);
     assert.equal(metrics.jesusContextCorrect, false);
+    // jesusCalibration must always be present even with no history
+    assert.ok("jesusCalibration" in metrics, "jesusCalibration must always be present");
+    assert.equal(metrics.jesusCalibration.totalRecords, 0);
+    assert.equal(metrics.jesusCalibration.averageOverallScore, null);
   });
 });
 

@@ -83,6 +83,18 @@
         "systemHealth": {
           "type": "string",
           "description": "System health assessment string"
+        },
+        "expectedOutcome": {
+          "type": "object",
+          "description": "Expected-vs-realized calibration forecast. Attached by jesus_supervisor after AI decision. Used to measure strategic decision quality across cycles.",
+          "properties": {
+            "expectedSystemHealthAfter": { "type": "string", "description": "Predicted system health state after executing this directive" },
+            "expectedNextDecision": { "type": "string", "description": "Predicted decision type Jesus will make in the following cycle" },
+            "expectedAthenaActivated": { "type": "boolean", "description": "Whether Athena is expected to execute work this cycle" },
+            "expectedPrometheusRan": { "type": "boolean", "description": "Whether Prometheus is expected to produce a fresh analysis this cycle" },
+            "expectedWorkItemCount": { "type": "integer", "description": "Number of work items commanded in this directive" },
+            "forecastConfidence": { "type": "string", "enum": ["high", "medium", "low"], "description": "Jesus confidence in this forecast" }
+          }
         }
       }
     }

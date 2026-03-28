@@ -7,6 +7,7 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import { readJson, writeJson } from "./fs_utils.js";
+import { getCalibrationSummary } from "./jesus_calibration.js";
 
 const WINDOW_24H = 24 * 60 * 60_000;
 
@@ -84,7 +85,8 @@ export async function collectEvolutionMetrics(config) {
     selfImprovementCalls24h,
     premiumRequests24h,
     cycleTimeP50,
-    jesusDirective
+    jesusDirective,
+    jesusCalibration
   ] = await Promise.all([
     computeDeterministicRate(stateDir),
     countProgressEntries(stateDir, "[JESUS] awakening"),
@@ -96,7 +98,8 @@ export async function collectEvolutionMetrics(config) {
       return log.filter(e => new Date(e.timestamp || e.ts || 0).getTime() > cutoff).length;
     }),
     computeCycleTimeP50(stateDir),
-    readJson(path.join(stateDir, "jesus_directive.json"), null)
+    readJson(path.join(stateDir, "jesus_directive.json"), null),
+    getCalibrationSummary(stateDir)
   ]);
 
   const jesusContextCorrect = !!(jesusDirective?.prometheusAnalysis?.projectHealth);
@@ -109,7 +112,8 @@ export async function collectEvolutionMetrics(config) {
     trustBoundaryViolations24h,
     selfImprovementCallsPerDay: selfImprovementCalls24h,
     jesusContextCorrect,
-    premiumRequestsPerDay: premiumRequests24h
+    premiumRequestsPerDay: premiumRequests24h,
+    jesusCalibration
   };
 
   await writeJson(path.join(stateDir, "evolution_metrics.json"), metrics);
