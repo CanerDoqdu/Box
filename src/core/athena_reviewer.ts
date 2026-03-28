@@ -36,6 +36,7 @@ import {
   TRUST_BOUNDARY_ERROR,
 } from "./trust_boundary.js";
 import { checkForbiddenCommands } from "./verification_command_registry.js";
+import { validateEvidenceEnvelope } from "./evidence_envelope.js";
 import type { EvidenceEnvelope } from "./evidence_envelope.js";
 
 // ── Rubric calibration ───────────────────────────────────────────────────────
@@ -1731,6 +1732,17 @@ export async function runAthenaPostmortem(
   const athenaName = registry?.qualityReviewer?.name || "Athena";
   const athenaModel = registry?.qualityReviewer?.model || "Claude Sonnet 4.6";
   const command = config.env?.copilotCliCommand || "copilot";
+
+  // ── Evidence envelope structural validation (admission control) ─────────────
+  // Validates the envelope before any field access so that Athena's fast-path
+  // gate and AI prompt never receive structurally invalid input.
+  // Fail-closed: throw so the caller (evolution_executor) escalates the task.
+  const envelopeValidation = validateEvidenceEnvelope(workerResult);
+  if (!envelopeValidation.valid) {
+    const errMsg = `[ATHENA] Evidence envelope invalid — ${envelopeValidation.errors.join("; ")}`;
+    await appendProgress(config, errMsg);
+    throw new Error(errMsg);
+  }
 
   await appendProgress(config, `[ATHENA] Postmortem starting — reviewing worker result`);
   chatLog(stateDir, athenaName, "Postmortem review starting...");

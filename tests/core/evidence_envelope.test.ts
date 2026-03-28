@@ -12,7 +12,7 @@
  *   - Negative path: partial envelope (only some required fields)
  */
 
-import { describe, it } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { validateEvidenceEnvelope, validatePlanEvidenceCoupling } from "../../src/core/evidence_envelope.js";
 
@@ -251,3 +251,128 @@ describe("validatePlanEvidenceCoupling — plan evidence coupling validation", (
     assert.equal(result.errors.length, 2, "both coupling fields must be reported missing");
   });
 });
+
+// ── Athena consumption boundary: runAthenaPostmortem rejects invalid envelopes ─
+
+import { runAthenaPostmortem } from "../../src/core/athena_reviewer.js";
+import fs from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
+
+function makeConfig(tmpDir: string) {
+  return {
+    paths: { stateDir: tmpDir, progressFile: path.join(tmpDir, "progress.txt") },
+    env: { copilotCliCommand: "__missing_copilot_binary__", targetRepo: "CanerDoqdu/Box" },
+    roleRegistry: {
+      qualityReviewer: { name: "Athena", model: "Claude Sonnet 4.6" }
+    },
+    runtime: {},
+  };
+}
+
+function validEnvelopeForAthena() {
+  return {
+    roleName: "evolution-worker",
+    status: "done",
+    summary: "All changes implemented and tests pass.",
+    verificationEvidence: { build: "pass", tests: "pass", lint: "n/a" },
+    verificationPassed: true,
+  };
+}
+
+describe("runAthenaPostmortem — Athena consumption boundary validation", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "box-athena-boundary-"));
+    await fs.writeFile(path.join(tmpDir, "policy.json"), JSON.stringify({ blockedCommands: [] }), "utf8");
+  });
+
+  afterEach(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it("throws when the envelope is missing required fields (no roleName)", async () => {
+    const config = makeConfig(tmpDir);
+    const invalidEnvelope = {
+      status: "done",
+      summary: "Task completed.",
+      verificationEvidence: { build: "pass", tests: "pass", lint: "n/a" },
+    };
+    await assert.rejects(
+      () => runAthenaPostmortem(config, invalidEnvelope as any, {}),
+      (err: Error) => {
+        assert.ok(err.message.includes("[ATHENA] Evidence envelope invalid"), `unexpected message: ${err.message}`);
+        assert.ok(err.message.includes("roleName"), `expected roleName error, got: ${err.message}`);
+        return true;
+      }
+    );
+  });
+
+  it("throws when verificationEvidence has invalid slot values", async () => {
+    const config = makeConfig(tmpDir);
+    const invalidEnvelope = {
+      roleName: "evolution-worker",
+      status: "done",
+      summary: "Task completed.",
+      verificationEvidence: { build: "yes", tests: "no", lint: "n/a" },
+    };
+    await assert.rejects(
+      () => runAthenaPostmortem(config, invalidEnvelope as any, {}),
+      (err: Error) => {
+        assert.ok(err.message.includes("[ATHENA] Evidence envelope invalid"), `unexpected message: ${err.message}`);
+        return true;
+      }
+    );
+  });
+
+  it("throws when summary is empty", async () => {
+    const config = makeConfig(tmpDir);
+    const invalidEnvelope = {
+      roleName: "evolution-worker",
+      status: "done",
+      summary: "   ",
+      verificationEvidence: { build: "pass", tests: "pass", lint: "n/a" },
+    };
+    await assert.rejects(
+      () => runAthenaPostmortem(config, invalidEnvelope as any, {}),
+      (err: Error) => {
+        assert.ok(err.message.includes("[ATHENA] Evidence envelope invalid"), `unexpected message: ${err.message}`);
+        assert.ok(err.message.includes("summary"), `expected summary error, got: ${err.message}`);
+        return true;
+      }
+    );
+  });
+
+  it("negative path: null envelope throws with evidence envelope error", async () => {
+    const config = makeConfig(tmpDir);
+    await assert.rejects(
+      () => runAthenaPostmortem(config, null as any, {}),
+      (err: Error) => {
+        assert.ok(err.message.includes("[ATHENA] Evidence envelope invalid"), `unexpected message: ${err.message}`);
+        return true;
+      }
+    );
+  });
+
+  it("does not throw envelope error for a structurally valid envelope (AI failure is expected)", async () => {
+    const config = makeConfig(tmpDir);
+    // The AI call will fail (missing binary), but the envelope is valid — so we should NOT get
+    // an envelope validation error. Any other error (AI failure) is acceptable here.
+    try {
+      await runAthenaPostmortem(config, validEnvelopeForAthena() as any, {
+        task: "T-001",
+        verification: "npm test",
+        context: "test"
+      });
+      // If it returns (e.g., deterministic fast-path), that's fine too.
+    } catch (err: any) {
+      // Must NOT be an envelope validation error
+      assert.ok(
+        !err.message.includes("[ATHENA] Evidence envelope invalid"),
+        `valid envelope must not trigger validation error; got: ${err.message}`
+      );
+    }
+  });
+});
+
