@@ -11,7 +11,7 @@
  * Edit an agent's behavior by editing their .agent.md file ÔÇö no code changes needed.
  */
 
-import { existsSync, readFileSync, appendFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, appendFileSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { isModelBanned } from "./model_policy.js";
@@ -137,8 +137,10 @@ export function buildAgentArgs({
 
   let promptText = String(prompt);
   if (promptText.length > PROMPT_FILE_THRESHOLD) {
-    const promptFile = path.join(STATE_DIR, `prompt_${agentSlug || "agent"}_${Date.now()}.md`);
+    const slug = agentSlug || "agent";
+    const promptFile = path.join(STATE_DIR, `prompt_${slug}_${Date.now()}.md`);
     writeFileSync(promptFile, promptText, "utf8");
+    pruneOldPromptFiles(slug);
     promptText = `Your full instructions are in the file: ${promptFile}\nRead that file NOW with your read_file / view tool, then follow every instruction in it.`;
   }
   args.push("-p", promptText);
@@ -183,16 +185,35 @@ export function buildWorkerPromptArgs({ agentSlug, prompt, model }) {
     : String(prompt);
 
   if (fullPrompt.length > PROMPT_FILE_THRESHOLD) {
-    const promptFile = path.join(STATE_DIR, `prompt_${agentSlug || "worker"}_${Date.now()}.md`);
+    const slug = agentSlug || "worker";
+    const promptFile = path.join(STATE_DIR, `prompt_${slug}_${Date.now()}.md`);
     writeFileSync(promptFile, fullPrompt, "utf8");
+    pruneOldPromptFiles(slug);
     fullPrompt = `Your full instructions are in the file: ${promptFile}\nRead that file NOW, then follow every instruction in it.`;
   }
   args.push("-p", fullPrompt);
   return args;
 }
 
-// cleanupPromptFile is kept as no-op for backward compat (callers still import it)
-export function cleanupPromptFile(_filePath) { /* no-op */ }
+// pruneOldPromptFiles — keep only the last `maxKeep` prompt files for a slug.
+// Called immediately after writing each new prompt file so state/ stays clean.
+function pruneOldPromptFiles(slug: string, maxKeep = 3): void {
+  try {
+    const prefix = `prompt_${slug}_`;
+    const files = readdirSync(STATE_DIR)
+      .filter(f => f.startsWith(prefix) && f.endsWith(".md"))
+      .sort(); // timestamps embedded in name → lexicographic = chronological
+    const toDelete = files.slice(0, Math.max(0, files.length - maxKeep));
+    for (const f of toDelete) {
+      try { unlinkSync(path.join(STATE_DIR, f)); } catch { /* best-effort */ }
+    }
+  } catch { /* non-fatal */ }
+}
+
+// cleanupPromptFile — deletes a specific prompt file after the agent has read it.
+export function cleanupPromptFile(filePath: string): void {
+  try { if (filePath && existsSync(filePath)) unlinkSync(filePath); } catch { /* best-effort */ }
+}
 
 // ÔöÇÔöÇ Parse agent output: extract thinking + structured JSON ÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇÔöÇ
 //
