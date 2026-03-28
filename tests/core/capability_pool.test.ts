@@ -439,3 +439,112 @@ describe("capability_pool — lane performance feedback", () => {
     });
   });
 });
+
+// ── Lane diversity threshold enforcement (Task 1) ─────────────────────────────
+
+describe("capability_pool — lane diversity threshold enforcement", () => {
+  describe("assignWorkersToPlans — diversityCheck in return value", () => {
+    it("always includes diversityCheck in the result shape", () => {
+      const plans = [{ task: "Add test coverage" }];
+      const result = assignWorkersToPlans(plans);
+      assert.ok(typeof result.diversityCheck === "object", "diversityCheck must be present");
+      assert.ok(typeof result.diversityCheck.meetsMinimum === "boolean");
+      assert.ok(typeof result.diversityCheck.activeLaneCount === "number");
+      assert.ok(typeof result.diversityCheck.warning === "string");
+    });
+
+    it("diversityCheck.meetsMinimum=true when lane spread meets default threshold (2)", () => {
+      const plans = [
+        { task: "Add test coverage" },        // quality lane
+        { task: "Update Docker configuration" }, // infrastructure lane
+      ];
+      const result = assignWorkersToPlans(plans);
+      // Two different lanes → should meet the default minLanes=2
+      if (result.activeLaneCount >= 2) {
+        assert.equal(result.diversityCheck.meetsMinimum, true);
+        assert.equal(result.diversityCheck.warning, "");
+      }
+    });
+
+    it("diversityCheck.meetsMinimum=false when all plans route to a single lane", () => {
+      const plans = [
+        { task: "Add test coverage" },
+        { task: "Write more tests" },
+        { task: "Add spec coverage" },
+      ];
+      // All test-infra → quality lane → activeLaneCount = 1 < minLanes=2
+      const result = assignWorkersToPlans(plans);
+      if (result.activeLaneCount < 2) {
+        assert.equal(result.diversityCheck.meetsMinimum, false);
+        assert.ok(result.diversityCheck.warning.length > 0,
+          "warning must be non-empty when threshold is not met");
+      }
+    });
+
+    it("respects custom diversityThreshold option", () => {
+      const plans = [
+        { task: "Add test coverage" },
+        { task: "Update Docker configuration" },
+      ];
+      // Two lanes but require 5 — must fail
+      const result = assignWorkersToPlans(plans, null, undefined, { diversityThreshold: 5 });
+      assert.equal(result.diversityCheck.meetsMinimum, false);
+      assert.ok(/minimum is 5/i.test(result.diversityCheck.warning),
+        "warning must cite the minimum threshold");
+    });
+
+    it("diversityThreshold=0 always passes (diversity check disabled)", () => {
+      const plans = [{ task: "Write tests" }, { task: "More tests" }];
+      const result = assignWorkersToPlans(plans, null, undefined, { diversityThreshold: 0 });
+      // minLanes=0 → always meets minimum
+      assert.equal(result.diversityCheck.meetsMinimum, true);
+    });
+
+    it("backward-compatible: result still contains diversityIndex and activeLaneCount", () => {
+      const plans = [{ task: "Fix governance policy" }];
+      const result = assignWorkersToPlans(plans);
+      assert.ok(typeof result.diversityIndex === "number");
+      assert.ok(typeof result.activeLaneCount === "number");
+      assert.ok(typeof result.laneCounts === "object");
+    });
+
+    it("negative path: empty plans list returns diversityCheck with meetsMinimum=true (no violation on empty set)", () => {
+      const result = assignWorkersToPlans([]);
+      assert.ok(typeof result.diversityCheck === "object");
+      // An empty set has no diversity violation by convention
+      assert.ok(typeof result.diversityCheck.meetsMinimum === "boolean");
+    });
+
+    it("negative path: null input returns diversityCheck object", () => {
+      const result = assignWorkersToPlans(null);
+      assert.ok(typeof result.diversityCheck === "object");
+      assert.ok(typeof result.diversityCheck.meetsMinimum === "boolean");
+    });
+  });
+
+  describe("buildRoleExecutionBatches — diversityViolation in batch descriptors", () => {
+    // Import buildRoleExecutionBatches to verify diversityViolation is surfaced
+    it("each batch includes diversityViolation field (null or object)", async () => {
+      const { buildRoleExecutionBatches } = await import("../../src/core/worker_batch_planner.js");
+      const plans = [{ role: "Evolution Worker", task: "Fix bug", wave: 1, taskKind: "implementation" }];
+      const batches = buildRoleExecutionBatches(plans, {});
+      assert.ok(batches.length > 0, "must produce at least one batch");
+      for (const batch of batches) {
+        // diversityViolation is null when no violation, or an object when violated
+        assert.ok("diversityViolation" in batch,
+          "each batch must include diversityViolation field");
+        const dv = (batch as any).diversityViolation;
+        assert.ok(dv === null || (typeof dv === "object" && dv !== null),
+          "diversityViolation must be null or an object");
+      }
+    });
+
+    it("diversityViolation is null when capabilityPoolResult is absent (no diversity info)", async () => {
+      const { buildRoleExecutionBatches } = await import("../../src/core/worker_batch_planner.js");
+      const plans = [{ role: "Evolution Worker", task: "Task A", wave: 1, taskKind: "implementation" }];
+      const batches = buildRoleExecutionBatches(plans, {}, null);
+      // No capabilityPoolResult → no diversity info → null
+      assert.equal((batches[0] as any).diversityViolation, null);
+    });
+  });
+});

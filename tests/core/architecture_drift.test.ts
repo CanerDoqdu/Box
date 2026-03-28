@@ -507,3 +507,131 @@ describe("rankStaleRefsAsRemediationCandidates", () => {
     assert.equal(candidates[1].type, "stale_ref");
   });
 });
+
+// ── convertRemediationCandidatesToDebtTasks (Task 2 planning bridge) ──────────
+
+import {
+  convertRemediationCandidatesToDebtTasks,
+  DEBT_CONFIDENCE_BY_PRIORITY,
+  type PlannerDebtTask,
+  type RemediationCandidate,
+} from "../../src/core/architecture_drift.js";
+
+describe("convertRemediationCandidatesToDebtTasks", () => {
+  const FIXED_TS = "2026-01-01T00:00:00.000Z";
+
+  function makeCandidate(overrides: Partial<RemediationCandidate>): RemediationCandidate {
+    return {
+      type: "stale_ref",
+      docPath: "docs/arch.md",
+      referencedPath: "src/core/orchestrator.ts",
+      line: 1,
+      priority: "medium",
+      reason: "test reason",
+      suggestedTask: "Fix stale ref",
+      ...overrides,
+    };
+  }
+
+  it("returns empty array for empty input", () => {
+    assert.deepEqual(convertRemediationCandidatesToDebtTasks([]), []);
+  });
+
+  it("returns empty array for non-array input", () => {
+    assert.deepEqual(convertRemediationCandidatesToDebtTasks(null as any), []);
+  });
+
+  it("maps a single high-priority candidate with confidence=0.50", () => {
+    const candidates = [
+      makeCandidate({ priority: "high", suggestedTask: "Fix core ref" }),
+    ];
+    const tasks = convertRemediationCandidatesToDebtTasks(candidates, FIXED_TS);
+    assert.equal(tasks.length, 1);
+    assert.equal(tasks[0].confidence, 0.50);
+    assert.equal(tasks[0].priority, "high");
+    assert.equal(tasks[0].task, "Fix core ref");
+    assert.equal(tasks[0].debtClass, "architecture_drift");
+    assert.equal(tasks[0].createdAt, FIXED_TS);
+  });
+
+  it("maps a medium-priority candidate with confidence=0.75", () => {
+    const candidates = [makeCandidate({ priority: "medium" })];
+    const tasks = convertRemediationCandidatesToDebtTasks(candidates, FIXED_TS);
+    assert.equal(tasks[0].confidence, 0.75);
+  });
+
+  it("maps a low-priority candidate with confidence=0.90", () => {
+    const candidates = [makeCandidate({ priority: "low", suggestedTask: "Fix docker ref" })];
+    const tasks = convertRemediationCandidatesToDebtTasks(candidates, FIXED_TS);
+    assert.equal(tasks[0].confidence, 0.90);
+  });
+
+  it("output is sorted high → medium → low regardless of input order", () => {
+    const candidates = [
+      makeCandidate({ priority: "low",    docPath: "docs/c.md", line: 3 }),
+      makeCandidate({ priority: "high",   docPath: "docs/a.md", line: 1 }),
+      makeCandidate({ priority: "medium", docPath: "docs/b.md", line: 2 }),
+    ];
+    const tasks = convertRemediationCandidatesToDebtTasks(candidates, FIXED_TS);
+    assert.equal(tasks[0].priority, "high");
+    assert.equal(tasks[1].priority, "medium");
+    assert.equal(tasks[2].priority, "low");
+  });
+
+  it("is deterministic: same input always produces the same task IDs", () => {
+    const candidates = [
+      makeCandidate({ priority: "high", line: 7 }),
+      makeCandidate({ priority: "low",  line: 14 }),
+    ];
+    const run1 = convertRemediationCandidatesToDebtTasks(candidates, FIXED_TS);
+    const run2 = convertRemediationCandidatesToDebtTasks(candidates, FIXED_TS);
+    assert.deepEqual(
+      run1.map(t => t.taskId),
+      run2.map(t => t.taskId),
+      "task IDs must be identical across invocations with the same input"
+    );
+  });
+
+  it("each task has a non-empty unique taskId", () => {
+    const candidates = [
+      makeCandidate({ line: 1, docPath: "docs/a.md" }),
+      makeCandidate({ line: 2, docPath: "docs/a.md" }),
+    ];
+    const tasks = convertRemediationCandidatesToDebtTasks(candidates, FIXED_TS);
+    const ids = tasks.map(t => t.taskId);
+    assert.equal(new Set(ids).size, 2, "each task must have a unique taskId");
+    ids.forEach(id => assert.ok(id.length > 0, "taskId must be non-empty"));
+  });
+
+  it("deprecated_token candidates carry type and token info", () => {
+    const candidates: RemediationCandidate[] = [
+      {
+        type: "deprecated_token",
+        docPath: "docs/legacy.md",
+        token: "governance_verdict",
+        hint: "use governance_contract",
+        line: 5,
+        priority: "medium",
+        reason: "deprecated",
+        suggestedTask: "Replace governance_verdict in docs/legacy.md",
+      },
+    ];
+    const tasks = convertRemediationCandidatesToDebtTasks(candidates, FIXED_TS);
+    assert.equal(tasks[0].type, "deprecated_token");
+    assert.equal(tasks[0].source, "docs/legacy.md");
+    assert.ok(tasks[0].task.includes("governance_verdict"));
+  });
+
+  it("DEBT_CONFIDENCE_BY_PRIORITY exports correct constants", () => {
+    assert.equal(DEBT_CONFIDENCE_BY_PRIORITY.high,   0.50);
+    assert.equal(DEBT_CONFIDENCE_BY_PRIORITY.medium, 0.75);
+    assert.equal(DEBT_CONFIDENCE_BY_PRIORITY.low,    0.90);
+  });
+
+  it("negative path: uses current time when createdAt is omitted (non-deterministic ts only)", () => {
+    const candidates = [makeCandidate({ priority: "medium" })];
+    const tasks = convertRemediationCandidatesToDebtTasks(candidates);
+    assert.ok(typeof tasks[0].createdAt === "string" && tasks[0].createdAt.length > 0,
+      "createdAt must be a non-empty string even when caller omits the timestamp");
+  });
+});

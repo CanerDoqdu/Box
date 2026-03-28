@@ -179,15 +179,33 @@ export function selectWorkerForPlan(plan, config?, lanePerformance?: LanePerform
 }
 
 /**
+ * Options for {@link assignWorkersToPlans}.
+ *
+ * @property diversityThreshold — minimum number of distinct lanes required in the
+ *   result.  When the computed `activeLaneCount` is below this value, `diversityCheck`
+ *   in the return value will have `meetsMinimum: false`.  Defaults to 2.
+ *   Set to 0 or 1 to disable the threshold check entirely.
+ */
+export interface AssignWorkersOptions {
+  diversityThreshold?: number;
+}
+
+/**
  * Assign workers to all plans using capability matching.
  *
  * @param {object[]} plans — array of plan objects
  * @param {object} [config]
  * @param {LanePerformanceLedger} [lanePerformance] — optional historical lane outcomes
- * @returns {{ assignments: Array<{ plan: object, selection: WorkerSelection }>, diversityIndex: number }}
+ * @param {AssignWorkersOptions} [opts] — optional diversity enforcement options
+ * @returns {{ assignments: Array<{ plan: object, selection: WorkerSelection }>, diversityIndex: number, diversityCheck: object }}
  */
-export function assignWorkersToPlans(plans, config?, lanePerformance?: LanePerformanceLedger) {
-  if (!Array.isArray(plans)) return { assignments: [], diversityIndex: 0 };
+export function assignWorkersToPlans(
+  plans,
+  config?,
+  lanePerformance?: LanePerformanceLedger,
+  opts: AssignWorkersOptions = {}
+) {
+  if (!Array.isArray(plans)) return { assignments: [], diversityIndex: 0, diversityCheck: { meetsMinimum: true, activeLaneCount: 0, warning: "" } };
 
   const assignments = plans.map(plan => ({
     plan,
@@ -210,7 +228,15 @@ export function assignWorkersToPlans(plans, config?, lanePerformance?: LanePerfo
   const diversityIndex = Math.round((1 - maxShare) * 100) / 100;
   const activeLaneCount = laneCounts.size;
 
-  return { assignments, diversityIndex, activeLaneCount, laneCounts: Object.fromEntries(laneCounts) };
+  const pool = { assignments, diversityIndex, activeLaneCount, laneCounts: Object.fromEntries(laneCounts) };
+
+  // Enforce diversity threshold: default 2 lanes minimum.
+  // Returns meetsMinimum=false with a warning when the threshold is not met so
+  // callers (orchestrator, buildRoleExecutionBatches) can gate or log accordingly.
+  const minLanes = opts.diversityThreshold ?? 2;
+  const diversityCheck = enforceLaneDiversity(pool, { minLanes });
+
+  return { ...pool, diversityCheck };
 }
 
 /**
@@ -222,7 +248,7 @@ export function assignWorkersToPlans(plans, config?, lanePerformance?: LanePerfo
  * @returns {{ meetsMinimum: boolean, activeLaneCount: number, warning: string }}
  */
 export function enforceLaneDiversity(pool, opts: any = {}) {
-  const minLanes = opts.minLanes || 2;
+  const minLanes = opts.minLanes != null ? opts.minLanes : 2;
   const laneCount = pool.activeLaneCount || 0;
   if (laneCount >= minLanes) {
     return { meetsMinimum: true, activeLaneCount: laneCount, warning: "" };
