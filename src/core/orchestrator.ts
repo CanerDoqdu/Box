@@ -2290,6 +2290,8 @@ async function runSingleCycle(config) {
   try {
     await appendCapacityEntry(config, {
       parserConfidence: prometheusAnalysis?.parserConfidence ?? null,
+      parserCoreConfidence: prometheusAnalysis?.parserCoreConfidence ?? null,
+      parserContextPenalty: prometheusAnalysis?.parserContextPenalty ?? null,
       planCount: Array.isArray(prometheusAnalysis?.plans) ? prometheusAnalysis.plans.length : 0,
       projectHealth: prometheusAnalysis?.projectHealth ?? "unknown",
       optimizerStatus: "ok",

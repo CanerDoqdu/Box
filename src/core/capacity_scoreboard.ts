@@ -16,7 +16,9 @@ const MAX_ENTRIES = 100;
 /**
  * @typedef {object} CapacityEntry
  * @property {string} recordedAt — ISO timestamp
- * @property {number} parserConfidence — 0-1
+ * @property {number} parserConfidence — 0-1 aggregate (core − contextual penalties)
+ * @property {number} [parserCoreConfidence] — 0-1 structural parser signals only, independent from contextual penalties
+ * @property {number} [parserContextPenalty] — magnitude of contextual penalties subtracted from parserCoreConfidence
  * @property {number} planCount — plans in last Prometheus run
  * @property {string} projectHealth — healthy|warning|critical
  * @property {string} optimizerStatus — ok|budget_exceeded|etc
@@ -110,7 +112,8 @@ export function computeTrend(entries, field) {
  * Compute the 10-dimension capacity index from cycle data.
  *
  * @param {object} cycleData
- * @param {number} [cycleData.parserConfidence] — 0-1
+ * @param {number} [cycleData.parserConfidence] — 0-1 aggregate (core − contextual penalties); used for promptQuality
+ * @param {number} [cycleData.parserCoreConfidence] — 0-1 structural signals only; used for parserQuality (independent from context)
  * @param {number} [cycleData.planContractPassRate] — 0-1
  * @param {number} [cycleData.testPassRate] — 0-1
  * @param {number} [cycleData.workerDoneRate] — 0-1
@@ -130,7 +133,10 @@ export function computeCapacityIndex(cycleData: any = {}, previousIndex = null) 
       : 0.5),
     taskQuality: clamp(cycleData.testPassRate ?? 0.5),
     promptQuality: clamp(cycleData.parserConfidence ?? 0.5),
-    parserQuality: clamp(cycleData.parserConfidence ?? 0.5),
+    // parserQuality uses parserCoreConfidence (structural signals only) so parser
+    // trend tracking is independent from contextual penalties like bottleneckCoverage
+    // or architectureDrift.  Falls back to parserConfidence for backward compatibility.
+    parserQuality: clamp(cycleData.parserCoreConfidence ?? cycleData.parserConfidence ?? 0.5),
     workerSpecialization: clamp(cycleData.diversityIndex ?? 0),
     modelTaskFit: clamp(cycleData.premiumEfficiency ?? 0.5),
     learningLoop: clamp(cycleData.recurrenceClosureRate ?? 0),
