@@ -630,6 +630,7 @@ export const CYCLE_HEALTH_SCHEMA = Object.freeze({
       "anomalies",
       "healthScore",
       "healthReason",
+      "sustainedBreachSignatures",
     ],
     healthScoreEnum: Object.freeze([...Object.values(HEALTH_SCORE)]),
   }),
@@ -678,10 +679,13 @@ function deriveHealthReason(
  * persistCycleHealth() and is intentionally kept free of raw latency values so
  * that metric-semantic changes do not pollute the degradation channel.
  *
- * @param {object} analyticsRecord — output of computeCycleAnalytics()
+ * @param {object}   analyticsRecord           — output of computeCycleAnalytics()
+ * @param {object[]} [sustainedBreachSignatures=[]] — output of detectSustainedBreachSignatures();
+ *                                               included for retune provenance but not used to
+ *                                               derive healthScore (SLO record already covers it)
  * @returns {object} Health record conforming to CYCLE_HEALTH_SCHEMA.healthRecord
  */
-export function computeCycleHealth(analyticsRecord: any) {
+export function computeCycleHealth(analyticsRecord: any, sustainedBreachSignatures: any[] = []) {
   // Guard sloStatus against invalid enum values: only "ok", "degraded", "unknown"
   // are meaningful to health derivation; anything else is clamped to "unknown".
   const rawSloStatus = analyticsRecord?.kpis?.sloStatus ?? "unknown";
@@ -710,15 +714,21 @@ export function computeCycleHealth(analyticsRecord: any) {
   const healthScore   = deriveHealthScore(sloStatus, anomalyCount);
   const healthReason  = deriveHealthReason(healthScore, sloStatus, anomalyCount);
 
+  // Ensure sustainedBreachSignatures is always a well-typed array in the record
+  const safeSustainedSignatures = Array.isArray(sustainedBreachSignatures)
+    ? sustainedBreachSignatures
+    : [];
+
   return {
-    cycleId:        analyticsRecord?.cycleId  ?? null,
-    generatedAt:    new Date().toISOString(),
+    cycleId:                  analyticsRecord?.cycleId  ?? null,
+    generatedAt:              new Date().toISOString(),
     sloStatus,
     sloBreachCount,
     anomalyCount,
     anomalies,
     healthScore,
     healthReason,
+    sustainedBreachSignatures: safeSustainedSignatures,
   };
 }
 

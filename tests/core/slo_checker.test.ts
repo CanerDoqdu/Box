@@ -592,3 +592,165 @@ describe("computeCycleSLOs — negative paths and edge cases", () => {
     }
   });
 });
+
+// ── detectSustainedBreachSignatures ───────────────────────────────────────────
+
+import {
+  SLO_SUSTAINED_BREACH_DEFAULTS,
+  detectSustainedBreachSignatures,
+} from "../../src/core/slo_checker.js";
+
+// Helper: build a minimal SLO cycle record that breaches one metric
+function makeBreach(metric, cycleId, actual = 200000, threshold = 120000) {
+  return {
+    cycleId,
+    startedAt: cycleId,
+    sloBreaches: [{ metric, actual, threshold, severity: "high" }],
+  };
+}
+
+// Helper: build a minimal SLO cycle record with no breaches
+function makeClean(cycleId) {
+  return { cycleId, startedAt: cycleId, sloBreaches: [] };
+}
+
+describe("SLO_SUSTAINED_BREACH_DEFAULTS", () => {
+  it("exports minConsecutiveBreaches = 3", () => {
+    assert.equal(SLO_SUSTAINED_BREACH_DEFAULTS.minConsecutiveBreaches, 3);
+    assert.ok(Object.isFrozen(SLO_SUSTAINED_BREACH_DEFAULTS));
+  });
+});
+
+describe("detectSustainedBreachSignatures — basic contract", () => {
+  it("returns [] for empty history", () => {
+    assert.deepEqual(detectSustainedBreachSignatures([]), []);
+  });
+
+  it("returns [] for null/non-array history", () => {
+    assert.deepEqual(detectSustainedBreachSignatures(null as any), []);
+    assert.deepEqual(detectSustainedBreachSignatures(undefined as any), []);
+    assert.deepEqual(detectSustainedBreachSignatures("bad" as any), []);
+  });
+
+  it("returns [] when minConsecutiveBreaches < 1", () => {
+    const hist = [makeBreach(SLO_METRIC.DECISION_LATENCY, "c1")];
+    assert.deepEqual(detectSustainedBreachSignatures(hist, { minConsecutiveBreaches: 0 }), []);
+  });
+
+  it("returns [] when fewer than minConsecutiveBreaches cycles breach", () => {
+    const hist = [
+      makeBreach(SLO_METRIC.DECISION_LATENCY, "c2"),
+      makeBreach(SLO_METRIC.DECISION_LATENCY, "c1"),
+    ];
+    const sigs = detectSustainedBreachSignatures(hist, { minConsecutiveBreaches: 3 });
+    assert.equal(sigs.length, 0, "2 consecutive breaches should not trigger with threshold=3");
+  });
+
+  it("detects sustained breach when exactly minConsecutiveBreaches cycles breach", () => {
+    const hist = [
+      makeBreach(SLO_METRIC.DECISION_LATENCY, "c3"),
+      makeBreach(SLO_METRIC.DECISION_LATENCY, "c2"),
+      makeBreach(SLO_METRIC.DECISION_LATENCY, "c1"),
+    ];
+    const sigs = detectSustainedBreachSignatures(hist, { minConsecutiveBreaches: 3 });
+    assert.equal(sigs.length, 1);
+    assert.equal(sigs[0].metric, SLO_METRIC.DECISION_LATENCY);
+    assert.equal(sigs[0].consecutiveBreaches, 3);
+  });
+
+  it("detects sustained breach exceeding threshold", () => {
+    const hist = [
+      makeBreach(SLO_METRIC.DISPATCH_LATENCY, "c4"),
+      makeBreach(SLO_METRIC.DISPATCH_LATENCY, "c3"),
+      makeBreach(SLO_METRIC.DISPATCH_LATENCY, "c2"),
+      makeBreach(SLO_METRIC.DISPATCH_LATENCY, "c1"),
+    ];
+    const sigs = detectSustainedBreachSignatures(hist, { minConsecutiveBreaches: 3 });
+    assert.equal(sigs.length, 1);
+    assert.equal(sigs[0].consecutiveBreaches, 4);
+  });
+});
+
+describe("detectSustainedBreachSignatures — provenance (affectedCycleIds)", () => {
+  it("affectedCycleIds lists cycles in order from most-recent to oldest", () => {
+    const hist = [
+      makeBreach(SLO_METRIC.DECISION_LATENCY, "newest"),
+      makeBreach(SLO_METRIC.DECISION_LATENCY, "middle"),
+      makeBreach(SLO_METRIC.DECISION_LATENCY, "oldest"),
+    ];
+    const sigs = detectSustainedBreachSignatures(hist, { minConsecutiveBreaches: 3 });
+    assert.deepEqual(sigs[0].affectedCycleIds, ["newest", "middle", "oldest"]);
+  });
+
+  it("falls back to startedAt when cycleId is absent", () => {
+    const hist = [
+      { startedAt: "s3", sloBreaches: [{ metric: SLO_METRIC.DECISION_LATENCY, actual: 200000, threshold: 120000, severity: "high" }] },
+      { startedAt: "s2", sloBreaches: [{ metric: SLO_METRIC.DECISION_LATENCY, actual: 200000, threshold: 120000, severity: "high" }] },
+      { startedAt: "s1", sloBreaches: [{ metric: SLO_METRIC.DECISION_LATENCY, actual: 200000, threshold: 120000, severity: "high" }] },
+    ];
+    const sigs = detectSustainedBreachSignatures(hist, { minConsecutiveBreaches: 3 });
+    assert.deepEqual(sigs[0].affectedCycleIds, ["s3", "s2", "s1"]);
+  });
+});
+
+describe("detectSustainedBreachSignatures — consecutive semantics (negative paths)", () => {
+  it("streak is broken by a clean cycle — does not detect sustained breach", () => {
+    const hist = [
+      makeBreach(SLO_METRIC.DECISION_LATENCY, "c4"),
+      makeBreach(SLO_METRIC.DECISION_LATENCY, "c3"),
+      makeClean("c2"),                              // breaks the streak
+      makeBreach(SLO_METRIC.DECISION_LATENCY, "c1"),
+    ];
+    const sigs = detectSustainedBreachSignatures(hist, { minConsecutiveBreaches: 3 });
+    assert.equal(sigs.length, 0, "streak broken by clean cycle — no sustained signature");
+  });
+
+  it("streak for one metric does not interfere with another metric", () => {
+    // Decision breaches 3 times; dispatch only 1 time
+    const hist = [
+      { cycleId: "c3", sloBreaches: [{ metric: SLO_METRIC.DECISION_LATENCY, actual: 200000, threshold: 120000, severity: "high" }] },
+      { cycleId: "c2", sloBreaches: [{ metric: SLO_METRIC.DECISION_LATENCY, actual: 200000, threshold: 120000, severity: "high" }] },
+      { cycleId: "c1", sloBreaches: [
+        { metric: SLO_METRIC.DECISION_LATENCY, actual: 200000, threshold: 120000, severity: "high" },
+        { metric: SLO_METRIC.DISPATCH_LATENCY, actual: 60000, threshold: 30000, severity: "high" },
+      ]},
+    ];
+    const sigs = detectSustainedBreachSignatures(hist, { minConsecutiveBreaches: 3 });
+    assert.equal(sigs.length, 1);
+    assert.equal(sigs[0].metric, SLO_METRIC.DECISION_LATENCY);
+  });
+});
+
+describe("detectSustainedBreachSignatures — excess statistics", () => {
+  it("averageExcessMs is mean of (actual - threshold) across contributing cycles", () => {
+    const hist = [
+      { cycleId: "c3", sloBreaches: [{ metric: SLO_METRIC.DECISION_LATENCY, actual: 150000, threshold: 120000, severity: "high" }] },
+      { cycleId: "c2", sloBreaches: [{ metric: SLO_METRIC.DECISION_LATENCY, actual: 180000, threshold: 120000, severity: "high" }] },
+      { cycleId: "c1", sloBreaches: [{ metric: SLO_METRIC.DECISION_LATENCY, actual: 210000, threshold: 120000, severity: "high" }] },
+    ];
+    const sigs = detectSustainedBreachSignatures(hist, { minConsecutiveBreaches: 3 });
+    // excess: 30000, 60000, 90000 — mean = 60000
+    assert.equal(sigs[0].averageExcessMs, 60000);
+    assert.equal(sigs[0].maxExcessMs, 90000);
+  });
+
+  it("severity escalates to critical if any contributing breach is critical", () => {
+    const hist = [
+      { cycleId: "c3", sloBreaches: [{ metric: SLO_METRIC.DECISION_LATENCY, actual: 300000, threshold: 120000, severity: "critical" }] },
+      { cycleId: "c2", sloBreaches: [{ metric: SLO_METRIC.DECISION_LATENCY, actual: 200000, threshold: 120000, severity: "high" }] },
+      { cycleId: "c1", sloBreaches: [{ metric: SLO_METRIC.DECISION_LATENCY, actual: 200000, threshold: 120000, severity: "high" }] },
+    ];
+    const sigs = detectSustainedBreachSignatures(hist, { minConsecutiveBreaches: 3 });
+    assert.equal(sigs[0].severity, "critical");
+  });
+
+  it("severity stays high when no contributing breach is critical", () => {
+    const hist = [
+      makeBreach(SLO_METRIC.DISPATCH_LATENCY, "c3"),
+      makeBreach(SLO_METRIC.DISPATCH_LATENCY, "c2"),
+      makeBreach(SLO_METRIC.DISPATCH_LATENCY, "c1"),
+    ];
+    const sigs = detectSustainedBreachSignatures(hist, { minConsecutiveBreaches: 3 });
+    assert.equal(sigs[0].severity, "high");
+  });
+});

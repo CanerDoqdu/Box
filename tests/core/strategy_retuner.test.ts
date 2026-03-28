@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { evaluateRetune, applyRetune } from "../../src/core/strategy_retuner.js";
+import { evaluateRetune, applyRetune, evaluateSloRetune } from "../../src/core/strategy_retuner.js";
+import { SLO_METRIC } from "../../src/core/slo_checker.js";
 
 describe("strategy_retuner", () => {
   describe("evaluateRetune", () => {
@@ -84,5 +85,160 @@ describe("strategy_retuner", () => {
       applyRetune(config, actions);
       assert.equal(config.runtime.x, 1);
     });
+  });
+});
+
+// ── evaluateSloRetune ─────────────────────────────────────────────────────────
+
+// Helper: build a minimal SLO history entry that breaches one metric
+function makeSloRecord(metric, cycleId, actual = 200000, threshold = 120000) {
+  return {
+    cycleId,
+    startedAt: cycleId,
+    sloBreaches: [{ metric, actual, threshold, severity: "high" }],
+  };
+}
+
+function makeCleanRecord(cycleId) {
+  return { cycleId, startedAt: cycleId, sloBreaches: [] };
+}
+
+describe("evaluateSloRetune", () => {
+  it("returns no recommendations for null/empty history", () => {
+    const r1 = evaluateSloRetune({}, null as any);
+    assert.equal(r1.hasSustainedBreaches, false);
+    assert.deepEqual(r1.recommendations, []);
+
+    const r2 = evaluateSloRetune({}, []);
+    assert.equal(r2.hasSustainedBreaches, false);
+  });
+
+  it("returns no recommendations when breaches are fewer than minConsecutiveBreaches", () => {
+    const history = [
+      makeSloRecord(SLO_METRIC.DECISION_LATENCY, "c2"),
+      makeSloRecord(SLO_METRIC.DECISION_LATENCY, "c1"),
+    ];
+    const result = evaluateSloRetune({}, history, { minConsecutiveBreaches: 3 });
+    assert.equal(result.hasSustainedBreaches, false);
+    assert.equal(result.recommendations.length, 0);
+  });
+
+  it("returns a recommendation with provenance when decision latency has sustained breaches", () => {
+    const history = [
+      makeSloRecord(SLO_METRIC.DECISION_LATENCY, "c3"),
+      makeSloRecord(SLO_METRIC.DECISION_LATENCY, "c2"),
+      makeSloRecord(SLO_METRIC.DECISION_LATENCY, "c1"),
+    ];
+    const config = { runtime: { prometheusAnalysisFreshnessMinutes: 10 } };
+    const result = evaluateSloRetune(config, history, { minConsecutiveBreaches: 3 });
+
+    assert.equal(result.hasSustainedBreaches, true);
+    const rec = result.recommendations.find(r => r.metric === SLO_METRIC.DECISION_LATENCY);
+    assert.ok(rec, "recommendation for decisionLatencyMs must be present");
+    assert.equal(rec.parameter, "runtime.prometheusAnalysisFreshnessMinutes");
+    assert.equal(rec.currentValue, 10);
+    assert.equal(rec.newValue, 8);    // 10 - 2 step
+    assert.equal(rec.sustainedBreachCount, 3);
+    assert.deepEqual(rec.affectedCycleIds, ["c3", "c2", "c1"]);
+    assert.ok(rec.trigger.startsWith("sustainedSLOBreach:"));
+    assert.ok(typeof rec.reason === "string" && rec.reason.length > 0);
+  });
+
+  it("returns a recommendation for dispatch latency sustained breaches", () => {
+    const history = [
+      makeSloRecord(SLO_METRIC.DISPATCH_LATENCY, "c3", 60000, 30000),
+      makeSloRecord(SLO_METRIC.DISPATCH_LATENCY, "c2", 60000, 30000),
+      makeSloRecord(SLO_METRIC.DISPATCH_LATENCY, "c1", 60000, 30000),
+    ];
+    const config = { planner: { maxTasks: 15 } };
+    const result = evaluateSloRetune(config, history, { minConsecutiveBreaches: 3 });
+
+    assert.equal(result.hasSustainedBreaches, true);
+    const rec = result.recommendations.find(r => r.metric === SLO_METRIC.DISPATCH_LATENCY);
+    assert.ok(rec);
+    assert.equal(rec.parameter, "planner.maxTasks");
+    assert.equal(rec.newValue, 12);  // 15 - 3 step
+  });
+
+  it("returns a recommendation for verification completion sustained breaches", () => {
+    const history = [
+      makeSloRecord(SLO_METRIC.VERIFICATION_COMPLETION, "c3", 7200000, 3600000),
+      makeSloRecord(SLO_METRIC.VERIFICATION_COMPLETION, "c2", 7200000, 3600000),
+      makeSloRecord(SLO_METRIC.VERIFICATION_COMPLETION, "c1", 7200000, 3600000),
+    ];
+    const config = { runtime: { maxTacticalCycles: 6 } };
+    const result = evaluateSloRetune(config, history, { minConsecutiveBreaches: 3 });
+
+    const rec = result.recommendations.find(r => r.metric === SLO_METRIC.VERIFICATION_COMPLETION);
+    assert.ok(rec);
+    assert.equal(rec.parameter, "runtime.maxTacticalCycles");
+    assert.equal(rec.newValue, 5);   // 6 - 1 step
+  });
+
+  it("newValue is bounded at minValue floor", () => {
+    const history = [
+      makeSloRecord(SLO_METRIC.DECISION_LATENCY, "c3"),
+      makeSloRecord(SLO_METRIC.DECISION_LATENCY, "c2"),
+      makeSloRecord(SLO_METRIC.DECISION_LATENCY, "c1"),
+    ];
+    // prometheusAnalysisFreshnessMinutes already at floor (5)
+    const config = { runtime: { prometheusAnalysisFreshnessMinutes: 5 } };
+    const result = evaluateSloRetune(config, history, { minConsecutiveBreaches: 3 });
+    // 5 - 2 = 3 but floor is 5, so clamped — and since clamped === current, no recommendation
+    const rec = result.recommendations.find(r => r.metric === SLO_METRIC.DECISION_LATENCY);
+    assert.ok(!rec, "no recommendation when already at the floor bound");
+  });
+
+  it("boundApplied is true when newValue is clamped to floor", () => {
+    const history = [
+      makeSloRecord(SLO_METRIC.DECISION_LATENCY, "c3"),
+      makeSloRecord(SLO_METRIC.DECISION_LATENCY, "c2"),
+      makeSloRecord(SLO_METRIC.DECISION_LATENCY, "c1"),
+    ];
+    // Floor is 5; setting current to 6 so step produces 4 which gets clamped to 5
+    const config = { runtime: { prometheusAnalysisFreshnessMinutes: 6 } };
+    const result = evaluateSloRetune(config, history, { minConsecutiveBreaches: 3 });
+    const rec = result.recommendations.find(r => r.metric === SLO_METRIC.DECISION_LATENCY);
+    assert.ok(rec);
+    assert.equal(rec.newValue, 5);
+    assert.equal(rec.boundApplied, true);
+  });
+
+  it("uses default current value when config field is absent", () => {
+    const history = [
+      makeSloRecord(SLO_METRIC.DECISION_LATENCY, "c3"),
+      makeSloRecord(SLO_METRIC.DECISION_LATENCY, "c2"),
+      makeSloRecord(SLO_METRIC.DECISION_LATENCY, "c1"),
+    ];
+    // No runtime config provided — falls back to default (10)
+    const result = evaluateSloRetune({}, history, { minConsecutiveBreaches: 3 });
+    const rec = result.recommendations.find(r => r.metric === SLO_METRIC.DECISION_LATENCY);
+    assert.ok(rec);
+    assert.equal(rec.currentValue, 10);
+    assert.equal(rec.newValue, 8);
+  });
+
+  it("streak break stops recommendation (negative path)", () => {
+    const history = [
+      makeSloRecord(SLO_METRIC.DECISION_LATENCY, "c4"),
+      makeSloRecord(SLO_METRIC.DECISION_LATENCY, "c3"),
+      makeCleanRecord("c2"),                          // streak broken
+      makeSloRecord(SLO_METRIC.DECISION_LATENCY, "c1"),
+    ];
+    const result = evaluateSloRetune({}, history, { minConsecutiveBreaches: 3 });
+    assert.equal(result.recommendations.length, 0);
+    assert.equal(result.hasSustainedBreaches, false);
+  });
+
+  it("recommendations carry trigger code 'sustainedSLOBreach:<metric>'", () => {
+    const history = [
+      makeSloRecord(SLO_METRIC.DISPATCH_LATENCY, "c3"),
+      makeSloRecord(SLO_METRIC.DISPATCH_LATENCY, "c2"),
+      makeSloRecord(SLO_METRIC.DISPATCH_LATENCY, "c1"),
+    ];
+    const result = evaluateSloRetune({}, history, { minConsecutiveBreaches: 3 });
+    const rec = result.recommendations[0];
+    assert.ok(rec);
+    assert.equal(rec.trigger, `sustainedSLOBreach:${SLO_METRIC.DISPATCH_LATENCY}`);
   });
 });

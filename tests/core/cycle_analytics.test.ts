@@ -1086,3 +1086,59 @@ describe("computeCycleHealth — sloStatus enum guard", () => {
     assert.equal(health.sloStatus, "unknown");
   });
 });
+
+// ── computeCycleHealth — sustainedBreachSignatures ────────────────────────────
+
+describe("computeCycleHealth — sustainedBreachSignatures", () => {
+  it("sustainedBreachSignatures field is present in schema required list", () => {
+    assert.ok(
+      CYCLE_HEALTH_SCHEMA.healthRecord.required.includes("sustainedBreachSignatures"),
+      "schema must list sustainedBreachSignatures as required"
+    );
+  });
+
+  it("defaults to empty array when no signatures supplied", () => {
+    const config = makeConfig("state");
+    const analytics = computeCycleAnalytics(config, {});
+    const health = computeCycleHealth(analytics);
+    assert.ok(Array.isArray(health.sustainedBreachSignatures));
+    assert.equal(health.sustainedBreachSignatures.length, 0);
+  });
+
+  it("passes through supplied signatures verbatim", () => {
+    const config = makeConfig("state");
+    const analytics = computeCycleAnalytics(config, {});
+    const sigs = [
+      {
+        metric: "decisionLatencyMs",
+        consecutiveBreaches: 3,
+        affectedCycleIds: ["c3", "c2", "c1"],
+        averageExcessMs: 50000,
+        maxExcessMs: 80000,
+        severity: "high",
+      },
+    ];
+    const health = computeCycleHealth(analytics, sigs);
+    assert.deepEqual(health.sustainedBreachSignatures, sigs);
+  });
+
+  it("non-array signatures argument is coerced to empty array (defensive)", () => {
+    const config = makeConfig("state");
+    const analytics = computeCycleAnalytics(config, {});
+    const health = computeCycleHealth(analytics, null as any);
+    assert.ok(Array.isArray(health.sustainedBreachSignatures));
+    assert.equal(health.sustainedBreachSignatures.length, 0);
+  });
+
+  it("health record conforms to schema required fields including sustainedBreachSignatures", () => {
+    const config = makeConfig("state");
+    const analytics = computeCycleAnalytics(config, {
+      sloRecord: makeSloRecord(),
+      pipelineProgress: makePipelineProgress(),
+    });
+    const health = computeCycleHealth(analytics, []);
+    for (const f of CYCLE_HEALTH_SCHEMA.healthRecord.required) {
+      assert.ok(f in health, `health record missing required field: ${f}`);
+    }
+  });
+});

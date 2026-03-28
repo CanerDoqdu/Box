@@ -368,3 +368,121 @@ export async function readSloMetrics(config) {
     updatedAt: null,
   });
 }
+
+// ── Sustained breach detection ────────────────────────────────────────────────
+
+/** Default configuration for sustained breach signature detection. */
+export const SLO_SUSTAINED_BREACH_DEFAULTS = Object.freeze({
+  minConsecutiveBreaches: 3,
+});
+
+/**
+ * A sustained breach signature produced when one SLO metric has breached
+ * in at least minConsecutiveBreaches consecutive cycles (most-recent-first).
+ *
+ * @typedef {object} SustainedBreachSignature
+ * @property {string}   metric               - SLO metric identifier (SLO_METRIC value)
+ * @property {number}   consecutiveBreaches  - How many consecutive leading cycles breached
+ * @property {string[]} affectedCycleIds     - Provenance: cycleId of each contributing cycle
+ * @property {number}   averageExcessMs      - Mean excess above threshold across contributing cycles
+ * @property {number}   maxExcessMs          - Worst-case excess above threshold
+ * @property {string}   severity             - Highest severity seen across the run (SLO_BREACH_SEVERITY)
+ */
+
+/**
+ * Detect sustained SLO breach signatures from a history array.
+ *
+ * A signature is produced for each metric that has breached in the most-recent
+ * consecutive N cycles where N >= minConsecutiveBreaches.  History is expected
+ * most-recent-first (as returned by readSloMetrics().history).
+ *
+ * Pure function — performs no file I/O.
+ *
+ * @param {object[]} history - SLO cycle records (most-recent-first)
+ * @param {object}   opts
+ * @param {number}   [opts.minConsecutiveBreaches=3] - consecutive breach threshold
+ * @returns {SustainedBreachSignature[]}
+ */
+export function detectSustainedBreachSignatures(history, opts: { minConsecutiveBreaches?: number } = {}): any[] {
+  const min = Number(
+    opts?.minConsecutiveBreaches ?? SLO_SUSTAINED_BREACH_DEFAULTS.minConsecutiveBreaches
+  );
+  if (!Array.isArray(history) || history.length === 0) return [];
+  if (!Number.isFinite(min) || min < 1) return [];
+
+  const metrics = Object.values(SLO_METRIC);
+
+  // Per-metric accumulator: only consecutive from the start of history
+  const acc: Record<string, {
+    done: boolean;
+    count: number;
+    cycleIds: string[];
+    excesses: number[];
+    maxSeverity: string;
+  }> = {};
+
+  for (const m of metrics) {
+    acc[m] = {
+      done: false,
+      count: 0,
+      cycleIds: [],
+      excesses: [],
+      maxSeverity: SLO_BREACH_SEVERITY.HIGH,
+    };
+  }
+
+  for (const record of history) {
+    const breaches: any[] = Array.isArray(record?.sloBreaches) ? record.sloBreaches : [];
+    const byMetric = new Map<string, any>();
+    for (const b of breaches) {
+      if (typeof b?.metric === "string") byMetric.set(b.metric, b);
+    }
+
+    for (const m of metrics) {
+      const state = acc[m];
+      if (state.done) continue; // streak already broken for this metric
+
+      if (byMetric.has(m)) {
+        const breach = byMetric.get(m);
+        state.count++;
+        const id = record?.cycleId ?? record?.startedAt ?? null;
+        if (id != null) state.cycleIds.push(String(id));
+        const excess =
+          typeof breach.actual === "number" && typeof breach.threshold === "number"
+            ? Math.max(0, breach.actual - breach.threshold)
+            : 0;
+        state.excesses.push(excess);
+        if (breach.severity === SLO_BREACH_SEVERITY.CRITICAL) {
+          state.maxSeverity = SLO_BREACH_SEVERITY.CRITICAL;
+        }
+      } else {
+        // No breach for this metric in this cycle — consecutive streak broken
+        state.done = true;
+      }
+    }
+  }
+
+  const signatures: any[] = [];
+  for (const m of metrics) {
+    const state = acc[m];
+    if (state.count >= min) {
+      const totalExcess = state.excesses.reduce((s, v) => s + v, 0);
+      const avgExcess = state.excesses.length > 0
+        ? Math.round(totalExcess / state.excesses.length)
+        : 0;
+      const maxExcess = state.excesses.length > 0
+        ? Math.max(...state.excesses)
+        : 0;
+      signatures.push({
+        metric: m,
+        consecutiveBreaches: state.count,
+        affectedCycleIds: state.cycleIds,
+        averageExcessMs: avgExcess,
+        maxExcessMs: maxExcess,
+        severity: state.maxSeverity,
+      });
+    }
+  }
+
+  return signatures;
+}
