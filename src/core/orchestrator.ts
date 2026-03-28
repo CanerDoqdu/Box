@@ -76,7 +76,7 @@ import {
   shouldBlockOnDebt,
   autoCloseVerifiedDebt,
 } from "./carry_forward_ledger.js";
-import { reconcileBudgetEligibility } from "./budget_controller.js";
+import { reconcileBudgetEligibility, type BudgetEligibilityContract } from "./budget_controller.js";
 import {
   runInterventionOptimizer,
   buildInterventionsFromPlan,
@@ -302,11 +302,53 @@ export async function writeOrchestratorHealth(stateDir, status, reason, details 
 }
 
 /**
+ * Typed envelope produced by evaluatePreDispatchGovernanceGate.
+ *
+ * Every field is guaranteed present on all return paths so dispatch and
+ * telemetry consumers have a single, uniform surface regardless of which gate
+ * fires.  Optional fields appear only when the corresponding gate activates.
+ *
+ * Consumed by:
+ *   - Dispatch paths (runSingleCycle, runResumeDispatch) via `gateDecision.blocked`
+ *   - Telemetry (emitEvent GOVERNANCE_GATE_EVALUATED) via `gateDecision.reason`
+ */
+export interface GovernanceBlockDecision {
+  /** True when any gate blocked dispatch. False on pass-through. */
+  blocked: boolean;
+  /**
+   * Machine-readable reason string. null when not blocked.
+   * Blocked reasons are prefixed with a BLOCK_REASON constant followed by ':'
+   * and dynamic detail so callers can `reason.startsWith(BLOCK_REASON.X)`.
+   */
+  reason: string | null;
+  /** Post-block action taken (e.g. "rollback" on canary breach), undefined otherwise. */
+  action: "rollback" | undefined;
+  /** Dependency graph resolution result. null when the graph was not evaluated. */
+  graphResult: Record<string, unknown> | null;
+  /** Dispatch cycle identifier carried through for telemetry correlation. */
+  cycleId: string;
+  /** Budget eligibility state at gate evaluation time. Always present for observability. */
+  budgetEligibility: BudgetEligibilityContract;
+  /**
+   * Gate precedence index of the blocking gate (matches GATE_PRECEDENCE.*).
+   * Absent (undefined) on non-blocked results.
+   */
+  gateIndex?: number;
+  /** Rollback execution result. Present only on GOVERNANCE_CANARY_BREACH blocks. */
+  rollbackResult?: Record<string, unknown>;
+  /**
+   * Ghost file paths from unresolved mandatory drift debt.
+   * Present only on MANDATORY_DRIFT_DEBT_UNRESOLVED blocks.
+   */
+  mandatoryDriftPaths?: string[];
+}
+
+/**
  * Evaluate pre-dispatch governance gates without starting worker execution.
  * Exported for integration tests and any callers that need the dispatch decision
  * surface without running a full orchestration cycle.
  */
-export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycleId = "", driftReport: ArchitectureDriftReport | null = null) {
+export async function evaluatePreDispatchGovernanceGate(config, plans = [], cycleId = "", driftReport: ArchitectureDriftReport | null = null): Promise<GovernanceBlockDecision> {
   const stateDir = config?.paths?.stateDir || "state";
 
   // ── Budget reconciliation — resolved upfront so every dispatch decision
