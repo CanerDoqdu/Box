@@ -417,7 +417,7 @@ describe("normalizePrometheusParsedOutput — confidence components", () => {
     }
   });
 
-  it("healthField=0.8 for unrecognized projectHealth value — negative path (not a known alias)", () => {
+  it("healthField=0.9 for unrecognized projectHealth value — resolves to canonical via inference (negative path)", () => {
     const parsed = {
       projectHealth: "unknown-status",
       plans: [{ task: "Fix something", role: "evolution-worker" }],
@@ -425,11 +425,11 @@ describe("normalizePrometheusParsedOutput — confidence components", () => {
     };
     const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
 
-    assert.equal(result.parserConfidenceComponents.healthField, 0.8,
-      "unrecognized health value is treated as a structural gap — field cannot be validated");
+    assert.equal(result.parserConfidenceComponents.healthField, 0.9,
+      "unrecognized health value is resolved via inference — lighter penalty than truly missing");
     const penalty = result.parserConfidencePenalties.find(p => p.component === "healthField");
     assert.ok(penalty, "must have a healthField penalty for an unrecognized value");
-    assert.equal(penalty.reason, "health_field_missing_or_invalid");
+    assert.equal(penalty.reason, "health_field_inferred_from_text");
   });
 
   // ── Channel split: parser-core vs context-penalty ──────────────────────────
@@ -448,17 +448,17 @@ describe("normalizePrometheusParsedOutput — confidence components", () => {
   });
 
   it("parserCoreConfidence absorbs healthField and requestBudget penalties; context channel stays 0", () => {
-    // Narrative plans (base=0.5) + missing health (-0.2) + no budget (-0.1)
+    // Narrative plans (base=0.5) + inferred health (-0.1) + no budget (-0.1)
     const parsed = {
       waves: [{ wave: 1, tasks: ["Fix parser"] }],
     };
     const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
 
-    assert.equal(result.parserCoreConfidence, 0.2,
-      "core confidence = 0.5 base − 0.2 healthField − 0.1 requestBudget = 0.2");
+    assert.equal(result.parserCoreConfidence, 0.3,
+      "core confidence = 0.5 base − 0.1 healthField inferred − 0.1 requestBudget = 0.3");
     assert.equal(result.parserContextPenalty, 0,
       "context-penalty must be 0 — bottleneckCoverage and architectureDrift are context signals, not present here");
-    assert.equal(result.parserConfidence, 0.2,
+    assert.equal(result.parserConfidence, 0.3,
       "aggregate parserConfidence must equal parserCoreConfidence (backward compat)");
   });
 
@@ -1601,11 +1601,12 @@ describe("PLANNER_HEALTH_ALIASES and normalizeProjectHealthAlias (Task 1)", () =
       plans: [{ task: "Harden trust boundary", role: "evolution-worker", wave: 1 }],
     };
     const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
-    assert.equal(result.parserConfidenceComponents?.healthField, 0.8,
-      "missing projectHealth must still score healthField=0.8");
+    assert.equal(result.parserConfidenceComponents?.healthField, 0.9,
+      "missing projectHealth resolves via inference — scores healthField=0.9 with lighter penalty");
     const penalty = (result.parserConfidencePenalties as any[]).find(
       (p: any) => p.component === "healthField"
     );
     assert.ok(penalty, "must have a healthField penalty when health is missing");
+    assert.equal(penalty.reason, "health_field_inferred_from_text");
   });
 });
