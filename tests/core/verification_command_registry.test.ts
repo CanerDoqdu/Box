@@ -413,3 +413,66 @@ describe("applyDispatchCommandGate — dispatch-time integration (Task 3)", () =
     assert.ok(result !== undefined);
   });
 });
+
+// ── Task 3: Harden forbidden command checks — trimming and edge cases ──────────
+
+describe("checkForbiddenCommands — trimmed input hardening (Task 3)", () => {
+  it("detects bash with leading whitespace (trimming fix)", () => {
+    const result = checkForbiddenCommands("  bash scripts/run_tests.sh");
+    assert.equal(result.forbidden, true,
+      "leading-whitespace bash must be detected as forbidden after trimming");
+    assert.ok(result.violations.length > 0);
+  });
+
+  it("detects sh with leading whitespace (trimming fix)", () => {
+    const result = checkForbiddenCommands("  sh run.sh");
+    assert.equal(result.forbidden, true,
+      "leading-whitespace sh must be detected as forbidden after trimming");
+  });
+
+  it("detects npx tsx glob with leading whitespace (trimming fix)", () => {
+    const result = checkForbiddenCommands("  npx tsx tests/**/*.test.ts");
+    assert.equal(result.forbidden, true,
+      "leading-whitespace npx tsx with glob must be detected as forbidden after trimming");
+  });
+
+  it("detects ts-node glob with leading whitespace (trimming fix)", () => {
+    const result = checkForbiddenCommands("  ts-node tests/**/*.spec.ts");
+    assert.equal(result.forbidden, true,
+      "leading-whitespace ts-node with glob must be detected as forbidden after trimming");
+  });
+
+  it("detects node --test glob with leading whitespace (trimming fix)", () => {
+    const result = checkForbiddenCommands("  node --test tests/**/*.test.ts");
+    assert.equal(result.forbidden, true,
+      "leading-whitespace node --test glob must be detected as forbidden after trimming");
+  });
+
+  it("negative path: canonical command with leading whitespace is NOT forbidden", () => {
+    // After trimming, "  npm test" becomes "npm test" which is NOT forbidden
+    const result = checkForbiddenCommands("  npm test");
+    assert.equal(result.forbidden, false,
+      "canonical command with leading whitespace must not be flagged as forbidden");
+    assert.equal(result.violations.length, 0);
+  });
+
+  it("rewriteVerificationCommand with leading whitespace produces canonical output", () => {
+    // Ensure rewrite is consistent with detection after trimming
+    assert.equal(rewriteVerificationCommand("  bash scripts/test.sh"), "npm test",
+      "leading-whitespace bash must be rewritten to npm test");
+    assert.equal(rewriteVerificationCommand("  node --test tests/**"), "npm test",
+      "leading-whitespace node --test glob must be rewritten to npm test");
+  });
+
+  it("normalizeCommandBatch strips leading whitespace before detection and rewriting", () => {
+    const raw = ["  bash run.sh", "  node --test tests/**/*.ts", "  npm test"];
+    const result = normalizeCommandBatch(raw);
+    assert.ok(!result.some(cmd => cmd.includes("bash") || cmd.includes("*")),
+      "normalizeCommandBatch must strip and rewrite all leading-whitespace forbidden commands"
+    );
+    const npmTestCount = result.filter(c => c === "npm test").length;
+    assert.equal(npmTestCount, 1,
+      "all three rewrites collapse to a single 'npm test' after deduplication"
+    );
+  });
+});

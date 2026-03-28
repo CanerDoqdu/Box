@@ -162,7 +162,7 @@ export function normalizeCommandBatch(commands: string[]): string[] {
  * @returns {{ forbidden: boolean, violations: Array<{ matched: string, reason: string }> }}
  */
 export function checkForbiddenCommands(command) {
-  const text = String(command || "");
+  const text = String(command || "").trim();
   const violations = [];
   for (const { pattern, reason } of FORBIDDEN_VERIFICATION_PATTERNS) {
     if (pattern.test(text)) {

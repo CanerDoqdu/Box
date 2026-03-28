@@ -976,6 +976,29 @@ function buildPlansFromNarrative(analysisText) {
   return unique;
 }
 
+/**
+ * Canonical planner health aliases.
+ * LLMs instructed to emit "<healthy|warning|critical>" may return these alias
+ * values instead of the canonical internal values ("good", "needs-work", "critical").
+ * Normalizing before validation ensures alias inputs score at full confidence.
+ */
+export const PLANNER_HEALTH_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  healthy:  "good",
+  warning:  "needs-work",
+});
+
+/**
+ * Normalize a raw projectHealth string by resolving known aliases to their
+ * canonical equivalents before enum validation or divergence computation.
+ *
+ * @param {string} health — raw value from parser or LLM output
+ * @returns {string} canonical health value
+ */
+export function normalizeProjectHealthAlias(health: string): string {
+  const h = String(health || "").toLowerCase().trim();
+  return (PLANNER_HEALTH_ALIASES as Record<string, string>)[h] ?? h;
+}
+
 export function normalizePrometheusParsedOutput(parsed, aiResult: any = {}) {
   const input = (parsed && typeof parsed === "object") ? parsed : {};
   // Build analysis text — also cover topBottlenecks narrative as fallback
@@ -1009,7 +1032,7 @@ export function normalizePrometheusParsedOutput(parsed, aiResult: any = {}) {
       .map((plan, i) => normalizePlanFromTask(plan, i, plan?.wave || 1));
   }
 
-  const health = String(input.projectHealth || "").trim();
+  const health = normalizeProjectHealthAlias(String(input.projectHealth || "").trim());
   const projectHealth = ["good", "needs-work", "critical"].includes(health)
     ? health
     : inferProjectHealth(analysisText);

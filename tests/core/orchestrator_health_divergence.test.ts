@@ -133,3 +133,58 @@ describe("computeHealthDivergence", () => {
     }
   });
 });
+
+// ── Planner health alias normalization (Task 1) ───────────────────────────────
+
+describe("computeHealthDivergence — planner health alias normalization", () => {
+  it("alias 'healthy' resolves to 'good' — produces none divergence, no warning", () => {
+    const result = computeHealthDivergence(ORCHESTRATOR_STATUS.OPERATIONAL, "healthy");
+    assert.equal(result.divergenceState, HEALTH_DIVERGENCE_STATE.NONE,
+      "alias 'healthy' must resolve to 'good' and produce none divergence");
+    assert.equal(result.pipelineStatus, PIPELINE_HEALTH_STATUS.HEALTHY);
+    assert.equal(result.isWarning, false);
+  });
+
+  it("alias 'warning' resolves to 'needs-work' — produces planner_warning", () => {
+    const result = computeHealthDivergence(ORCHESTRATOR_STATUS.OPERATIONAL, "warning");
+    assert.equal(result.divergenceState, HEALTH_DIVERGENCE_STATE.PLANNER_WARNING,
+      "alias 'warning' must resolve to 'needs-work' and produce planner_warning divergence");
+    assert.equal(result.pipelineStatus, PIPELINE_HEALTH_STATUS.WARNING);
+    assert.equal(result.isWarning, true);
+  });
+
+  it("alias 'HEALTHY' (uppercase) resolves to 'good'", () => {
+    const result = computeHealthDivergence(ORCHESTRATOR_STATUS.OPERATIONAL, "HEALTHY");
+    assert.equal(result.divergenceState, HEALTH_DIVERGENCE_STATE.NONE);
+    assert.equal(result.pipelineStatus, PIPELINE_HEALTH_STATUS.HEALTHY);
+  });
+
+  it("alias 'WARNING' (uppercase) resolves to 'needs-work'", () => {
+    const result = computeHealthDivergence(ORCHESTRATOR_STATUS.OPERATIONAL, "WARNING");
+    assert.equal(result.divergenceState, HEALTH_DIVERGENCE_STATE.PLANNER_WARNING);
+    assert.equal(result.pipelineStatus, PIPELINE_HEALTH_STATUS.WARNING);
+  });
+
+  it("alias 'healthy' + degraded operational → operational_degraded_planner_ok", () => {
+    // Alias resolves to 'good' — degraded + good = operational_degraded_planner_ok
+    const result = computeHealthDivergence(ORCHESTRATOR_STATUS.DEGRADED, "healthy");
+    assert.equal(result.divergenceState, HEALTH_DIVERGENCE_STATE.OPERATIONAL_DEGRADED_PLANNER_OK);
+    assert.equal(result.pipelineStatus, PIPELINE_HEALTH_STATUS.WARNING);
+    assert.equal(result.isWarning, true);
+  });
+
+  it("alias 'warning' + degraded operational → both_degraded (negative path)", () => {
+    // Alias resolves to 'needs-work' — degraded + needs-work = both_degraded
+    const result = computeHealthDivergence(ORCHESTRATOR_STATUS.DEGRADED, "warning");
+    assert.equal(result.divergenceState, HEALTH_DIVERGENCE_STATE.BOTH_DEGRADED);
+    assert.equal(result.pipelineStatus, PIPELINE_HEALTH_STATUS.CRITICAL);
+    assert.equal(result.isWarning, true);
+  });
+
+  it("unrecognized alias still produces unknown divergence (negative path)", () => {
+    const result = computeHealthDivergence(ORCHESTRATOR_STATUS.OPERATIONAL, "ok");
+    assert.equal(result.divergenceState, HEALTH_DIVERGENCE_STATE.UNKNOWN);
+    assert.equal(result.pipelineStatus, PIPELINE_HEALTH_STATUS.UNKNOWN);
+    assert.equal(result.isWarning, false);
+  });
+});

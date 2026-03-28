@@ -13,6 +13,8 @@ import {
   buildDriftDebtTasks,
   checkPacketCompleteness,
   UNRECOVERABLE_PACKET_REASONS,
+  PLANNER_HEALTH_ALIASES,
+  normalizeProjectHealthAlias,
 } from "../../src/core/prometheus.js";
 import { compilePrompt } from "../../src/core/prompt_compiler.js";
 import { isNonSpecificVerification, validatePlanContract } from "../../src/core/plan_contract_validator.js";
@@ -1389,5 +1391,91 @@ describe("UNRECOVERABLE_PACKET_REASONS", () => {
       /Cannot add property/,
       "UNRECOVERABLE_PACKET_REASONS must be frozen"
     );
+  });
+});
+
+// ── Task 1: PLANNER_HEALTH_ALIASES + normalizeProjectHealthAlias ──────────────
+
+describe("PLANNER_HEALTH_ALIASES and normalizeProjectHealthAlias (Task 1)", () => {
+  it("PLANNER_HEALTH_ALIASES maps healthy → good and warning → needs-work", () => {
+    assert.equal(PLANNER_HEALTH_ALIASES["healthy"], "good");
+    assert.equal(PLANNER_HEALTH_ALIASES["warning"], "needs-work");
+  });
+
+  it("PLANNER_HEALTH_ALIASES is frozen — mutation throws", () => {
+    assert.throws(
+      () => { (PLANNER_HEALTH_ALIASES as any).ok = "good"; },
+      /Cannot add property|object is not extensible/i
+    );
+  });
+
+  it("normalizeProjectHealthAlias maps 'healthy' → 'good'", () => {
+    assert.equal(normalizeProjectHealthAlias("healthy"), "good");
+  });
+
+  it("normalizeProjectHealthAlias maps 'warning' → 'needs-work'", () => {
+    assert.equal(normalizeProjectHealthAlias("warning"), "needs-work");
+  });
+
+  it("normalizeProjectHealthAlias is case-insensitive", () => {
+    assert.equal(normalizeProjectHealthAlias("HEALTHY"), "good");
+    assert.equal(normalizeProjectHealthAlias("WARNING"), "needs-work");
+    assert.equal(normalizeProjectHealthAlias("Healthy"), "good");
+    assert.equal(normalizeProjectHealthAlias("Warning"), "needs-work");
+  });
+
+  it("normalizeProjectHealthAlias passes through canonical values unchanged", () => {
+    assert.equal(normalizeProjectHealthAlias("good"), "good");
+    assert.equal(normalizeProjectHealthAlias("needs-work"), "needs-work");
+    assert.equal(normalizeProjectHealthAlias("critical"), "critical");
+  });
+
+  it("normalizeProjectHealthAlias returns the input for unknown values (no silent swallow)", () => {
+    assert.equal(normalizeProjectHealthAlias("unknown-value"), "unknown-value");
+    assert.equal(normalizeProjectHealthAlias("ok"), "ok");
+  });
+
+  it("normalizeProjectHealthAlias handles empty/null/undefined without throwing", () => {
+    assert.equal(normalizeProjectHealthAlias(""), "");
+    assert.equal(normalizeProjectHealthAlias(null as any), "");
+    assert.equal(normalizeProjectHealthAlias(undefined as any), "");
+  });
+
+  it("normalizePrometheusParsedOutput accepts 'healthy' alias and scores healthField=1.0", () => {
+    const parsed = {
+      projectHealth: "healthy",
+      plans: [{ task: "Harden trust boundary", role: "evolution-worker", wave: 1 }],
+    };
+    const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
+    assert.equal(result.projectHealth, "good",
+      "alias 'healthy' must be normalized to canonical 'good'");
+    assert.equal(result.parserConfidenceComponents?.healthField, 1.0,
+      "explicit alias must score healthField=1.0, not 0.8");
+  });
+
+  it("normalizePrometheusParsedOutput accepts 'warning' alias and scores healthField=1.0", () => {
+    const parsed = {
+      projectHealth: "warning",
+      plans: [{ task: "Harden trust boundary", role: "evolution-worker", wave: 1 }],
+    };
+    const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
+    assert.equal(result.projectHealth, "needs-work",
+      "alias 'warning' must be normalized to canonical 'needs-work'");
+    assert.equal(result.parserConfidenceComponents?.healthField, 1.0,
+      "explicit alias must score healthField=1.0, not 0.8");
+  });
+
+  it("normalizePrometheusParsedOutput still infers when projectHealth is absent (negative path)", () => {
+    const parsed = {
+      // no projectHealth field
+      plans: [{ task: "Harden trust boundary", role: "evolution-worker", wave: 1 }],
+    };
+    const result = normalizePrometheusParsedOutput(parsed, { raw: "" });
+    assert.equal(result.parserConfidenceComponents?.healthField, 0.8,
+      "missing projectHealth must still score healthField=0.8");
+    const penalty = (result.parserConfidencePenalties as any[]).find(
+      (p: any) => p.component === "healthField"
+    );
+    assert.ok(penalty, "must have a healthField penalty when health is missing");
   });
 });

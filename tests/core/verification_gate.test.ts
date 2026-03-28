@@ -728,3 +728,107 @@ describe("worker_runner — mergedSha extraction in parseWorkerResponse (Task 3)
       "mergedSha must be null when explicit marker is absent");
   });
 });
+
+// ── Task 2: Strengthen done-path artifact assertions across role profiles ──────
+
+describe("verification_gate — qa role done-path artifact enforcement (Task 2)", () => {
+  it("qa role done without SHA or npm output fails artifact gate", () => {
+    const result = validateWorkerContract("qa", {
+      status: "done",
+      fullOutput: [
+        "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass",
+        "BOX_PR_URL=https://github.com/org/repo/pull/55"
+        // No SHA or npm test output block
+      ].join("\n")
+    });
+    assert.equal(result.passed, false, "qa role done without artifact must fail");
+    const hasArtifactGap = result.gaps.some(g => /sha|npm|post-merge|test output/i.test(g));
+    assert.ok(hasArtifactGap,
+      `expected artifact gap for qa role; got: [${result.gaps.join("; ")}]`
+    );
+  });
+
+  it("qa role done with explicit BOX_MERGED_SHA and npm test block passes artifact gate", () => {
+    const result = validateWorkerContract("qa", {
+      status: "done",
+      fullOutput: [
+        "BOX_MERGED_SHA=abc1234f",
+        "===NPM TEST OUTPUT START===",
+        "# tests 20",
+        "# pass 20",
+        "# fail 0",
+        "===NPM TEST OUTPUT END===",
+        "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass",
+        "BOX_PR_URL=https://github.com/org/repo/pull/55"
+      ].join("\n")
+    });
+    const artifactGap = result.gaps.find(g => /sha|npm|post-merge|test output/i.test(g));
+    assert.equal(artifactGap, undefined,
+      `qa done with BOX_MERGED_SHA + npm block must pass artifact gate; gaps: [${result.gaps.join("; ")}]`
+    );
+  });
+
+  it("negative path: qa role done with unfilled placeholder is rejected", () => {
+    const result = validateWorkerContract("qa", {
+      status: "done",
+      fullOutput: [
+        "POST_MERGE_TEST_OUTPUT placeholder not replaced",
+        "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass",
+        "BOX_PR_URL=https://github.com/org/repo/pull/55"
+      ].join("\n")
+    });
+    assert.equal(result.passed, false);
+    assert.ok(result.gaps.some(g => /placeholder/i.test(g)),
+      `expected placeholder gap for qa role; got: [${result.gaps.join("; ")}]`
+    );
+  });
+});
+
+describe("verification_gate — security role done-path artifact enforcement (Task 2)", () => {
+  it("security role done without SHA fails artifact gate", () => {
+    const result = validateWorkerContract("security", {
+      status: "done",
+      fullOutput: [
+        "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass; SECURITY=pass",
+        "BOX_PR_URL=https://github.com/org/repo/pull/77"
+        // No SHA or npm test output
+      ].join("\n")
+    });
+    assert.equal(result.passed, false, "security role done without artifact must fail");
+    const hasArtifactGap = result.gaps.some(g => /sha|npm|post-merge|test output/i.test(g));
+    assert.ok(hasArtifactGap,
+      `expected artifact gap for security role; got: [${result.gaps.join("; ")}]`
+    );
+  });
+
+  it("security role done with SHA and npm test output passes artifact gate", () => {
+    const result = validateWorkerContract("security", {
+      status: "done",
+      fullOutput: [
+        "BOX_MERGED_SHA=deadbeef",
+        "# tests 15 pass 15 fail 0",
+        "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; EDGE_CASES=pass; SECURITY=pass",
+        "BOX_PR_URL=https://github.com/org/repo/pull/77"
+      ].join("\n")
+    });
+    const artifactGap = result.gaps.find(g => /sha|npm|post-merge|test output/i.test(g));
+    assert.equal(artifactGap, undefined,
+      `security done with SHA + test output must pass artifact gate; gaps: [${result.gaps.join("; ")}]`
+    );
+  });
+
+  it("api role done without artifact fails gate (negative path)", () => {
+    const result = validateWorkerContract("api", {
+      status: "done",
+      fullOutput: [
+        "VERIFICATION_REPORT: BUILD=pass; TESTS=pass; API=pass; EDGE_CASES=pass",
+        "BOX_PR_URL=https://github.com/org/repo/pull/33"
+      ].join("\n")
+    });
+    assert.equal(result.passed, false, "api role done without artifact must fail");
+    const hasArtifactGap = result.gaps.some(g => /sha|npm|post-merge|test output/i.test(g));
+    assert.ok(hasArtifactGap,
+      `expected artifact gap for api role; got: [${result.gaps.join("; ")}]`
+    );
+  });
+});

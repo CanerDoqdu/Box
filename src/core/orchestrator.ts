@@ -139,7 +139,10 @@ export const PIPELINE_HEALTH_STATUS = Object.freeze({
  */
 export function computeHealthDivergence(operationalStatus, plannerHealth) {
   const opStatus = String(operationalStatus || "").toLowerCase().trim();
-  const phStatus = String(plannerHealth || "").toLowerCase().trim();
+  // Normalize aliases: "healthy" → "good", "warning" → "needs-work"
+  // so planner outputs using the prompt schema form are handled correctly.
+  const phRaw = String(plannerHealth || "").toLowerCase().trim();
+  const phStatus = phRaw === "healthy" ? "good" : phRaw === "warning" ? "needs-work" : phRaw;
 
   const isOperational = opStatus === ORCHESTRATOR_STATUS.OPERATIONAL;
   const isDegraded    = opStatus === ORCHESTRATOR_STATUS.DEGRADED;

@@ -620,3 +620,71 @@ describe("PACKET_VIOLATION_CODE — deterministic violation taxonomy", () => {
     });
   });
 });
+
+// ── Task 3: Harden forbidden command checks — plan contract level ─────────────
+
+describe("plan_contract_validator — forbidden command checks (Task 3 hardening)", () => {
+  it("detects forbidden bash in verification field with leading whitespace (trimming fix)", () => {
+    const plan = {
+      task: "Implement something long enough here",
+      role: "worker",
+      wave: 1,
+      verification: "  bash scripts/run_tests.sh",
+      dependencies: [],
+      acceptance_criteria: ["tests pass"],
+      capacityDelta: 0.1,
+      requestROI: 1.5,
+    };
+    const result = validatePlanContract(plan);
+    assert.equal(result.valid, false,
+      "leading-whitespace bash in verification must be detected as forbidden");
+    assert.ok(
+      result.violations.some(v => v.field === "verification" && v.code === PACKET_VIOLATION_CODE.FORBIDDEN_COMMAND),
+      `expected FORBIDDEN_COMMAND violation on verification; got: [${JSON.stringify(result.violations)}]`
+    );
+  });
+
+  it("detects forbidden node --test glob in verification_commands with leading whitespace", () => {
+    const plan = {
+      task: "Implement something long enough here",
+      role: "worker",
+      wave: 1,
+      verification: "tests/core/foo.test.ts — test: should pass",
+      verification_commands: ["  node --test tests/**/*.test.ts"],
+      dependencies: [],
+      acceptance_criteria: ["tests pass"],
+      capacityDelta: 0.1,
+      requestROI: 1.5,
+    };
+    const result = validatePlanContract(plan);
+    assert.equal(result.valid, false,
+      "leading-whitespace node --test glob in verification_commands must be detected as forbidden");
+    assert.ok(
+      result.violations.some(v =>
+        v.field === "verification_commands[0]" && v.code === PACKET_VIOLATION_CODE.FORBIDDEN_COMMAND
+      ),
+      `expected FORBIDDEN_COMMAND on verification_commands[0]; got: [${JSON.stringify(result.violations)}]`
+    );
+  });
+
+  it("negative path: clean commands with leading whitespace are NOT flagged as forbidden", () => {
+    const plan = {
+      task: "Implement something long enough here",
+      role: "worker",
+      wave: 1,
+      verification: "tests/core/foo.test.ts — test: should pass",
+      verification_commands: ["  npm test", "  npm run lint"],
+      dependencies: [],
+      acceptance_criteria: ["tests pass"],
+      capacityDelta: 0.1,
+      requestROI: 1.5,
+    };
+    const result = validatePlanContract(plan);
+    const forbiddenViolations = result.violations.filter(
+      v => v.code === PACKET_VIOLATION_CODE.FORBIDDEN_COMMAND
+    );
+    assert.equal(forbiddenViolations.length, 0,
+      `canonical commands with leading whitespace must not be flagged; got: [${JSON.stringify(forbiddenViolations)}]`
+    );
+  });
+});
